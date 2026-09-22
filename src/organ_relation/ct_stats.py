@@ -141,7 +141,8 @@ def summarize(records: list[dict], anomalies: list[dict], excluded_count: int) -
 def git_state() -> dict:
     def run(*args):
         return subprocess.check_output(["git", "-C", str(PROJECT_ROOT), *args],
-                                       stderr=subprocess.DEVNULL, text=True).strip()
+                                       stderr=subprocess.DEVNULL, text=True,
+                                       encoding="utf-8").strip()
     try:
         if Path(run("rev-parse", "--show-toplevel")).resolve() != PROJECT_ROOT:
             return {"commit": None, "reason": "not an independent project repository"}
@@ -291,6 +292,9 @@ def audit(data_root: Path, config_path: Path, output_dir: Path) -> dict:
 
 
 def main(argv=None) -> int:
+    # Windows redirected stdout may otherwise encode Chinese paths as GBK.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT/"configs"/"ct_stats.json")

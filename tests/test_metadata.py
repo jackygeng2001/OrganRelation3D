@@ -14,7 +14,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"src"))
 from organ_relation.nifti_header import HeaderError, compare_geometry, parse_header, read_header
-from organ_relation.ct_stats import audit, quantile, select_training
+from organ_relation.ct_stats import audit, git_state, quantile, select_training
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -256,6 +256,17 @@ class AuditTests(unittest.TestCase):
     def test_quantiles(self):
         self.assertEqual(quantile([1.,2.,3.,4.], .5), 2.5)
         self.assertAlmostEqual(quantile([1.,2.,3.,4.], .9), 3.7)
+
+    def test_git_provenance_explicit_utf8_for_chinese_path(self):
+        with patch("organ_relation.ct_stats.subprocess.check_output",
+                   side_effect=[str(ROOT), "abc123", ""]) as run:
+            self.assertEqual(git_state(), {"commit":"abc123", "dirty":False})
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["encoding"], "utf-8")
+
+    def test_parent_repository_not_claimed_as_project_commit(self):
+        with patch("organ_relation.ct_stats.subprocess.check_output", return_value=str(ROOT.parent)):
+            self.assertIsNone(git_state()["commit"])
 
 
 if __name__ == "__main__":

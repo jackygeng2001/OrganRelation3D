@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "manifest": "dataset.json",
+  "split": "training",
+  "image_directory": "imagesTr",
+  "label_directory": "labelsTr",
+  "ct_id_min": 1,
+  "ct_id_max": 499,
+  "selection_basis": "AMOS local readme: IDs below 500 are CT; applies to training only; ID 500 excluded and requires separate test-set review",
+  "geometry_tolerance_mm": 0.001,
+  "axis_alignment_tolerance": 0.0001,
+  "header_bytes": 352
+}

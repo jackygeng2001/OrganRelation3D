@@ -1,0 +1,6 @@
+[project]
+name = "organ-relation"
+version = "0.1.0"
+description = "Full-scan organ relation segmentation: specification and CPU metadata audit"
+requires-python = ">=3.10"
+dependencies = []

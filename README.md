@@ -1,10 +1,11 @@
 # organ-relation
 
-完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。当前仅有方法规范、三平台开发规范及训练 CT 的 CPU 元数据统计；没有网络、训练、推理或 GPU 测试实现。
+完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。当前有方法规范、三平台开发规范、训练 CT 的 CPU 元数据统计和完整范围候选网格估算；没有实际重采样、网络、训练、推理或 GPU 测试实现。
 
 - [方法定义与待确认配置](METHOD_SPEC.md)
 - [开发和设备约束](AGENTS.md)
 - [元数据统计语义与局限](docs/metadata_audit.md)
+- [完整范围候选预处理研究（未冻结）](docs/preprocessing_candidates.md)
 - [Windows CPU](environments/windows-cpu.md)、[AMD ROCm](environments/amd-rocm.md)、[NVIDIA CUDA](environments/nvidia-cuda.md)
 
 ## 无需安装依赖
@@ -45,3 +46,13 @@ python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir 
 ## 后续门槛
 
 先审阅训练 CT 统计，再提出保留完整范围的候选重采样配置。保真度没有预设阈值；先报告实际几何损失和图像质量风险。完整网络建立后再提供 AMD 显存测试脚本，由用户同步到工作站执行。本轮不冻结输入尺寸、spacing 或评估协议。
+
+## 候选网格估算
+
+已有统计 JSON 后，无需访问原始 CT，只计算全部病例的三组候选尺寸、体素量、16/32 倍数补齐敏感性：
+
+```text
+python -B scripts/estimate_preprocessing.py --metadata reports/ct_stats_20260922_final/metadata.json --output-dir reports/candidates_run01
+```
+
+候选参数见 configs/preprocessing_candidates.json，明确标为 exploratory_not_frozen。输出 report.md、cases.csv（200×3 行）和 estimates.json；不能将 estimated grid 或假设 padding 当作已经确认的预处理实现或显存验收。

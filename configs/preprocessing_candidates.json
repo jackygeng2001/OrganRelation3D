@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "status": "exploratory_not_frozen",
+  "expected_training_ct_count": 200,
+  "estimate_grid": "ceil_cell_coverage_centered_extension",
+  "spacing_axes": "R,A,S",
+  "display_shape_axes": "D=S,H=A,W=R (report convention only)",
+  "hypothetical_padding_multiples": [16, 32],
+  "padding_note": "Sensitivity estimates only; no U-Net stride, padding placement, fill value, valid mask or loss domain is selected.",
+  "candidates": [
+    {"id": "A", "spacing_ras_mm": [1.5, 1.5, 3.0], "description": "Finer in-plane sampling comparison"},
+    {"id": "B", "spacing_ras_mm": [2.0, 2.0, 3.0], "description": "Reduced in-plane voxel count at same through-plane target"},
+    {"id": "C", "spacing_ras_mm": [2.0, 2.0, 5.0], "description": "Thick-slice comparison; coarsens originally thin-slice scans"}
+  ]
+}

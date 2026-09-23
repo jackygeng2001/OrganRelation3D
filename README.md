@@ -62,3 +62,5 @@ python -B scripts/estimate_preprocessing.py --metadata reports/ct_stats_20260922
 10 例 × A/B/C 的隔离 CPU 协议、强度缩放、物理网格、往返指标和运行命令见 [fidelity_protocol.md](docs/fidelity_protocol.md)。配置 [fidelity_pilot.json](configs/fidelity_pilot.json)，入口 scripts/test_resampling_fidelity.py；无需且不安装 torch。未安装可选 CPU 包时，保真度测试跳过，不能称已完成全部测试。
 
 可变完整输入与解码尺寸对齐的工程研究见 [variable_shape_unet_review.md](docs/variable_shape_unet_review.md)。这些研究均不冻结正式 spacing/尺寸，不新增节点 mask，也不能代替完整网络 AMD 显存测试。
+
+本轮 10 例真实 CPU 运行、53 项测试及限制记录见 [fidelity_cpu_validation.md](docs/fidelity_cpu_validation.md)；病例级报告与复核图仅留在本地 reports/fidelity_20260923_run01/。

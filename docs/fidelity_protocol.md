@@ -22,7 +22,7 @@
 
 - 每例先在原 CT/标签网格分别执行恒等变换；CT 最大绝对误差 <=1e-4 HU、标签完全一致。先通过合成测试：世界坐标线性斜坡、翻转/置换、中心与完整边界、已知块体积/最近邻、细小结构消失、原本缺失、非法类别、scaling/错位拒绝和 CT 指标分块连续性。
 - 全部 15 类记录原始/目标/返回体素数和 mm³ 体积；体素体积取各自 affine 的 3x3 行列式绝对值。体积变化报告 target 对 original 与 roundtrip 对 original 两种。
-- 原始类存在时计算原空间往返 Dice；原本不存在记 NA 并单列。原本存在但目标或返回计数为零分别标记意外消失。此处对存在病例平均仅为保真度描述，不冻结正式训练或评估空类规则。
+- 原始标签中类存在时计算原空间往返 Dice；原标签计数为零记 NA 并单列，不据此断言解剖上不存在（仍可能涉及扫描覆盖或标注情况）。原本有标签但目标或返回计数为零分别标记意外消失。此处对存在病例平均仅为保真度描述，不冻结正式训练或评估空类规则，也不把存在状态送入模型。
 - CT 返回原网格后记录全局/前景 MAE、各器官均值/标准差、前景相邻体素物理梯度幅度比。梯度只纳入两个端点均为前景的对，但允许跨器官类别，反映总体高频响应，不等同诊断质量评分。
 - 局部对比度=原标签内平均 HU 减去外部 2–5 mm 且标签为背景的环内均值。记录原始值、返回值和绝对幅度比；原始对比度为零时比值 NA。背景环不是均匀组织，增强扫描也不同，因此不设置通过阈值。
 - 每例保存直接目标网格叠加图 A/B/C，另保存原网格对应切面的 original/A/B/C 对比图（整体、左右肾上腺）。毫米纵横比，固定显示窗 [-160,240] HU；该窗口不作用于数值测量。真实标签仅帮助本次评估选取显示 ROI，绝不用于模型裁剪/节点判断。
@@ -39,8 +39,11 @@ python -m venv .venv-resampling
 .\.venv-resampling\Scripts\python.exe -m pip install -r environments/requirements-resampling-cpu.txt
 .\.venv-resampling\Scripts\python.exe -B -m unittest discover -s tests -v
 .\.venv-resampling\Scripts\python.exe -B scripts/test_resampling_fidelity.py --data-root "..\..\amos22" --metadata reports/ct_stats_20260922_final/metadata.json --output-dir reports/fidelity_run01
+.\.venv-resampling\Scripts\python.exe -B scripts/summarize_fidelity.py --report-dir reports/fidelity_run01
 ```
 
 若 venv 已存在无需重建或重装。输出必须是与数据目录分开的新目录。全部病例结果及图像留在被 Git 忽略的 reports/；不上传影像。完成后看 report.md、organ_summary.csv、organ_metrics.csv、ct_organ_metrics.csv、review_cases.csv 和逐例 JSON。未完成运行保留已经完成的逐候选结果，禁止把部分输出当成完整结论。
+
+第二条汇总命令只读已完成的结果和 PNG，不再读取原始体积；增加厚层/薄层分组的 review_summary.md、目标网格概览拼图和显式双向索引矩阵 spatial_transforms.json，并记录汇总代码与输入结果哈希。
 
 尺寸不整除的后续工程研究见 [variable_shape_unet_review.md](variable_shape_unet_review.md)：优先保存各级实际 shape、按 skip size 对齐解码，不先增加改变节点域的 padding 或 mask；仍需未来完整网络尺寸、相位、梯度与 AMD 显存实测。

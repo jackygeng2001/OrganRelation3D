@@ -109,6 +109,19 @@ class FidelityTests(unittest.TestCase):
         self.assertEqual(g['gradient_pair_count'],g2['gradient_pair_count'])
         self.assertAlmostEqual(o[10]['local_contrast_abs_ratio'],1)
 
+    def test_label_scaling_is_applied_and_fractional_labels_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ip,lp=Path(tmp)/'ct.nii.gz',Path(tmp)/'label.nii.gz'
+            raw=np.arange(8*9*7,dtype=np.int16).reshape((8,9,7))
+            im=nib.Nifti1Image(raw,np.eye(4));im.header.set_xyzt_units('mm');nib.save(im,ip)
+            stored=(raw%8).astype(np.uint8)
+            label=nib.Nifti1Image(stored,np.eye(4));label.header.set_xyzt_units('mm')
+            label.header.set_slope_inter(2.,0.);nib.save(label,lp)
+            _,scaled,_,_,_=load_pair(ip,lp)
+            np.testing.assert_array_equal(scaled,stored*2)
+            label.header.set_slope_inter(.5,0.);nib.save(label,lp)
+            with self.assertRaises(ValueError):load_pair(ip,lp)
+
     def test_sequential_pilot_end_to_end_and_source_unchanged(self):
         from organ_relation.fidelity_pilot import main
         root=Path(__file__).resolve().parents[1]
@@ -138,6 +151,14 @@ class FidelityTests(unittest.TestCase):
             self.assertEqual(len(result['cases']),8)
             self.assertEqual(len(result['organ_summary']),45)
             self.assertEqual(len(list((out/'visuals').glob('*.png'))),48)
+            import importlib.util
+            spec=importlib.util.spec_from_file_location('fidelity_summary',root/'scripts/summarize_fidelity.py')
+            module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            self.assertTrue(module.summarize(out).is_file())
+            transforms=json.loads((out/'spatial_transforms.json').read_text())['transforms']
+            self.assertEqual(len(transforms),24)
+            for row in transforms:
+                np.testing.assert_allclose(np.array(row['target_to_original_image_index'])@np.array(row['original_image_to_target_index']),np.eye(4),atol=1e-10)
             for name,content in before.items():self.assertEqual((data/name).read_bytes(),content)
 
 if __name__=='__main__':unittest.main()

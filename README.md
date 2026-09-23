@@ -8,9 +8,9 @@
 - [完整范围候选预处理研究（未冻结）](docs/preprocessing_candidates.md)
 - [Windows CPU](environments/windows-cpu.md)、[AMD ROCm](environments/amd-rocm.md)、[NVIDIA CUDA](environments/nvidia-cuda.md)
 
-## 无需安装依赖
+## 元数据统计无需安装依赖
 
-Python >=3.10，当前程序只使用标准库。直接从项目根目录运行，无需 pip install，不导入 torch，不改 GPU 环境。
+Python >=3.10，元数据统计程序只使用标准库。直接从项目根目录运行，无需 pip install，不导入 torch，不改 GPU 环境。真实重采样的隔离 CPU 环境另见下文。
 
 ```powershell
 python -B -m unittest discover -s tests -v
@@ -41,7 +41,7 @@ python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir 
 
 ## 项目布局
 
-`src/organ_relation/` 当前只有元数据审查模块；`scripts/` 是免安装入口；`tests/` 是合成头和端到端统计测试；`configs/` 是统计配置；`docs/` 和 `environments/` 是方法外的说明。网络、训练、推理模块暂不创建，后续经明确任务逐阶段增加。
+`src/organ_relation/` 包含元数据、候选估算和 CPU 保真度模块；`scripts/` 是入口；`tests/` 包含合成头、几何和统计测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是方法外的说明。网络、训练、推理模块暂不创建，后续经明确任务逐阶段增加。
 
 ## 后续门槛
 
@@ -56,3 +56,9 @@ python -B scripts/estimate_preprocessing.py --metadata reports/ct_stats_20260922
 ```
 
 候选参数见 configs/preprocessing_candidates.json，明确标为 exploratory_not_frozen。输出 report.md、cases.csv（200×3 行）和 estimates.json；不能将 estimated grid 或假设 padding 当作已经确认的预处理实现或显存验收。
+
+## 少量真实 CT 保真度
+
+10 例 × A/B/C 的隔离 CPU 协议、强度缩放、物理网格、往返指标和运行命令见 [fidelity_protocol.md](docs/fidelity_protocol.md)。配置 [fidelity_pilot.json](configs/fidelity_pilot.json)，入口 scripts/test_resampling_fidelity.py；无需且不安装 torch。未安装可选 CPU 包时，保真度测试跳过，不能称已完成全部测试。
+
+可变完整输入与解码尺寸对齐的工程研究见 [variable_shape_unet_review.md](docs/variable_shape_unet_review.md)。这些研究均不冻结正式 spacing/尺寸，不新增节点 mask，也不能代替完整网络 AMD 显存测试。

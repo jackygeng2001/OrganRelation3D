@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "status": "pilot_not_frozen",
+  "grid": "ceil_cell_coverage_centered_extension",
+  "ct_interpolation": "trilinear",
+  "ct_downsample_antialias": "gaussian_sigma_max((target/source-1)/2,0)_source_voxels",
+  "gaussian_truncate": 3.0,
+  "boundary": "nearest_edge_replication",
+  "label_interpolation": "nearest",
+  "network_padding": false,
+  "evaluation_chunk_slices": 8,
+  "memory_working_limit_gib": 3.0,
+  "available_memory_safety_factor": 1.3,
+  "display_window_hu": [-160, 240],
+  "local_contrast_ring_mm": [2.0, 5.0],
+  "candidates": [
+    {"id": "A", "spacing_ras_mm": [1.5, 1.5, 3.0]},
+    {"id": "B", "spacing_ras_mm": [2.0, 2.0, 3.0]},
+    {"id": "C", "spacing_ras_mm": [2.0, 2.0, 5.0]}
+  ],
+  "cases": [
+    {"id": "amos_0043", "reason": "Typical candidate voxel count; original 5 mm thick slices"},
+    {"id": "amos_0097", "reason": "Largest unpadded target volume for A/B/C; wide physical FOV"},
+    {"id": "amos_0119", "reason": "Longest superior-inferior coverage, about 700 mm"},
+    {"id": "amos_0133", "reason": "Maximum anisotropy; finest in-plane spacing; original 5 mm"},
+    {"id": "amos_0279", "reason": "Largest original voxel count; 1.25 mm thin-slice group"},
+    {"id": "amos_0214", "reason": "2 mm group with long scan and high original voxel count"},
+    {"id": "amos_0245", "reason": "2.5 mm group; first listed case of this group"},
+    {"id": "amos_0001", "reason": "768x768 thick-slice case; stored intensity intercept -1024"},
+    {"id": "amos_0004", "reason": "512x512 thick-slice case; stored intensity intercept 0"},
+    {"id": "amos_0137", "reason": "Largest C input after hypothetical pad16 in previous estimate; no padding applied here"}
+  ]
+}

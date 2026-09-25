@@ -104,9 +104,9 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 | SpaceToNode | F, coarse_probabilities | OrganNodes(z0, mass, centroid, size, confidence) |
 | DynamicRelation | z0, centroid, size, confidence | zK:[B,15,C]；可选 RelationResult(zK, rounds) |
 | NodeToSpace | 原始 F, zK | G:[B,Cg,Df,Hf,Wf]；可选 NodeToSpaceResult(G,Q,K,V,A) |
-| ResidualFusion | F,G | Fprime |
+| ResidualFusion | 原始 F,G | Fprime=F+phi(G)，与 F 同形 |
 | Decoder3D | Fprime, skips | final_logits |
-| Segmentor | 仅 image | coarse_logits, final_logits |
+| Segmentor.forward | 仅 image | SegmentorOutput(coarse_logits, final_logits) |
 | JointLoss | logits, label | 总损失与分量 |
 | Evaluator | prediction, label, geometry | 逐病例逐器官指标 |
 
@@ -115,6 +115,8 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 `src/organ_relation/dynamic_relation.py` 实现 `DynamicRelation(channels=C, relation_channels=Cr, rounds=K)` 和显式 `FormulaGRU`。C、Cr、K 须显式给出；默认前向仅返回 zK，`return_diagnostics=True` 返回每轮 `RelationRound(alpha, messages, z)`，分别对应该轮旧状态计算的边权、接收消息及同步更新后的状态，均保留梯度。属性以独立具名参数传入，质量 mass 不进入关系描述；不接受标签或外部边 mask。当前限定 FP32/FP64、关闭 autocast，拒绝非有限输入；不改变公式。参数初始化采用 PyTorch Linear 默认实现，正式初始化及随机种子应随实验配置记录；K 不存于 state_dict，重建时须使用原配置。
 
 `src/organ_relation/node_to_space.py` 实现 `NodeToSpace(channels=C, attention_channels=da, content_channels=Cg, beta_init=0.0)`。三个维度显式给出；默认返回 G，`return_diagnostics=True` 返回具名 G/Q/K/V/A，均保留梯度。Q:[B,15,da]、K:[B,N,da]、V:[B,15,Cg]、A:[B,15,N]，空间展开按 D/H/W（W 最快）。三个投影采用无偏置 Linear；beta 为独立参数向量 [15]，默认零初始化是可配置工程初值，不是冻结的正式实验配置。前向只接收原始 F 和 zK，无法从 shape 推断张量来源，调用方须保证来源正确。当前限定 FP32/FP64、关闭 autocast，保留有限性检查；AMD 性能阶段须审查其潜在 GPU 同步开销。本实现不含残差融合。
+
+`ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅含 Cg→C 的 1x1x1 Conv3d 与 F 相加，无额外尺度、gate、归一化或激活。`Segmentor(SegmentorConfig)` 按上述冻结顺序调用各模块，C 从骨干最深层宽度派生；phi bias 与粗头 bias 分别显式配置。`forward(image)` 仅返回原特征网格 coarse logits 与输入网格 final logits，不额外上采样粗头或执行最终 softmax。`forward_with_diagnostics(image)` 是独立的显式诊断入口，返回具名中间结果并保留梯度；普通前向不创建关系/回写诊断结果或模块缓存。配置见 `src/organ_relation/segmentor_config.py`；`configs/segmentor_micro.json` 只用于 CPU 合成测试，不冻结任何正式实验配置。本阶段未实现联合损失代码或训练流程。
 
 ## 尚待确认，不能当作已冻结配置
 

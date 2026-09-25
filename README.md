@@ -1,6 +1,6 @@
 # organ-relation
 
-完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 数据工具、可变尺寸 U-Net 骨干、CoarseHead、SpaceToNode、动态有向关系推理与显式 GRU，以及 NodeToSpace 空间匹配与节点内容回写。尚未实现残差融合、联合损失、完整 Segmentor 或正式训练。
+完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 数据工具、可变尺寸 U-Net、器官节点与动态关系推理、空间回写、纯残差融合及完整 Segmentor 前向图。尚未实现联合损失、训练入口、optimizer、checkpoint 或正式训练。
 
 - [方法定义与待确认配置](METHOD_SPEC.md)
 - [开发和设备约束](AGENTS.md)
@@ -41,7 +41,7 @@ python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir 
 
 ## 项目布局
 
-`src/organ_relation/` 包含数据工具、骨干、粗头、节点构建、动态关系和空间回写模块；`scripts/` 是入口；`tests/` 包含数据、几何、网络模块及公式/梯度测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。残差融合、完整 Segmentor、训练与真实数据推理尚未实现。
+`src/organ_relation/` 包含数据工具及完整分割前向模块；`scripts/` 是工具入口；`tests/` 包含数据、几何、网络模块及公式/梯度测试；`configs/` 是探索和 CPU 微型配置；`docs/` 和 `environments/` 是说明。训练与真实数据推理流程尚未实现。
 
 ## 后续门槛
 
@@ -166,4 +166,30 @@ Q=W_Q(zK):[B,15,da]，K=W_K(F):[B,N,da]，V=W_V(zK):[B,15,Cg]。三个 Linear �
 .\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_node_to_space.py -v
 ```
 
-测试包含手算、独立标量循环、FP64 输入与全部参数数值梯度，以及已有模块至 G 的 CPU 合成梯度链路；未实现 Segmentor 或训练损失。既有全部回归命令见上文。
+Node-to-Space 单模块测试包含手算、独立标量循环、FP64 输入与全部参数数值梯度，以及已有模块至 G 的 CPU 合成梯度链路；完整 Segmentor 集成见下文，尚未实现训练损失。既有全部回归命令见上文。
+
+## 纯残差融合与完整 Segmentor 前向
+
+`ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅计算 `Fprime=F+phi(G)`，phi 是 Cg→C 的 1x1x1 Conv3d，bias 必须显式配置。无 scale、concat、gate、归一化或激活。
+
+`Segmentor(SegmentorConfig)` 直接复用已验收模块。`forward(image)` 唯一输入是 `[B,1,D,H,W]`，返回 `SegmentorOutput(coarse_logits, final_logits)`，形状分别为 `[B,16,Df,Hf,Wf]` 和 `[B,16,D,H,W]`。不计算监督损失，不上采样粗 logits，不对最终 logits 执行 softmax。
+
+```text
+image → Encoder → F,skips
+F → CoarseHead → logits,P
+F,P → SpaceToNode → z0,centroid,size,confidence
+z0,centroid,size,confidence → DynamicRelation → zK
+原 F,zK → NodeToSpace → G
+原 F,G → ResidualFusion → Fprime
+Fprime,原 skips → Decoder → final_logits
+```
+
+配置类 `src/organ_relation/segmentor_config.py` 不依赖 torch；骨干参数、coarse_bias、fusion_bias、epsilon、Cr、K、da、Cg、beta_init 均显式记录。C 从骨干末级派生，避免接口通道配置冲突。`configs/segmentor_micro.json` 明确仅供 CPU 合成验证；其 `[4,8,16]` 通道、K=2、bias 和其他数值均不是正式实验默认值。样例输入 `[1,1,17,18,19]` 的 coarse/final 形状分别为 `[1,16,5,5,5]`、`[1,16,17,18,19]`。
+
+独立的 `forward_with_diagnostics(image)` 返回 `SegmentorDiagnostics(output, encoder, coarse, nodes, relation, writeback, fused)`，用于只读检查来源与梯度。普通 forward 不接受诊断参数，不返回 Q/K/V/A 或轮次历史，不向模块属性缓存中间结果；自动微分仍保留反向所需计算图。诊断入口的中间张量不 detach，长期持有会增加内存占用。
+
+```powershell
+.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_segmentor.py -v
+```
+
+新增测试包括融合手算/解析梯度/数值梯度、对象身份与唯一调用顺序、各轴奇偶/单例尺寸、final-only 反向及诊断释放。仅测试代码会用 hooks 阻断 G 的梯度或替换 G，分别证明最终分支到粗头的路径经过回写，以及 G 对最终结果有影响；生产前向不含这些干预。既有全部回归命令见上文。保留有限性/autocast 检查及后续 AMD 同步开销审查事项；未验证 GPU、AMP、真实 CT 或正式训练。

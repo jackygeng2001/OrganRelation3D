@@ -107,7 +107,7 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 | ResidualFusion | 原始 F,G | Fprime=F+phi(G)，与 F 同形 |
 | Decoder3D | Fprime, skips | final_logits |
 | Segmentor.forward | 仅 image | SegmentorOutput(coarse_logits, final_logits) |
-| JointLoss | logits, label | 总损失与分量 |
+| JointLoss | coarse_logits, final_logits, label | JointLossResult(total, per_case, coarse, final) |
 | Evaluator | prediction, label, geometry | 逐病例逐器官指标 |
 
 当前粗头和节点的工程接口分别见 `src/organ_relation/coarse_head.py`、`src/organ_relation/space_to_node.py`。`OrganNodes` 的节点轴始终对应类别 1–15；centroid 最后一轴依次是特征网格 D、H、W。mass/centroid/size/confidence 使用具名字段，不与 z0 的语义通道混排；全部保留梯度。粗头 bias 与节点 epsilon 必须显式配置，未冻结正式数值。当前节点数值实现限定 FP32/FP64 且关闭 autocast；混合精度归约策略尚未验证。这些是接口与数值支持范围说明，不改变上述公式。
@@ -116,13 +116,16 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 
 `src/organ_relation/node_to_space.py` 实现 `NodeToSpace(channels=C, attention_channels=da, content_channels=Cg, beta_init=0.0)`。三个维度显式给出；默认返回 G，`return_diagnostics=True` 返回具名 G/Q/K/V/A，均保留梯度。Q:[B,15,da]、K:[B,N,da]、V:[B,15,Cg]、A:[B,15,N]，空间展开按 D/H/W（W 最快）。三个投影采用无偏置 Linear；beta 为独立参数向量 [15]，默认零初始化是可配置工程初值，不是冻结的正式实验配置。前向只接收原始 F 和 zK，无法从 shape 推断张量来源，调用方须保证来源正确。当前限定 FP32/FP64、关闭 autocast，保留有限性检查；AMD 性能阶段须审查其潜在 GPU 同步开销。本实现不含残差融合。
 
-`ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅含 Cg→C 的 1x1x1 Conv3d 与 F 相加，无额外尺度、gate、归一化或激活。`Segmentor(SegmentorConfig)` 按上述冻结顺序调用各模块，C 从骨干最深层宽度派生；phi bias 与粗头 bias 分别显式配置。`forward(image)` 仅返回原特征网格 coarse logits 与输入网格 final logits，不额外上采样粗头或执行最终 softmax。`forward_with_diagnostics(image)` 是独立的显式诊断入口，返回具名中间结果并保留梯度；普通前向不创建关系/回写诊断结果或模块缓存。配置见 `src/organ_relation/segmentor_config.py`；`configs/segmentor_micro.json` 只用于 CPU 合成测试，不冻结任何正式实验配置。本阶段未实现联合损失代码或训练流程。
+`ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅含 Cg→C 的 1x1x1 Conv3d 与 F 相加，无额外尺度、gate、归一化或激活。`Segmentor(SegmentorConfig)` 按上述冻结顺序调用各模块，C 从骨干最深层宽度派生；phi bias 与粗头 bias 分别显式配置。`forward(image)` 仅返回原特征网格 coarse logits 与输入网格 final logits，不额外上采样粗头或执行最终 softmax。`forward_with_diagnostics(image)` 是独立的显式诊断入口，返回具名中间结果并保留梯度；普通前向不创建关系/回写诊断结果或模块缓存。配置见 `src/organ_relation/segmentor_config.py`；`configs/segmentor_micro.json` 只用于 CPU 合成测试，不冻结任何正式实验配置。损失独立于 Segmentor，尚无训练流程。
+
+`src/organ_relation/joint_loss.py` 实现 `JointLoss(epsilon=..., lambda_c=..., align_corners=...)`，三项均无默认值。组合形式已冻结：每分支 CE 与 Dice 系数均为 1，最终分支系数为 1，粗分支系数为 lambda_c；lambda_c 是唯一未冻结数值的损失权重，epsilon 数值与粗分支插值 align_corners 也尚待确认，不从微型配置或骨干插值设置推断。label 必须为与 final 网格同形的 `[B,D,H,W]` int64 类别索引 0–15。结果 total 为 batch 均值标量，per_case 为 `[B]`；每分支返回 ce/dice_loss/segmentation:[B] 与 dice_per_class:[B,15]，保留梯度但不返回完整概率体积。gather/scatter_add 等价计算真类概率、逐类交集和计数，不生成稠密 one-hot GT；无概率截断、标准 CE 替代或空类屏蔽。严格 log(S+epsilon) 在 S=1 时可产生负 CE，属于原公式结果，不另作截零。调用方须与模型共用 epsilon；当前仅验证 FP32/FP64 CPU，保留 finite/autocast 检查。
 
 ## 尚待确认，不能当作已冻结配置
 
 - 完整输入的 target spacing、尺寸约束、padding 是否进入节点统计/损失；保留完整范围的具体重采样网格与逆变换协议。
 - 强度截断/归一化参数、空间增强及左右方向处理。仅训练集可以拟合统计参数。
 - 具体 U-Net 尺度、层宽、归一化、上下采样、卷积偏置；K、Cr、da、Cg、lambda_c、epsilon；优化器与训练配置。
+- JointLoss 的 lambda_c 数值、统一 epsilon 数值、粗 logits 三线性上采样 align_corners 尚未确认；已参数化实现并测试，不代表冻结选项。
 - 官方训练/验证 CT 的开发与独立评估用途，最终测试 CT 边界编号及无标签测试方式。
 - 评估主指标、checkpoint 选择、原空间概率/标签恢复顺序、空类 Dice/HD95 规则与汇总方式。此前建议不是用户确认。
 - 小器官保真度没有预设合格阈值；先提交候选实际几何损失、图像质量风险和显存对照，再共同决定。

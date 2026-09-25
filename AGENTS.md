@@ -36,7 +36,7 @@
 - GitHub 用于阶段同步源代码、配置、方法文档、测试。未经明确发布任务不上传远程。
 - 不提交 AMOS 原始数据、患者影像、标签体积、权重、缓存、大型输出。病例级本地报告默认忽略；需要分享时先确认范围。
 - 正式实验记录 Git commit、完整配置、数据划分及哈希、环境、随机种子、评估结果。
-- 数据阶段、Encoder/Decoder、CoarseHead、SpaceToNode、DynamicRelation、NodeToSpace 已通过阶段验收。当前授权依据 METHOD_SPEC.md 实现纯残差融合 Fprime=F+phi(G)（phi 为 1x1x1 卷积，bias 显式配置）及完整 Segmentor 前向，不修改已验收模块行为。普通 forward 仅接收 image，返回 coarse/final logits；详细诊断显式开启，不能在模块上缓存历史。原 F 同时供粗头、节点构建、空间匹配与融合使用，Decoder 接收 Fprime 和原 skips。仅运行 Windows CPU 微型合成及全部回归；不实现 JointLoss、Dice/CE、训练入口、optimizer、checkpoint 或 AMP，不运行真实 CT、GPU 或正式训练。正式网络宽度、spacing 等仍未冻结，不新增输入 padding 或有效域 mask。
+- 数据阶段及完整 Segmentor 前向已通过阶段验收。当前授权仅依据 METHOD_SPEC.md 实现独立 JointLoss 及 CPU 合成测试，不修改已验收模块。粗 logits 先三线性插值再 softmax，final logits 和 GT 不插值；概率 CE 使用 log(S+epsilon) 且含背景，Dice 每病例计算全部 15 个前景类（不跳过空类），再组合分支并 batch 平均。lambda_c、epsilon 数值及 coarse 插值 align_corners 未冻结，必须显式传参，不设默认值；epsilon 须与模型同符号约定一致。Segmentor 仍只接收 image，监督标签仅进入 loss。仅运行 Windows CPU 合成及全部回归；不实现训练入口、optimizer、DataLoader、augmentation、checkpoint 或 AMP，不运行真实 CT、GPU 或正式训练。正式宽度、spacing 等仍未冻结。
 
 ## 验收和交付
 

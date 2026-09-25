@@ -1,6 +1,6 @@
 # organ-relation
 
-完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 数据工具、可变尺寸 U-Net、器官节点与动态关系推理、空间回写、纯残差融合及完整 Segmentor 前向图。尚未实现联合损失、训练入口、optimizer、checkpoint 或正式训练。
+完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 数据工具、完整 Segmentor 前向图与独立 JointLoss。尚未实现训练入口、optimizer、真实 CT DataLoader、checkpoint 或正式训练。
 
 - [方法定义与待确认配置](METHOD_SPEC.md)
 - [开发和设备约束](AGENTS.md)
@@ -166,7 +166,7 @@ Q=W_Q(zK):[B,15,da]，K=W_K(F):[B,N,da]，V=W_V(zK):[B,15,Cg]。三个 Linear �
 .\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_node_to_space.py -v
 ```
 
-Node-to-Space 单模块测试包含手算、独立标量循环、FP64 输入与全部参数数值梯度，以及已有模块至 G 的 CPU 合成梯度链路；完整 Segmentor 集成见下文，尚未实现训练损失。既有全部回归命令见上文。
+Node-to-Space 单模块测试包含手算、独立标量循环、FP64 输入与全部参数数值梯度，以及已有模块至 G 的 CPU 合成梯度链路；完整 Segmentor 与独立 JointLoss 见下文。既有全部回归命令见上文。
 
 ## 纯残差融合与完整 Segmentor 前向
 
@@ -193,3 +193,30 @@ Fprime,原 skips → Decoder → final_logits
 ```
 
 新增测试包括融合手算/解析梯度/数值梯度、对象身份与唯一调用顺序、各轴奇偶/单例尺寸、final-only 反向及诊断释放。仅测试代码会用 hooks 阻断 G 的梯度或替换 G，分别证明最终分支到粗头的路径经过回写，以及 G 对最终结果有影响；生产前向不含这些干预。既有全部回归命令见上文。保留有限性/autocast 检查及后续 AMD 同步开销审查事项；未验证 GPU、AMP、真实 CT 或正式训练。
+
+## 独立 JointLoss
+
+`JointLoss(epsilon=..., lambda_c=..., align_corners=...)` 三项均必填、无默认值。METHOD_SPEC 已确定 `mean_b(final_CE+final_DiceLoss+lambda_c*(coarse_CE+coarse_DiceLoss))`；未冻结的是 lambda_c 数值、统一 epsilon 数值及粗分支插值 align_corners，不能从微型测试数值推断正式配置。下面仅展示接线，不提供默认数值：
+
+```python
+from organ_relation.joint_loss import JointLoss
+
+criterion = JointLoss(epsilon=model.config.epsilon,
+                      lambda_c=explicit_lambda_c,
+                      align_corners=explicit_coarse_align_corners)
+output = model(image)  # 模型仍然不接收标签。
+loss = criterion(output.coarse_logits, output.final_logits, label)
+loss.total.backward()  # 此处仅说明接口；本项目尚无 optimizer 或训练循环。
+```
+
+label 为 `[B,D,H,W]` 的 int64 类别索引 0–15。coarse logits 先三线性插值到 final/label 网格再 softmax，final logits 直接 softmax，GT 永不插值。CE 等价于每病例 `-mean_x(log(S[label(x)]+epsilon))`，包含背景；不调用 CrossEntropyLoss、不 clamp。Dice 是每病例每前景类 `(2*intersection+epsilon)/(predicted_mass+target_count+epsilon)`，全部 15 类等权平均，包括空类，然后两个分支按公式相加再 batch 平均。两个分支共用同一个 epsilon，与模型配置的同符号约定保持一致。
+
+返回 `JointLossResult(total, per_case, coarse, final)`；total 为标量、per_case 为 `[B]`，coarse/final 是 `BranchLoss(ce, dice_per_class, dice_loss, segmentation)`，形状分别为 `[B]`、`[B,15]`、`[B]`、`[B]`。仅返回小型统计，梯度保留；gather/scatter_add 避免稠密 one-hot GT。epsilon/lambda_c/align_corners 为调用方配置，不在无参数 loss 的 state_dict 中。
+
+冻结公式有一个需保留的数值性质：S=1 时 `-log(1+epsilon)<0`，因此 CE/总损失并非严格非负；这不是实现错误，不能通过截零或替换标准 CE 修正。当前支持 FP32/FP64、关闭 autocast，严格检查类别、shape/dtype/device 和有限性。全体积概率与反向内存、scatter 归约的 GPU 数值/复现性和运行时检查同步开销均待 AMD 阶段验证。
+
+```powershell
+.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_joint_loss.py -v
+```
+
+测试包含手算、错误插值顺序/全 batch Dice/标准 CE 反例、独立三线性插值和逐病例逐类别参考、双分支数值梯度，以及 Segmentor+JointLoss 完整反向。所有样例系数仅供合成测试；没有 optimizer、训练循环、DataLoader 或真实数据/GPU 运行。

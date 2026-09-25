@@ -100,8 +100,8 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 |---|---|---|
 | Preprocessor | 原影像，可选标签 | 输入影像、可选监督标签、逆变换元数据 |
 | Encoder3D | image | F, skips |
-| CoarseHead | F | coarse_logits |
-| SpaceToNode | F, coarse_probabilities | z0, fixed_attributes |
+| CoarseHead | F | CoarsePrediction(logits, probabilities)，均 [B,16,Df,Hf,Wf] |
+| SpaceToNode | F, coarse_probabilities | OrganNodes(z0, mass, centroid, size, confidence) |
 | DynamicRelation | z0, fixed_attributes | zK，可选诊断 |
 | NodeToSpace | F, zK | G，可选 A |
 | ResidualFusion | F,G | Fprime |
@@ -109,6 +109,8 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 | Segmentor | 仅 image | coarse_logits, final_logits |
 | JointLoss | logits, label | 总损失与分量 |
 | Evaluator | prediction, label, geometry | 逐病例逐器官指标 |
+
+当前粗头和节点的工程接口分别见 `src/organ_relation/coarse_head.py`、`src/organ_relation/space_to_node.py`。`OrganNodes` 的节点轴始终对应类别 1–15；centroid 最后一轴依次是特征网格 D、H、W。mass/centroid/size/confidence 使用具名字段，不与 z0 的语义通道混排；全部保留梯度。粗头 bias 与节点 epsilon 必须显式配置，未冻结正式数值。当前节点数值实现限定 FP32/FP64 且关闭 autocast；混合精度归约策略尚未验证。这些是接口与数值支持范围说明，不改变上述公式。
 
 ## 尚待确认，不能当作已冻结配置
 

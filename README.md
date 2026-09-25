@@ -1,6 +1,6 @@
 # organ-relation
 
-完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。当前有方法规范、三平台开发规范、训练 CT 的 CPU 元数据统计和完整范围候选网格估算；没有实际重采样、网络、训练、推理或 GPU 测试实现。
+完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 元数据统计、候选网格估算、少量真实重采样保真度测试、可变尺寸 U-Net 骨干、CoarseHead 与 SpaceToNode。尚未实现动态关系推理、空间回写、联合损失、完整 Segmentor 或正式训练。
 
 - [方法定义与待确认配置](METHOD_SPEC.md)
 - [开发和设备约束](AGENTS.md)
@@ -41,11 +41,11 @@ python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir 
 
 ## 项目布局
 
-`src/organ_relation/` 包含元数据、候选估算、CPU 保真度和可配置 3D U-Net 骨干模块；`scripts/` 是入口；`tests/` 包含数据、几何和骨干测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。关系模块、完整 Segmentor、训练与真实数据推理尚未实现。
+`src/organ_relation/` 包含元数据、候选估算、CPU 保真度、可配置 3D U-Net 骨干、粗头和节点构建模块；`scripts/` 是入口；`tests/` 包含数据、几何、骨干及节点公式/梯度测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。关系推理、空间回写、完整 Segmentor、训练与真实数据推理尚未实现。
 
 ## 后续门槛
 
-先审阅训练 CT 统计，再提出保留完整范围的候选重采样配置。保真度没有预设阈值；先报告实际几何损失和图像质量风险。完整网络建立后再提供 AMD 显存测试脚本，由用户同步到工作站执行。本轮不冻结输入尺寸、spacing 或评估协议。
+数据统计、三候选估算、10 例保真度与骨干已通过阶段验收。后续按冻结公式逐模块完成 CPU 数值与梯度验证；完整网络建立后再提供 AMD 显存测试脚本，由用户同步到工作站执行。正式输入尺寸、spacing、保真度阈值及评估协议仍未冻结。
 
 ## 候选网格估算
 
@@ -77,3 +77,42 @@ configs/backbone_micro.json 只用于微型合成测试，不是正式结构或�
 ```
 
 scripts/audit_backbone_shapes.py 仅从候选统计 JSON 推导各级 shape；scripts/check_backbone.py 只运行一次合成前后向，不实现训练或方法联合损失。两者均拒绝覆盖已有报告。GPU 显存接口已预留，但本轮未实测 GPU 或完整 CT 网络。
+
+## 粗预测与器官节点
+
+`CoarseHead(in_channels, bias=...)` 返回 `CoarsePrediction(logits, probabilities)`：两个张量均为 `[B,16,Df,Hf,Wf]`，概率由 16 类 softmax 得到。`SpaceToNode(epsilon=...)` 接收 F 与 P，返回具名字段：
+
+| 字段 | 形状 | 含义 |
+|---|---|---|
+| z0 | `[B,15,C]` | `sum(P_i F)/(M_i+epsilon)`，只加权一次 |
+| mass | `[B,15,1]` | `sum(P_i)` |
+| centroid | `[B,15,3]` | `sum(P_i u)/(M_i+epsilon)`，坐标轴 D、H、W |
+| size | `[B,15,1]` | `M_i/N` |
+| confidence | `[B,15,1]` | `sum(P_i^2)/(M_i+epsilon)` |
+
+节点索引 0–14 对应前景类别 1–15；背景只参与 softmax。所有输出保留梯度，属性未来保持初值不表示 detach。接口不接受标签，不屏蔽零/小质量节点，不裁剪或补齐网格。语义使用 `bmm`，质心使用分轴求和，避免 `[B,15,C,N]` 张量和完整坐标网格。
+
+```python
+from organ_relation.coarse_head import CoarseHead
+from organ_relation.space_to_node import SpaceToNode
+
+# F 来自已验收 Encoder；以下数值仅示例，不是正式配置。
+head = CoarseHead(F.shape[1], bias=True).to(device=F.device, dtype=F.dtype)
+node_builder = SpaceToNode(epsilon=1e-6)
+coarse = head(F)
+nodes = node_builder(F, coarse.probabilities)
+```
+
+SpaceToNode 当前要求 F/P 同设备、同 dtype 的 FP32/FP64，且关闭 autocast；不会隐式转换或修正 P。调用方保证 P 是合法概率。FP16/BF16 与 AMP 归约需后续专门验证。epsilon 没有默认值，重建模块时须从配置显式传入，并随实验记录；参数为空的 state_dict 不携带这个配置值。CoarseHead 的 bias 同样须显式指定。
+
+CPU 复现命令（`src` 由测试入口加入路径）：
+
+```powershell
+.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_coarse_nodes.py -v
+.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_backbone.py -v
+.\.venv-resampling\Scripts\python.exe -B -m unittest discover -s tests -p test_metadata.py -q
+.\.venv-resampling\Scripts\python.exe -B -m unittest discover -s tests -p test_candidate_estimates.py -q
+.\.venv-resampling\Scripts\python.exe -B -m unittest discover -s tests -p test_fidelity.py -q
+```
+
+两套既有 CPU 环境分别执行张量与数据测试；不需要改动 GPU 环境。模块测试中的标量探针只用于检查自动微分，不是方法的联合训练损失。

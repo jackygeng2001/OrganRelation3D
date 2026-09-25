@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "status": "baseline_v1_capacity_and_preprocessing_not_frozen",
+  "epsilon": 0.000001,
+  "loss": {"lambda_c": 0.5, "align_corners": false},
+  "model": null,
+  "preprocessing": {
+    "spacing_candidates": {"A": [1.5, 1.5, 3.0], "B": [2.0, 2.0, 3.0], "C": [2.0, 2.0, 5.0]},
+    "grid": "ceil_cell_coverage_centered_extension",
+    "boundary": "nearest_edge_replication",
+    "antialias": true,
+    "gaussian_truncate": 3.0,
+    "intensity": "scaled_hu",
+    "note": "Feasibility protocol reuses tested cardinal RAS geometry; no clipping/normalization. Formal preprocessing remains undecided."
+  },
+  "probe": {"dtype": "float32", "batch_size": 1, "seed": 20260925, "cpu_threads": 2},
+  "optimizer": null
+}

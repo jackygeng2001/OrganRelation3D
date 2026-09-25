@@ -1,0 +1,5 @@
+# Imaging dependencies only, Python >=3.11. Does not install or replace PyTorch.
+# Keep the existing CPU / ROCm / CUDA PyTorch installation selected by the user.
+numpy==2.3.5
+scipy==1.16.3
+nibabel==5.3.2

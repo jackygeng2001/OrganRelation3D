@@ -90,7 +90,7 @@ SegLoss = CE + DiceLoss
 Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 ```
 
-粗 logits 先插值再 softmax，不下采样标签替代。病例内计算后 batch 平均，不跨 batch Dice、不跳过缺失器官、不加类别权重或其他损失。log(S+epsilon) 不能静默替换为截断概率或普通 CE。epsilon 的数值待定，同一符号使用一致约定。
+粗 logits 先插值再 softmax，不下采样标签替代。病例内计算后 batch 平均，不跨 batch Dice、不跳过缺失器官、不加类别权重或其他损失。log(S+epsilon) 不能静默替换为截断概率或普通 CE。当前统一 epsilon=1e-6，同一符号使用一致约定。
 
 真实标签只用于监督与评估，不输入模型、节点或关系，也不用于存在性判断及裁剪采样。最终损失必须经回写、图、语义和属性路径反传至粗头和编码器；固定属性不表示 detach。推理保留同一核心前向，不计算损失。
 
@@ -110,7 +110,7 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 | JointLoss | coarse_logits, final_logits, label | JointLossResult(total, per_case, coarse, final) |
 | Evaluator | prediction, label, geometry | 逐病例逐器官指标 |
 
-当前粗头和节点的工程接口分别见 `src/organ_relation/models/coarse_head.py`、`src/organ_relation/models/space_to_node.py`。`OrganNodes` 的节点轴始终对应类别 1–15；centroid 最后一轴依次是特征网格 D、H、W。mass/centroid/size/confidence 使用具名字段，不与 z0 的语义通道混排；全部保留梯度。粗头 bias 与节点 epsilon 必须显式配置，未冻结正式数值。当前节点数值实现限定 FP32/FP64 且关闭 autocast；混合精度归约策略尚未验证。这些是接口与数值支持范围说明，不改变上述公式。
+当前粗头和节点的工程接口分别见 `src/organ_relation/models/coarse_head.py`、`src/organ_relation/models/space_to_node.py`。`OrganNodes` 的节点轴始终对应类别 1–15；centroid 最后一轴依次是特征网格 D、H、W。mass/centroid/size/confidence 使用具名字段，不与 z0 的语义通道混排；全部保留梯度。粗头 bias 与节点 epsilon 必须显式配置；当前 epsilon=1e-6，粗头 bias 仍属于待选模型配置。当前节点数值实现限定 FP32/FP64 且关闭 autocast；混合精度归约策略尚未验证。这些是接口与数值支持范围说明，不改变上述公式。
 
 `src/organ_relation/models/dynamic_relation.py` 实现 `DynamicRelation(channels=C, relation_channels=Cr, rounds=K)` 和显式 `FormulaGRU`。C、Cr、K 须显式给出；默认前向仅返回 zK，`return_diagnostics=True` 返回每轮 `RelationRound(alpha, messages, z)`，分别对应该轮旧状态计算的边权、接收消息及同步更新后的状态，均保留梯度。属性以独立具名参数传入，质量 mass 不进入关系描述；不接受标签或外部边 mask。当前限定 FP32/FP64、关闭 autocast，拒绝非有限输入；不改变公式。参数初始化采用 PyTorch Linear 默认实现，正式初始化及随机种子应随实验配置记录；K 不存于 state_dict，重建时须使用原配置。
 
@@ -118,14 +118,30 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 
 `ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅含 Cg→C 的 1x1x1 Conv3d 与 F 相加，无额外尺度、gate、归一化或激活。`Segmentor(SegmentorConfig)` 按上述冻结顺序调用各模块，C 从骨干最深层宽度派生；phi bias 与粗头 bias 分别显式配置。`forward(image)` 仅返回原特征网格 coarse logits 与输入网格 final logits，不额外上采样粗头或执行最终 softmax。`forward_with_diagnostics(image)` 是独立的显式诊断入口，返回具名中间结果并保留梯度；普通前向不创建关系/回写诊断结果或模块缓存。配置见 `src/organ_relation/models/segmentor_config.py`；`configs/segmentor_micro.json` 只用于 CPU 合成测试，不冻结任何正式实验配置。损失独立于 Segmentor，尚无训练流程。
 
-`src/organ_relation/losses.py` 实现 `JointLoss(epsilon=..., lambda_c=..., align_corners=...)`，三项均无默认值。组合形式已冻结：每分支 CE 与 Dice 系数均为 1，最终分支系数为 1，粗分支系数为 lambda_c；lambda_c 是唯一未冻结数值的损失权重，epsilon 数值与粗分支插值 align_corners 也尚待确认，不从微型配置或骨干插值设置推断。label 必须为与 final 网格同形的 `[B,D,H,W]` int64 类别索引 0–15。结果 total 为 batch 均值标量，per_case 为 `[B]`；每分支返回 ce/dice_loss/segmentation:[B] 与 dice_per_class:[B,15]，保留梯度但不返回完整概率体积。gather/scatter_add 等价计算真类概率、逐类交集和计数，不生成稠密 one-hot GT；无概率截断、标准 CE 替代或空类屏蔽。严格 log(S+epsilon) 在 S=1 时可产生负 CE，属于原公式结果，不另作截零。调用方须与模型共用 epsilon；当前仅验证 FP32/FP64 CPU，保留 finite/autocast 检查。
+`src/organ_relation/losses.py` 实现 `JointLoss(epsilon=..., lambda_c=..., align_corners=...)`，三项均无默认值。组合形式已冻结：每分支 CE 与 Dice 系数均为 1，最终分支系数为 1，粗分支系数为 lambda_c；当前 baseline 明确采用 lambda_c=0.5、epsilon=1e-6、粗分支插值 align_corners=False，不从微型配置或骨干插值设置推断。lambda_c 未来可通过实验调整，但本轮 GPU 可行性验证统一为 0.5。label 必须为与 final 网格同形的 `[B,D,H,W]` int64 类别索引 0–15。结果 total 为 batch 均值标量，per_case 为 `[B]`；每分支返回 ce/dice_loss/segmentation:[B] 与 dice_per_class:[B,15]，保留梯度但不返回完整概率体积。gather/scatter_add 等价计算真类概率、逐类交集和计数，不生成稠密 one-hot GT；无概率截断、标准 CE 替代或空类屏蔽。严格 log(S+epsilon) 在 S=1 时可产生负 CE，属于原公式结果，不另作截零。调用方须与模型共用 epsilon；当前仅验证 FP32/FP64 CPU，保留 finite/autocast 检查。
+
+## 当前 baseline 与完整扫描数据契约
+
+2026-09-25 用户确认：epsilon=1e-6（节点与 loss 一致）；lambda_c=0.5（第一版 baseline 辅助权重，未来允许实验调整）；粗 logits 三线性插值 align_corners=False（当前实现约定）。配置见 configs/baseline.json。三个构造参数继续显式传入，算子公式不变；骨干内部插值参数仍是独立模型配置。
+
+正式模型容量没有冻结：channels、层数/逐轴 stride、归一化、bias、K、Cr、da、Cg 均不能由 segmentor_micro.json 推断。baseline.json 的 model 留为 null；完整 GPU 前向必须另外传入完整模型配置，不自动选宽度或轮数。
+
+数据入口 src/organ_relation/data/full_scan.py 的 FullScanPreprocessor / FullScanDataset 每次返回一整例：image=[1,1,D,H,W] float32，label=[1,D,H,W] int64，均在 CPU。样本已经带 batch=1；不再默认叠加 DataLoader batch 轴。无 crop、patch、滑窗、GT ROI、全局 padding 或有效域 mask，标签只用于配对检查与监督。
+
+当前可行性预处理协议复用已验收的底层几何：只支持 NIfTI-1、毫米单位、轴对齐网格；图像和标签各自 scaling / affine 分别处理，同一目标 RAS 网格。保留完整体素单元边界、ceil 尺寸、中心保持，最近边界复制；CT 降采样方向采用既有 Gaussian 预滤波和三线性插值，标签最近邻。A/B/C=(1.5,1.5,3)/(2,2,3)/(2,2,5) mm 全部保留。配置中的上述预处理为本轮可行性协议，不冻结正式训练预处理或最终 spacing。
+
+目标数组 R,A,S 转置成 Tensor 的 D=S,H=A,W=R，记录原图像/标签 affine、目标 affine、Tensor affine 和双向索引映射。逆映射可供后续原空间恢复，不表示降采样信息可逆。本轮不实现预测恢复或正式评估。
+
+当前强度模式显式为 scaled_hu：只遵循每文件 metadata scaling，不统一减 1024，不额外窗截断/归一化。正式训练强度方案仍待决定，不将显示窗 [-160,240] HU 作为模型预处理。
+
+scripts/validate_full_scan.py 为单病例分阶段工程验证：预处理→搬运→模型初始化→完整前向→JointLoss→反向→可选一次 optimizer step；支持中途停止，固定 FP32/batch 1，无 AMP、epoch、scheduler 或 checkpoint。optimizer 类型与 lr 必须由调用方明确给出，其他工程探针选项完整记录；不构成正式优化器配置。OOM 停止并保留结果，不缩小输入或自动换候选。CPU 模式仅用于有体素上限的合成小例。
 
 ## 尚待确认，不能当作已冻结配置
 
 - 完整输入的 target spacing、尺寸约束、padding 是否进入节点统计/损失；保留完整范围的具体重采样网格与逆变换协议。
 - 强度截断/归一化参数、空间增强及左右方向处理。仅训练集可以拟合统计参数。
-- 具体 U-Net 尺度、层宽、归一化、上下采样、卷积偏置；K、Cr、da、Cg、lambda_c、epsilon；优化器与训练配置。
-- JointLoss 的 lambda_c 数值、统一 epsilon 数值、粗 logits 三线性上采样 align_corners 尚未确认；已参数化实现并测试，不代表冻结选项。
+- 具体 U-Net 尺度、层宽、归一化、上下采样、卷积偏置；K、Cr、da、Cg；优化器与正式训练配置。
+- 后续 lambda_c 消融实验设置；第一版 baseline 的 lambda_c=0.5 已确定，不属于当前待决项。
 - 官方训练/验证 CT 的开发与独立评估用途，最终测试 CT 边界编号及无标签测试方式。
 - 评估主指标、checkpoint 选择、原空间概率/标签恢复顺序、空类 Dice/HD95 规则与汇总方式。此前建议不是用户确认。
 - 小器官保真度没有预设合格阈值；先提交候选实际几何损失、图像质量风险和显存对照，再共同决定。

@@ -26,8 +26,8 @@ class JointLossResult(NamedTuple):
 class JointLoss(nn.Module):
     """Separate supervised module; never passes label to the Segmentor.
 
-    No default epsilon, lambda_c or align_corners: their formal values have not
-    been frozen. The caller must use the same epsilon convention as the model.
+    No constructor defaults: load epsilon/lambda_c/align_corners explicitly from
+    the baseline config. The caller must use the same epsilon as the model.
     Returns only scalar/small per-case statistics, not full probability volumes.
     FP32/FP64 outside autocast are supported. Config is not in state_dict.
     """

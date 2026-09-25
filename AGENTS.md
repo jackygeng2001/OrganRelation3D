@@ -36,9 +36,9 @@
 - GitHub 用于阶段同步源代码、配置、方法文档、测试。未经明确发布任务不上传远程。
 - 不提交 AMOS 原始数据、患者影像、标签体积、权重、缓存、大型输出。病例级本地报告默认忽略；需要分享时先确认范围。
 - 正式实验记录 Git commit、完整配置、数据划分及哈希、环境、随机种子、评估结果。
-- 数据阶段、完整 Segmentor 与独立 JointLoss 已通过阶段验收。工程整理不得改变已验收的公式、数值行为、配置值或测试断言。lambda_c、epsilon 和 coarse 插值 align_corners 仍须显式传参，正式数值未冻结。当前没有训练入口、optimizer、DataLoader、augmentation、checkpoint 或 AMP；后续新增工作以用户当轮授权为准。
+- 数据阶段、完整 Segmentor 与独立 JointLoss 已通过阶段验收。工程整理不得改变已验收的公式、数值行为、配置值或测试断言。当前 baseline 为 epsilon=1e-6、lambda_c=0.5、coarse align_corners=False，继续显式传参。已授权完整扫描数据到 Tensor 与单病例 FP32 验证（包括一次 optimizer step），没有 epoch 训练循环、DataLoader 拼批、augmentation、scheduler、checkpoint 或 AMP；后续新增工作以用户当轮授权为准。
 - 源码按职责归入 models/ 与 data/，单个损失保留 losses.py，复现工具为 provenance.py。模型不依赖数据工具或 loss；各包 __init__.py 保持轻量。无实际代码时不建立空目录，不增加泛化框架。
-- 原有 190 项回归由 scripts/run_tests.py 按 tensor/data 两组执行，任何跳过不算验收通过。依赖由 environments/ 分设备管理；本包 editable install 不自动选择或替换 PyTorch 后端。
+- 原有 190 项回归由 scripts/run_tests.py 按 tensor/data 两组执行；新增 fullscan 组验证真实文件格式的合成 NIfTI 与完整小网络链路，任何跳过不算验收通过。依赖由 environments/ 分设备管理；本包 editable install 不自动选择或替换 PyTorch 后端。
 
 ## 验收和交付
 
@@ -48,3 +48,5 @@
 - 尚无小器官保真度阈值；先报告候选的几何损失、图像质量风险和显存，由用户共同决定正式输入。
 - 每轮结束报告修改文件、测试设备、实际通过的测试、未验证事项及 Git 版本。
 - 关键实现、公式对应、测试结果、风险和待决事项直接在对话中完整汇报，方便复制审阅。只维护确有长期价值的规范、README、配置、测试和核心复现记录；不为每个小阶段新增 validation/review/report 文档。
+
+- FullScanDataset 每个样本已带 batch=1，不能默认再拼批或添加输入 padding。正式模型容量仍未冻结；GPU 验证不得静默使用微型模型。当前 scaled_hu 和候选网格/边界规则为可行性配置，正式强度与预处理仍待选择。

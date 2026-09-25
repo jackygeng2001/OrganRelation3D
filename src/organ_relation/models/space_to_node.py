@@ -30,7 +30,7 @@ class OrganNodes(NamedTuple):
 class SpaceToNode(nn.Module):
     """Parameter-free soft pooling on the full feature grid.
 
-    epsilon is required: METHOD_SPEC does not freeze its numerical value.
+    epsilon is required: load its current value from the explicit baseline config.
     Inputs must share device, dtype and grid. This stage supports FP32/FP64;
     autocast must be disabled; AMP accumulation needs separate validation. P is the
     16-class softmax output: this module does not renormalize, clip, binarize,

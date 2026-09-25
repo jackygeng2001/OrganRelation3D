@@ -10,6 +10,7 @@ SUITES = {
     'tensor': ('backbone', 'coarse_nodes', 'dynamic_relation', 'node_to_space',
                'segmentor', 'joint_loss'),
     'data': ('metadata', 'candidate_estimates', 'fidelity'),
+    'fullscan': ('full_scan', 'full_scan_probe'),
 }
 
 
@@ -22,7 +23,7 @@ def main(argv=None):
     discovered = {p.name for p in (ROOT / 'tests').glob('test_*.py')}
     if declared != discovered:
         parser.error(f'update SUITES to match test files: {sorted(declared ^ discovered)}')
-    names = (SUITES['tensor'] + SUITES['data'] if args.suite == 'all' else
+    names = (sum(SUITES.values(), ()) if args.suite == 'all' else
              SUITES['data'][:2] if args.suite == 'metadata' else SUITES[args.suite])
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()

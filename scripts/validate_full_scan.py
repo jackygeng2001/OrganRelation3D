@@ -186,7 +186,9 @@ def execute(args, report, save):
     sample = recorder.run('preprocess', preprocess)
     if args.through == 'preprocess':
         return
-    image, label = recorder.run('transfer', lambda: (sample.image.to(device), sample.label.to(device)))
+    # Dataset owns sample/channel axes; this single-case probe owns batching.
+    image, label = recorder.run('transfer', lambda: (
+        sample.image.unsqueeze(0).to(device), sample.label.unsqueeze(0).to(device)))
     del sample
     if args.through == 'transfer':
         return

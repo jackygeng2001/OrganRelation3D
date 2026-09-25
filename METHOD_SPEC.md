@@ -126,7 +126,7 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 
 正式模型容量没有冻结：channels、层数/逐轴 stride、归一化、bias、K、Cr、da、Cg 均不能由 segmentor_micro.json 推断。baseline.json 的 model 留为 null；完整 GPU 前向必须另外传入完整模型配置，不自动选宽度或轮数。
 
-数据入口 src/organ_relation/data/full_scan.py 的 FullScanPreprocessor / FullScanDataset 每次返回一整例：image=[1,1,D,H,W] float32，label=[1,D,H,W] int64，均在 CPU。样本已经带 batch=1；不再默认叠加 DataLoader batch 轴。无 crop、patch、滑窗、GT ROI、全局 padding 或有效域 mask，标签只用于配对检查与监督。
+数据入口 src/organ_relation/data/full_scan.py 的 FullScanPreprocessor / FullScanDataset 每次返回一整例单样本：image=[1,D,H,W] float32，label=[D,H,W] int64，均在 CPU。channel 属于样本，batch 不属于 Dataset；DataLoader(batch_size=1) 默认得到 image=[1,1,D,H,W]、label=[1,D,H,W]。单病例 validate_full_scan.py 不使用 DataLoader，在搬运阶段显式 unsqueeze(0) 后进入模型与 loss。样本 metadata 不记录 batch_size，probe 配置仍记录 batch_size=1。此次接口调整不改变体素、几何或重采样定义。无 crop、patch、滑窗、GT ROI、全局 padding 或有效域 mask，标签只用于配对检查与监督。
 
 当前可行性预处理协议复用已验收的底层几何：只支持 NIfTI-1、毫米单位、轴对齐网格；图像和标签各自 scaling / affine 分别处理，同一目标 RAS 网格。保留完整体素单元边界、ceil 尺寸、中心保持，最近边界复制；CT 降采样方向采用既有 Gaussian 预滤波和三线性插值，标签最近邻。A/B/C=(1.5,1.5,3)/(2,2,3)/(2,2,5) mm 全部保留。配置中的上述预处理为本轮可行性协议，不冻结正式训练预处理或最终 spacing。
 

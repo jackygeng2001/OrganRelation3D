@@ -12,6 +12,8 @@ sys.path.insert(0, str(ROOT / 'src'))
 import nibabel as nib
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
+from organ_relation.data.fidelity import resample
 from organ_relation.data.full_scan import FullScanDataset, FullScanPreprocessor, ScanPair
 
 
@@ -46,10 +48,10 @@ class FullScanTests(unittest.TestCase):
         sample = FullScanPreprocessor(configuration(), 'A')(self.pair)
         expected_image = (self.raw.astype(np.float32)*2-1024)[::-1].transpose(2, 1, 0)
         expected_label = self.labels[::-1].transpose(2, 1, 0)
-        np.testing.assert_array_equal(sample.image[0, 0].numpy(), expected_image)
-        np.testing.assert_array_equal(sample.label[0].numpy(), expected_label)
-        self.assertEqual(sample.image.shape, (1, 1, 4, 6, 8))
-        self.assertEqual(sample.label.shape, (1, 4, 6, 8))
+        np.testing.assert_array_equal(sample.image[0].numpy(), expected_image)
+        np.testing.assert_array_equal(sample.label.numpy(), expected_label)
+        self.assertEqual(sample.image.shape, (1, 4, 6, 8))
+        self.assertEqual(sample.label.shape, (4, 6, 8))
         self.assertEqual(sample.image.dtype, torch.float32)
         self.assertEqual(sample.label.dtype, torch.int64)
         self.assertTrue(sample.image.is_contiguous() and sample.label.is_contiguous())
@@ -59,8 +61,8 @@ class FullScanTests(unittest.TestCase):
         for candidate, shape in [('A', (4, 6, 8)), ('B', (4, 5, 6)), ('C', (3, 5, 6))]:
             with self.subTest(candidate=candidate):
                 sample = FullScanPreprocessor(configuration(), candidate)(self.pair)
-                self.assertEqual(sample.image.shape[2:], shape)
-                self.assertEqual(sample.label.shape[1:], shape)
+                self.assertEqual(sample.image.shape[1:], shape)
+                self.assertEqual(sample.label.shape, shape)
                 self.assertTrue(set(sample.label.unique().tolist()).issubset(set(self.labels.ravel())))
                 grid = sample.metadata['grid']
                 old_lo, old_hi = np.array(grid['original_boundary_min_ras_mm']), np.array(grid['original_boundary_max_ras_mm'])
@@ -83,8 +85,8 @@ class FullScanTests(unittest.TestCase):
     def test_label_scaling_and_ct_zero_intercept_are_independent(self):
         pair, raw, labels = synthetic_pair(self.root, slope=1., intercept=0., label_scale=2.)
         sample = FullScanPreprocessor(configuration(), 'A')(pair)
-        np.testing.assert_array_equal(sample.image[0, 0].numpy(), raw[::-1].transpose(2, 1, 0))
-        np.testing.assert_array_equal(sample.label[0].numpy(), (labels*2)[::-1].transpose(2, 1, 0))
+        np.testing.assert_array_equal(sample.image[0].numpy(), raw[::-1].transpose(2, 1, 0))
+        np.testing.assert_array_equal(sample.label.numpy(), (labels*2)[::-1].transpose(2, 1, 0))
 
     def test_gt_changes_do_not_change_image_or_target_grid(self):
         processor = FullScanPreprocessor(configuration(), 'B')
@@ -121,13 +123,16 @@ class FullScanTests(unittest.TestCase):
         for path, data in before.items():
             self.assertEqual(path.read_bytes(), data)
 
-    def test_lazy_dataset_single_batched_sample_and_training_selection(self):
+    def test_lazy_dataset_single_sample_and_training_selection(self):
         processor = FullScanPreprocessor(configuration(), 'A')
         selection = json.loads((ROOT / 'configs/ct_stats.json').read_text())
         with patch('organ_relation.data.full_scan.load_pair', side_effect=AssertionError('eager read')):
             dataset = FullScanDataset.from_amos_training(self.root, ['amos_0001'], selection, processor)
             self.assertEqual(len(dataset), 1)
-        self.assertEqual(dataset[0].image.shape[0], 1)
+        sample = dataset[0]
+        self.assertEqual(sample.image.shape, (1, 4, 6, 8))
+        self.assertEqual(sample.label.shape, (4, 6, 8))
+        self.assertNotIn('batch_size', sample.metadata)
         with self.assertRaises(ValueError):
             FullScanDataset.from_amos_training(self.root, ['amos_0500'], selection, processor)
         with self.assertRaises(ValueError):
@@ -150,11 +155,45 @@ class FullScanTests(unittest.TestCase):
     def test_singleton_axes_and_invalid_configuration(self):
         pair, _, _ = synthetic_pair(self.root, shape=(1, 3, 1))
         sample = FullScanPreprocessor(configuration(), 'A')(pair)
-        self.assertEqual(sample.image.shape, (1, 1, 1, 3, 1))
+        self.assertEqual(sample.image.shape, (1, 1, 3, 1))
+        self.assertEqual(sample.label.shape, (1, 3, 1))
         for key, value in [('grid', 'crop'), ('intensity', 'unknown'), ('boundary', 'zero'), ('antialias', 1), ('gaussian_truncate', 0)]:
             config = copy.deepcopy(configuration()); config[key] = value
             with self.assertRaises(ValueError):
                 FullScanPreprocessor(config, 'A')
+
+    def test_default_dataloader_adds_only_batch_axis(self):
+        for candidate, shape in [('A', (4, 6, 8)), ('B', (4, 5, 6)), ('C', (3, 5, 6))]:
+            with self.subTest(candidate=candidate):
+                dataset = FullScanDataset([self.pair], FullScanPreprocessor(configuration(), candidate))
+                sample = dataset[0]
+                batch = next(iter(DataLoader(dataset, batch_size=1, num_workers=0)))
+                self.assertEqual(batch.image.shape, (1, 1, *shape))
+                self.assertEqual(batch.label.shape, (1, *shape))
+                self.assertTrue(torch.equal(batch.image[0], sample.image))
+                self.assertTrue(torch.equal(batch.label[0], sample.label))
+                self.assertEqual(batch.metadata['case_id'], [self.pair.case_id])
+
+    def test_voxels_exactly_match_previous_batched_packaging(self):
+        # Capture real resampling arrays, then apply the previous batch-one
+        # packaging independently. No changes to interpolation or geometry.
+        for candidate in ('A', 'B', 'C'):
+            with self.subTest(candidate=candidate):
+                arrays = []
+                def capture(*args, **kwargs):
+                    result = resample(*args, **kwargs)
+                    arrays.append(result.copy())
+                    return result
+                processor = FullScanPreprocessor(configuration(), candidate)
+                geometry = processor.inspect(self.pair)
+                with patch('organ_relation.data.full_scan.resample', side_effect=capture):
+                    sample = processor(self.pair)
+                old_image = torch.from_numpy(np.ascontiguousarray(arrays[0].transpose(2, 1, 0))).unsqueeze(0).unsqueeze(0)
+                old_label = torch.from_numpy(np.ascontiguousarray(arrays[1].transpose(2, 1, 0), dtype=np.int64)).unsqueeze(0)
+                self.assertTrue(torch.equal(sample.image.unsqueeze(0), old_image))
+                self.assertTrue(torch.equal(sample.label.unsqueeze(0), old_label))
+                for key, value in geometry.items():
+                    self.assertEqual(sample.metadata[key], value)
 
 
 if __name__ == '__main__':

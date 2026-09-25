@@ -36,7 +36,7 @@ reports/                     本地生成结果（Git 忽略，不随 clone 提�
 | losses.py | coarse/final 概率 CE 与每病例前景 Dice；仅监督接口接收 label |
 | data/nifti_header.py、ct_stats.py | 有界头读取、配对几何与训练 CT 统计 |
 | data/candidate_estimates.py | 已有元数据上的 A/B/C 网格和假设 padding 估算 |
-| data/full_scan.py | 完整扫描预处理与逐例 Dataset；每样本已带 batch=1 |
+| data/full_scan.py | 完整扫描预处理与逐例 Dataset；返回不带 batch 轴的单样本 |
 | data/fidelity.py | 物理网格重采样、往返几何和 CT 灰度指标 |
 | data/fidelity_pilot.py、fidelity_visuals.py | 小样本 CPU 探索运行与复核图；不是正式 Dataset 或模型评估器 |
 
@@ -65,7 +65,7 @@ python -c "import organ_relation; print(organ_relation.__version__)"
 
 ## CPU 验证
 
-原有 **190 项**测试分为张量 137 项和数据 53 项；新增 fullscan 组的 23 项测试需要同时具备 PyTorch 和影像依赖。两套环境有意分开，避免为单元测试混装 GPU 或影像依赖：
+原有 **190 项**测试分为张量 137 项和数据 53 项；fullscan 组的 26 项测试需要同时具备 PyTorch 和影像依赖。两套环境有意分开，避免为单元测试混装 GPU 或影像依赖：
 
 ```powershell
 .\.venv-backbone-cpu\Scripts\python.exe -B scripts/run_tests.py --suite tensor
@@ -150,7 +150,7 @@ state_dict 保存已注册参数；重建模型还须保存完整 SegmentorConfi
 
 ## 完整扫描验证入口
 
-数据模块复用已验证的底层物理网格/重采样函数，不运行 fidelity 探索脚本。image 为 float32 [1,1,D,H,W]，label 为 int64 [1,D,H,W]，D/H/W 对应 S/A/R；完整边界与中心保持，保存原空间双向映射，无 GT ROI 或全局 padding。当前明确使用缩放后的 HU，无额外截断/归一化。A/B/C 只是待比较候选，正式训练预处理尚未冻结。
+数据模块复用已验证的底层物理网格/重采样函数，不运行 fidelity 探索脚本。单样本 image 为 float32 [1,D,H,W]，label 为 int64 [D,H,W]，D/H/W 对应 S/A/R。DataLoader(batch_size=1) 默认得到模型所需 [1,1,D,H,W] / [1,D,H,W]；单病例 probe 则在搬运阶段自行 unsqueeze(0)，Dataset 不负责 batching。完整边界与中心保持，保存原空间双向映射，无 GT ROI 或全局 padding。当前明确使用缩放后的 HU，无额外截断/归一化。A/B/C 只是待比较候选，正式训练预处理尚未冻结。
 
 在现有 AMD PyTorch 环境准备影像依赖的说明和完整命令见 [amd-rocm.md](environments/amd-rocm.md)。以下从仓库根目录执行；替换实际数据路径：
 

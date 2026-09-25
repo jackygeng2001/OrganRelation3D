@@ -49,4 +49,4 @@
 - 每轮结束报告修改文件、测试设备、实际通过的测试、未验证事项及 Git 版本。
 - 关键实现、公式对应、测试结果、风险和待决事项直接在对话中完整汇报，方便复制审阅。只维护确有长期价值的规范、README、配置、测试和核心复现记录；不为每个小阶段新增 validation/review/report 文档。
 
-- FullScanDataset 每个样本已带 batch=1，不能默认再拼批或添加输入 padding。正式模型容量仍未冻结；GPU 验证不得静默使用微型模型。当前 scaled_hu 和候选网格/边界规则为可行性配置，正式强度与预处理仍待选择。
+- FullScanDataset 返回单样本 image=[1,D,H,W]、label=[D,H,W]，不负责 batching；DataLoader(batch_size=1) 默认拼批，单病例 probe 则显式增加 batch 轴，不添加输入 padding。当前 cardinal-mm 几何、每文件 scaling 和完整覆盖重采样已验收为 full-scan feasibility v1。正式模型容量仍未冻结；GPU 验证不得静默使用微型模型。正式强度方案与最终 spacing 仍待选择。

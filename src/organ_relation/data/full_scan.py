@@ -1,4 +1,4 @@
-"""Full-scan, batch-one NIfTI-to-Tensor contract, independent of pilot orchestration.
+"""Full-scan, sample-level NIfTI-to-Tensor contract, independent of pilot orchestration.
 
 Physical grids use RAS millimetres; tensor spatial indices are (S, A, R).
 Only audited cardinal, millimetre NIfTI-1 scans are currently supported.
@@ -27,8 +27,8 @@ class ScanPair:
 
 
 class FullScanSample(NamedTuple):
-    image: torch.Tensor  # [1,1,D,H,W], float32 CPU; no label-derived processing.
-    label: torch.Tensor  # [1,D,H,W], int64 CPU; supervision only.
+    image: torch.Tensor  # [1,D,H,W], float32 CPU; no label-derived processing.
+    label: torch.Tensor  # [D,H,W], int64 CPU; supervision only.
     metadata: dict  # Original/target/tensor affines and both index mappings.
 
 
@@ -90,7 +90,7 @@ that formal training preprocessing or the final spacing has been selected.
             'ct_interpolation': 'trilinear', 'label_interpolation': 'nearest',
             'boundary': 'nearest_edge_replication', 'antialias': self.antialias,
             'gaussian_truncate': self.truncate, 'intensity': 'scaled_hu',
-            'batch_size': 1, 'crop': False, 'network_padding': False,
+            'crop': False, 'network_padding': False,
         }
         for role, header in (('image', ih), ('label', lh)):
             original = affine4(header)
@@ -121,8 +121,8 @@ that formal training preprocessing or the final spacing has been selected.
         if not np.isfinite(image).all() or labels.min() < 0 or labels.max() > 15:
             raise ValueError('resampling produced nonfinite image or illegal labels')
         # Contiguous positive-stride arrays, including flipped original orientations.
-        image = torch.from_numpy(np.ascontiguousarray(image.transpose(2, 1, 0))).unsqueeze(0).unsqueeze(0)
-        labels = torch.from_numpy(np.ascontiguousarray(labels.transpose(2, 1, 0), dtype=np.int64)).unsqueeze(0)
+        image = torch.from_numpy(np.ascontiguousarray(image.transpose(2, 1, 0))).unsqueeze(0)
+        labels = torch.from_numpy(np.ascontiguousarray(labels.transpose(2, 1, 0), dtype=np.int64))
         metadata['antialias_sigma_native_voxels'] = (
             antialias_sigmas(affine4(ih), target).tolist() if self.antialias else [0., 0., 0.])
         metadata['checks'] = checks
@@ -134,10 +134,10 @@ that formal training preprocessing or the final spacing has been selected.
 
 
 class FullScanDataset(Dataset):
-    """Lazy CPU Dataset of complete cases, each ALREADY batch size one.
+    """Lazy CPU Dataset of complete, unbatched cases; no volume cache.
 
-    Use dataset[index] directly for the single-case probe. Do not apply default
-    DataLoader batching: it would add a second batch axis. No volume cache.
+    DataLoader(batch_size=1) adds the batch axis using default collation.
+    A direct single-case probe must add that axis itself before model/loss use.
     """
 
     def __init__(self, pairs: list[ScanPair], preprocessor: FullScanPreprocessor):

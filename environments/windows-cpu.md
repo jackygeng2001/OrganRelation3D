@@ -46,7 +46,7 @@ $previousPythonPath = $env:PYTHONPATH
 try {
     $env:PYTHONPATH = Join-Path (Get-Location) '.venv-resampling\Lib\site-packages'
     .\.venv-backbone-cpu\Scripts\python.exe -B scripts/run_tests.py --suite fullscan
-    # 具备所有既有依赖时，也可 --suite all，一次执行全部 213 项。
+    # 具备所有既有依赖时，也可 --suite all，一次执行全部 216 项。
 } finally {
     $env:PYTHONPATH = $previousPythonPath
 }

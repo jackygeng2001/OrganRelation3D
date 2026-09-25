@@ -1,5 +1,6 @@
 """CPU-only synthetic end-to-end probe and reporting failure-path tests."""
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -9,7 +10,7 @@ import unittest
 from unittest.mock import patch
 import torch
 
-from test_full_scan import ROOT, synthetic_pair
+from test_full_scan import ROOT, configuration, synthetic_pair
 
 spec = importlib.util.spec_from_file_location('validate_full_scan', ROOT / 'scripts/validate_full_scan.py')
 probe = importlib.util.module_from_spec(spec)
@@ -75,6 +76,46 @@ class ProbeTests(unittest.TestCase):
         self.assertIn('commit', report['git'])
         self.assertIn('manifest_sha256', report)
         self.assertIsNone(report['peak_reserved_bytes'])
+
+    def test_probe_batching_matches_dataloader_outputs_loss_and_all_gradients(self):
+        from torch.utils.data import DataLoader
+        from organ_relation.data.full_scan import FullScanDataset, FullScanPreprocessor, ScanPair
+        from organ_relation.models.segmentor import Segmentor
+        from organ_relation.losses import JointLoss
+
+        pair = ScanPair('amos_0001', self.data / 'imagesTr/amos_0001.nii.gz',
+                        self.data / 'labelsTr/amos_0001.nii.gz')
+        original_forward = Segmentor.forward
+        for candidate in ('A', 'B', 'C'):
+            with self.subTest(candidate=candidate):
+                captured = {}
+                def forward(model, image):
+                    captured['model'] = model
+                    captured['reference_model'] = copy.deepcopy(model)
+                    captured['image'] = image.detach().clone()
+                    output = original_forward(model, image)
+                    captured['output'] = tuple(t.detach().clone() for t in output)
+                    return output
+                args = self.arguments('backward', candidate)
+                args[args.index('--candidate')+1] = candidate
+                with patch.object(Segmentor, 'forward', forward):
+                    code, report = self.run_probe(args)
+                self.assertEqual(code, 0, report)
+                dataset = FullScanDataset([pair], FullScanPreprocessor(configuration(), candidate))
+                batch = next(iter(DataLoader(dataset, batch_size=1, num_workers=0)))
+                self.assertTrue(torch.equal(captured['image'], batch.image))
+                reference = captured['reference_model']
+                output = reference(batch.image)
+                for actual, expected in zip(captured['output'], output):
+                    self.assertTrue(torch.equal(actual, expected))
+                loss = JointLoss(epsilon=1e-6, lambda_c=.5, align_corners=False)(
+                    output.coarse_logits, output.final_logits, batch.label)
+                self.assertEqual(report['loss_values']['total'], loss.total.item())
+                loss.total.backward()
+                actual_parameters = dict(captured['model'].named_parameters())
+                for name, parameter in reference.named_parameters():
+                    self.assertIsNotNone(parameter.grad, name)
+                    self.assertTrue(torch.equal(actual_parameters[name].grad, parameter.grad), name)
 
     def test_sgd_step_is_called_exactly_once(self):
         original = torch.optim.SGD.step

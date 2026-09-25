@@ -12,7 +12,8 @@ from pathlib import Path
 import platform
 import sys
 
-from .ct_stats import PROJECT_ROOT, code_hashes, distribution, git_state, sha256, write_csv
+from ..provenance import PROJECT_ROOT, code_hashes, git_state, sha256
+from .ct_stats import distribution, write_csv
 
 
 def estimate_case(case: dict, candidate: dict, multiples: list[int]) -> dict:

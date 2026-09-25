@@ -2,10 +2,13 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
 .venv*/
 venv/
+env/
 *.egg-info/
 build/
 dist/
@@ -47,6 +50,12 @@ Thumbs.db
 /runs/
 /checkpoints/
 /reports/
+/predictions/
+/artifacts/
+/logs/
+/wandb/
+events.out.tfevents.*
 *.zip
 *.tar
 *.tar.gz
+*.7z

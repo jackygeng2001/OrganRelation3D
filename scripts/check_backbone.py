@@ -9,10 +9,10 @@ import sys
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 import torch
-from organ_relation.backbone import UNetBackbone3D
-from organ_relation.backbone_config import BackboneConfig
-from organ_relation.backbone_diagnostics import DeviceMemoryMonitor,parameter_inventory
-from organ_relation.ct_stats import PROJECT_ROOT,code_hashes,git_state,sha256
+from organ_relation.models.backbone import UNetBackbone3D
+from organ_relation.models.backbone_config import BackboneConfig
+from organ_relation.models.diagnostics import DeviceMemoryMonitor,parameter_inventory
+from organ_relation.provenance import PROJECT_ROOT,code_hashes,git_state,sha256
 
 
 def main():

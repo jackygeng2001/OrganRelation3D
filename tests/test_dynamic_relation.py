@@ -15,9 +15,9 @@ except ModuleNotFoundError as exc:
     TORCH_AVAILABLE = False
 else:
     TORCH_AVAILABLE = True
-    from organ_relation.dynamic_relation import DynamicRelation, FormulaGRU, RelationResult
-    from organ_relation.coarse_head import CoarseHead
-    from organ_relation.space_to_node import SpaceToNode
+    from organ_relation.models.dynamic_relation import DynamicRelation, FormulaGRU, RelationResult
+    from organ_relation.models.coarse_head import CoarseHead
+    from organ_relation.models.space_to_node import SpaceToNode
 
 
 def reference_gru(gru, message, z):

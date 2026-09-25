@@ -17,12 +17,12 @@ except ModuleNotFoundError as exc:
     TORCH_AVAILABLE = False
 else:
     TORCH_AVAILABLE = True
-    from organ_relation.node_to_space import NodeToSpace, NodeToSpaceResult
-    from organ_relation.backbone import Encoder3D
-    from organ_relation.backbone_config import BackboneConfig
-    from organ_relation.coarse_head import CoarseHead
-    from organ_relation.space_to_node import SpaceToNode
-    from organ_relation.dynamic_relation import DynamicRelation
+    from organ_relation.models.node_to_space import NodeToSpace, NodeToSpaceResult
+    from organ_relation.models.backbone import Encoder3D
+    from organ_relation.models.backbone_config import BackboneConfig
+    from organ_relation.models.coarse_head import CoarseHead
+    from organ_relation.models.space_to_node import SpaceToNode
+    from organ_relation.models.dynamic_relation import DynamicRelation
 
 
 def scalar_projection(weight, vector):

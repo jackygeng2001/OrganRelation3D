@@ -1,6 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "organ-relation"
+name = "OrganRelation3D"
 version = "0.1.0"
-description = "Full-scan organ relation segmentation: specification and CPU metadata audit"
+description = "Full-scan 3D organ relation segmentation research"
+readme = "README.md"
 requires-python = ">=3.10"
+# Install backend-specific dependencies using environments/, never choose a GPU wheel here.
 dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["organ_relation*"]
+namespaces = false

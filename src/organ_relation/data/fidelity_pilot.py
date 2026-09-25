@@ -13,7 +13,8 @@ import time
 import numpy as np
 import psutil
 
-from .ct_stats import PROJECT_ROOT,code_hashes,contained_path,git_state,sha256
+from ..provenance import PROJECT_ROOT, code_hashes, git_state, sha256
+from .ct_stats import contained_path
 from .nifti_header import read_header
 from .fidelity import (LABELS,affine4,antialias_sigmas,build_target_grid,
                       ct_metrics,label_metrics,load_pair,resample,chunks)

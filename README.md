@@ -1,222 +1,150 @@
-# organ-relation
+# OrganRelation3D
 
-完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 数据工具、完整 Segmentor 前向图与独立 JointLoss。尚未实现训练入口、optimizer、真实 CT DataLoader、checkpoint 或正式训练。
+完整 CT 扫描范围的三维腹部多器官分割科研项目，面向 AMOS22 CT。GitHub 仓库名称为 **OrganRelation3D**，Python package 为 **organ_relation**。论文方法名称尚未确定，仓库名称不代表论文方法命名。
 
-- [方法定义与待确认配置](METHOD_SPEC.md)
-- [开发和设备约束](AGENTS.md)
-- [元数据统计语义与局限](docs/metadata_audit.md)
-- [完整范围候选预处理研究（未冻结）](docs/preprocessing_candidates.md)
-- [Windows CPU](environments/windows-cpu.md)、[AMD ROCm](environments/amd-rocm.md)、[NVIDIA CUDA](environments/nvidia-cuda.md)
+已完成：200 例训练 CT 头信息统计、三候选网格估算、10 例真实 CT 的 CPU 重采样保真度探索，以及完整 Segmentor / 独立 JointLoss 的 CPU 公式、形状和梯度验证。**尚无真实 CT 训练 Dataset、训练/验证/推理入口、optimizer、checkpoint 或完整模型 GPU benchmark；没有正式训练结果。**
 
-## 元数据统计无需安装依赖
+方法唯一工程依据：[METHOD_SPEC.md](METHOD_SPEC.md)。开发与三台设备规范：[AGENTS.md](AGENTS.md)。完整扫描、15 个前景节点、单次前向和全局有向关系保持不变；真实标签只进入监督损失和评估。
 
-Python >=3.10，元数据统计程序只使用标准库。直接从项目根目录运行，无需 pip install，不导入 torch，不改 GPU 环境。真实重采样的隔离 CPU 环境另见下文。
-
-```powershell
-python -B -m unittest discover -s tests -v
-python -B scripts/stat_training_ct.py --data-root "..\..\amos22" --output-dir "reports\ct_stats_run01"
-```
-
-数据路径由命令指定；上面的相对路径对应项目位于“项目/代码/organ-relation”、数据位于“项目/amos22”的布局。重命名项目无需修改源码。Linux 手动运行示例（替换数据挂载路径）：
-
-```bash
-python3 -B -m unittest discover -s tests -v
-python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir reports/ct_stats_run01
-```
-
-这不是 GPU 测试命令。若默认 python 不可用，可将命令开头替换为已存在 Python 解释器的绝对路径，不需要安装任何包。
-
-默认配置 [ct_stats.json](configs/ct_stats.json) 只选择 `dataset.json` 的 training 中编号 1–499 的病例；不能使用 JSON 的单一 modality 字段将整个数据集视为 CT。测试集编号 500 的边界问题不在本脚本处理范围。
-
-## 输出
-
-每次指定一个新的输出目录，禁止放在原始数据目录内，禁止覆盖已有目录：
-
-- `report.md`：汇总、风险与局限。
-- `cases.csv`：每例尺寸、spacing、覆盖范围和配对几何结果，UTF-8 BOM 便于 Windows 审查。
-- `anomalies.csv`：错误/警告逐条清单；无异常时只保留表头。
-- `metadata.json`：结构化完整头摘要、单位换算、哈希、清单、配置、代码/环境/Git 来源。
-
-退出码 0 表示无错误（仍可能有需审阅警告），2 表示异常或无效调用。不能仅凭退出码认定数据内容、重采样或模型测试已通过。所有生成报告默认被 Git 忽略，不会自动上传病例级信息。
-
-## 项目布局
-
-`src/organ_relation/` 包含数据工具及完整分割前向模块；`scripts/` 是工具入口；`tests/` 包含数据、几何、网络模块及公式/梯度测试；`configs/` 是探索和 CPU 微型配置；`docs/` 和 `environments/` 是说明。训练与真实数据推理流程尚未实现。
-
-## 后续门槛
-
-数据统计、三候选估算、10 例保真度与骨干已通过阶段验收。后续按冻结公式逐模块完成 CPU 数值与梯度验证；完整网络建立后再提供 AMD 显存测试脚本，由用户同步到工作站执行。正式输入尺寸、spacing、保真度阈值及评估协议仍未冻结。
-
-## 候选网格估算
-
-已有统计 JSON 后，无需访问原始 CT，只计算全部病例的三组候选尺寸、体素量、16/32 倍数补齐敏感性：
+## 代码导航
 
 ```text
-python -B scripts/estimate_preprocessing.py --metadata reports/ct_stats_20260922_final/metadata.json --output-dir reports/candidates_run01
+configs/                     探索配置与 CPU 微型配置
+src/organ_relation/
+  models/                    骨干、关系模块、Segmentor、模型配置与诊断工具
+  data/                      头信息统计、候选估算、CPU 保真度工具
+  losses.py                  独立 JointLoss，不依赖模型类或数据工具
+  provenance.py              仓库 Git 状态与源码/配置文件哈希
+  __init__.py                包版本，不自动导入 torch 或影像依赖
+scripts/                     命令行工具与严格的分组测试入口
+tests/                       合成数据、独立公式参考、数值梯度与集成测试
+docs/                        数据协议、结构说明及已有历史验证记录
+environments/                CPU / ROCm / CUDA 分开的环境说明
+reports/                     本地生成结果（Git 忽略，不随 clone 提供）
 ```
 
-候选参数见 configs/preprocessing_candidates.json，明确标为 exploratory_not_frozen。输出 report.md、cases.csv（200×3 行）和 estimates.json；不能将 estimated grid 或假设 padding 当作已经确认的预处理实现或显存验收。
+模型配置类与模型放在同一目录，但只依赖标准库；不导入 torch 也能做尺寸推导。包的三个 __init__.py 不做批量导出，使用明确的子模块 import。以下是当前 API；早期平铺模块的 import 已迁移，没有另建兼容层。
 
-## 少量真实 CT 保真度
+| 主要模块 | 职责 |
+|---|---|
+| models/backbone.py、backbone_config.py | Encoder/Decoder、可变尺寸及逐级 shape；UNetBackbone3D 仅为骨干直接连接 |
+| models/coarse_head.py、space_to_node.py | 16 类粗概率和 15 个软器官节点 |
+| models/dynamic_relation.py | 有向关系、消息求和、显式 FormulaGRU 和共享参数的 K 轮更新 |
+| models/node_to_space.py、residual_fusion.py | 独立 sigmoid 匹配、节点内容回写、纯残差融合 |
+| models/segmentor.py、segmentor_config.py | 严格连接已验收模块；输入只有 image |
+| models/diagnostics.py | 参数/梯度清单和显式选择设备的显存接口 |
+| losses.py | coarse/final 概率 CE 与每病例前景 Dice；仅监督接口接收 label |
+| data/nifti_header.py、ct_stats.py | 有界头读取、配对几何与训练 CT 统计 |
+| data/candidate_estimates.py | 已有元数据上的 A/B/C 网格和假设 padding 估算 |
+| data/fidelity.py | 物理网格重采样、往返几何和 CT 灰度指标 |
+| data/fidelity_pilot.py、fidelity_visuals.py | 小样本 CPU 探索运行与复核图；不是正式 Dataset 或模型评估器 |
 
-10 例 × A/B/C 的隔离 CPU 协议、强度缩放、物理网格、往返指标和运行命令见 [fidelity_protocol.md](docs/fidelity_protocol.md)。配置 [fidelity_pilot.json](configs/fidelity_pilot.json)，入口 scripts/test_resampling_fidelity.py；无需且不安装 torch。未安装可选 CPU 包时，保真度测试跳过，不能称已完成全部测试。
+今后有实际实现时再增加训练、推理、评估等模块；当前不创建空目录或虚假的入口。
 
-可变完整输入与解码尺寸对齐的工程研究见 [variable_shape_unet_review.md](docs/variable_shape_unet_review.md)。这些研究均不冻结正式 spacing/尺寸，不新增节点 mask，也不能代替完整网络 AMD 显存测试。
+## 环境和安装
 
-本轮 10 例真实 CPU 运行、53 项测试及限制记录见 [fidelity_cpu_validation.md](docs/fidelity_cpu_validation.md)；病例级报告与复核图仅留在本地 reports/fidelity_20260923_run01/。
+核心源码要求 Python >=3.10；锁定的重采样环境使用 Python >=3.11，当前两套 CPU 环境实测 Python 3.12.14。按设备阅读环境说明，不共用 PyTorch 安装方案：
 
-## 可变尺寸 3D U-Net 骨干
-
-实现与接口见 [backbone_stage1.md](docs/backbone_stage1.md)，实测记录见 [backbone_cpu_validation.md](docs/backbone_cpu_validation.md)。Encoder 返回 F 与高到低分辨率 skips；Decoder 接受 F 或后续同形 Fprime，按实际 skip 尺寸解码，输出同范围 16 类 logits。没有显式输入补齐、裁剪或节点 mask。
-
-configs/backbone_micro.json 只用于微型合成测试，不是正式结构或输入配置。骨干使用独立 `.venv-backbone-cpu` 与 CPU PyTorch；大文件下载由用户执行，不覆盖重采样、AMD 或 CUDA 环境。
-
-```powershell
-.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_backbone.py -v
-.\.venv-backbone-cpu\Scripts\python.exe -B scripts/check_backbone.py --device cpu --output reports/backbone_cpu_new.json
-```
-
-scripts/audit_backbone_shapes.py 仅从候选统计 JSON 推导各级 shape；scripts/check_backbone.py 只运行一次合成前后向，不实现训练或方法联合损失。两者均拒绝覆盖已有报告。GPU 显存接口已预留，但本轮未实测 GPU 或完整 CT 网络。
-
-## 粗预测与器官节点
-
-`CoarseHead(in_channels, bias=...)` 返回 `CoarsePrediction(logits, probabilities)`：两个张量均为 `[B,16,Df,Hf,Wf]`，概率由 16 类 softmax 得到。`SpaceToNode(epsilon=...)` 接收 F 与 P，返回具名字段：
-
-| 字段 | 形状 | 含义 |
+| 设备/用途 | 说明 | 当前状态 |
 |---|---|---|
-| z0 | `[B,15,C]` | `sum(P_i F)/(M_i+epsilon)`，只加权一次 |
-| mass | `[B,15,1]` | `sum(P_i)` |
-| centroid | `[B,15,3]` | `sum(P_i u)/(M_i+epsilon)`，坐标轴 D、H、W |
-| size | `[B,15,1]` | `M_i/N` |
-| confidence | `[B,15,1]` | `sum(P_i^2)/(M_i+epsilon)` |
+| Windows 笔记本 CPU | [windows-cpu.md](environments/windows-cpu.md) | PyTorch 2.8.0+cpu 张量测试；独立重采样环境的数据测试 |
+| AMD RX 7900 XTX 24GB | [amd-rocm.md](environments/amd-rocm.md) | 用户指定 ROCm 主环境，尚未实测 |
+| NVIDIA RTX 5060 8GB | [nvidia-cuda.md](environments/nvidia-cuda.md) | 用户指定辅助 CUDA 环境，尚未实测 |
 
-节点索引 0–14 对应前景类别 1–15；背景只参与 softmax。所有输出保留梯度，属性未来保持初值不表示 detach。接口不接受标签，不屏蔽零/小质量节点，不裁剪或补齐网格。语义使用 `bmm`，质心使用分轴求和，避免 `[B,15,C,N]` 张量和完整坐标网格。
-
-```python
-from organ_relation.coarse_head import CoarseHead
-from organ_relation.space_to_node import SpaceToNode
-
-# F 来自已验收 Encoder；以下数值仅示例，不是正式配置。
-head = CoarseHead(F.shape[1], bias=True).to(device=F.device, dtype=F.dtype)
-node_builder = SpaceToNode(epsilon=1e-6)
-coarse = head(F)
-nodes = node_builder(F, coarse.probabilities)
-```
-
-SpaceToNode 当前要求 F/P 同设备、同 dtype 的 FP32/FP64，且关闭 autocast；不会隐式转换或修正 P。调用方保证 P 是合法概率。FP16/BF16 与 AMP 归约需后续专门验证。epsilon 没有默认值，重建模块时须从配置显式传入，并随实验记录；参数为空的 state_dict 不携带这个配置值。CoarseHead 的 bias 同样须显式指定。
-
-CPU 复现命令（`src` 由测试入口加入路径）：
-
-```powershell
-.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_coarse_nodes.py -v
-.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_backbone.py -v
-.\.venv-resampling\Scripts\python.exe -B -m unittest discover -s tests -p test_metadata.py -q
-.\.venv-resampling\Scripts\python.exe -B -m unittest discover -s tests -p test_candidate_estimates.py -q
-.\.venv-resampling\Scripts\python.exe -B -m unittest discover -s tests -p test_fidelity.py -q
-```
-
-两套既有 CPU 环境分别执行张量与数据测试；不需要改动 GPU 环境。模块测试中的标量探针只用于检查自动微分，不是方法的联合训练损失。
-
-## 动态有向关系与显式 GRU
-
-`DynamicRelation(channels=C, relation_channels=Cr, rounds=K)` 接收 `z0:[B,15,C]`、`centroid:[B,15,3]`、`size/confidence:[B,15,1]`，默认返回 `zK:[B,15,C]`。这些构造参数必须显式配置，测试不冻结正式 C、Cr、K。
-
-```python
-from organ_relation.dynamic_relation import DynamicRelation
-
-# C、Cr、K 从调用方配置读取；nodes 来自 SpaceToNode。
-relation = DynamicRelation(C, relation_channels=Cr, rounds=K).to(
-    device=nodes.z0.device, dtype=nodes.z0.dtype)
-zK = relation(nodes.z0, nodes.centroid, nodes.size, nodes.confidence)
-```
-
-关系描述严格按 `[z_i;z_j;c_j-c_i;s_i;s_j;q_i;q_j]` 排列。`alpha[b,i,j]` 为 i→j，逐边 sigmoid 后将对角线置零；没有入边归一化、均值、对称化或器官屏蔽。消息通过 `alpha.transpose(1,2) @ W_m(z)` 聚合，W_m 无偏置。GRU 的六个矩阵、三个偏置显式实现：`U_z(rho*z)` 在 reset 后做线性映射，`u` 是候选写入比例。每轮先完成全部边和消息，再同步产生新 z；下一轮重新计算边，固定属性不修改、不 detach。
-
-`return_diagnostics=True` 返回 `RelationResult(zK, rounds)`；每个 `RelationRound(alpha, messages, z)` 的形状依次为 `[B,15,15]`、`[B,15,C]`、`[B,15,C]`。索引 t 记录从 z^(t) 到 z^(t+1) 的过程。诊断张量保留计算图，调用方应只读使用，长期保留会延长计算图生命周期；默认不额外保存诊断历史。
-
-参数总数为 `Cr*(2C+9)+1+7C²+3C`，与 K 无关。K 轮、全部节点和边复用同一套参数。重建时应从记录的配置恢复 C、Cr、K；state_dict 不包含 K。参数按标准 nn.Linear 初始化，正式实验仍须记录初始化约定及随机种子。
-
-当前仅验证 Windows CPU 的 FP32/FP64、关闭 autocast；非法 shape、混合设备/dtype 和 NaN/Inf 输入会被拒绝。有限性检查在 GPU 上可能带来同步开销，需后续实测。未运行真实 CT、GPU 或训练。
-
-```powershell
-.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_dynamic_relation.py -v
-```
-
-该测试覆盖独立循环参考、边方向、GRU reset 顺序、同步更新、每轮重算边权、参数共享及输入/参数梯度；全部既有回归命令见上文。
-
-## Node-to-Space 空间匹配与节点内容回写
-
-`NodeToSpace(channels=C, attention_channels=da, content_channels=Cg, beta_init=0.0)` 接收原始最深层 F:[B,C,Df,Hf,Wf] 和更新后 zK:[B,15,C]，默认返回 G:[B,Cg,Df,Hf,Wf]；三个维度由调用方配置，测试不冻结正式取值。
-
-```python
-from organ_relation.node_to_space import NodeToSpace
-
-writeback = NodeToSpace(C, attention_channels=da, content_channels=Cg).to(
-    device=F.device, dtype=F.dtype)
-G = writeback(F, zK)  # 原始 F；关系推理后的 zK。没有残差融合。
-```
-
-Q=W_Q(zK):[B,15,da]，K=W_K(F):[B,N,da]，V=W_V(zK):[B,15,Cg]。三个 Linear 均无 bias，beta 为 [15] 可学习参数。`A=sigmoid(Q@K.transpose(1,2)/sqrt(da)+beta[None,:,None])` 的形状为 [B,15,N]；每个器官、每个位置独立门控，无 softmax、不乘 P。`G=(V.transpose(1,2)@A).reshape(B,Cg,Df,Hf,Wf)` 沿器官轴求和，回写 V 而非原 F，不生成 [B,15,Cg,Df,Hf,Wf] 张量。空间展开时 W 轴最快。
-
-`return_diagnostics=True` 返回 `NodeToSpaceResult(G,Q,K,V,A)`，保留梯度，供只读诊断；长期保存会延长计算图生命周期。默认标准 Linear 初始化和 beta 零初始化是工程初值，beta_init 可配置，正式实验应记录配置和种子。参数总数为 `C*(2da+Cg)+15`。接口不接受标签、P、z0 关键字或外部 attention；形状不能证明输入来源，调用方仍须保证使用原 F 和 zK。
-
-当前支持 FP32/FP64 且关闭 autocast，拒绝非法 shape/dtype、设备不一致、非有限输入和检测到的非有限中间结果。保留所有已有模块的严格检查；后续 AMD 性能测试须审查 finite 归约及主机判断导致的 GPU 同步开销，本阶段不为性能删除。真实 CT、GPU 显存、AMD/CUDA 与混合精度尚未验证。
-
-```powershell
-.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_node_to_space.py -v
-```
-
-Node-to-Space 单模块测试包含手算、独立标量循环、FP64 输入与全部参数数值梯度，以及已有模块至 G 的 CPU 合成梯度链路；完整 Segmentor 与独立 JointLoss 见下文。既有全部回归命令见上文。
-
-## 纯残差融合与完整 Segmentor 前向
-
-`ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅计算 `Fprime=F+phi(G)`，phi 是 Cg→C 的 1x1x1 Conv3d，bias 必须显式配置。无 scale、concat、gate、归一化或激活。
-
-`Segmentor(SegmentorConfig)` 直接复用已验收模块。`forward(image)` 唯一输入是 `[B,1,D,H,W]`，返回 `SegmentorOutput(coarse_logits, final_logits)`，形状分别为 `[B,16,Df,Hf,Wf]` 和 `[B,16,D,H,W]`。不计算监督损失，不上采样粗 logits，不对最终 logits 执行 softmax。
+PyTorch 与影像库由 environments/ 分别管理，pyproject.toml 故意不自动选择 CPU/CUDA/ROCm wheel。已有对应依赖及 setuptools>=68 时，在仓库根目录执行以下命令即可 editable install；命令离线且不安装/升级依赖：
 
 ```text
-image → Encoder → F,skips
-F → CoarseHead → logits,P
-F,P → SpaceToNode → z0,centroid,size,confidence
-z0,centroid,size,confidence → DynamicRelation → zK
-原 F,zK → NodeToSpace → G
-原 F,G → ResidualFusion → Fprime
-Fprime,原 skips → Decoder → final_logits
+python -m pip install --no-deps --no-build-isolation --no-index -e .
+python -c "import organ_relation; print(organ_relation.__version__)"
 ```
 
-配置类 `src/organ_relation/segmentor_config.py` 不依赖 torch；骨干参数、coarse_bias、fusion_bias、epsilon、Cr、K、da、Cg、beta_init 均显式记录。C 从骨干末级派生，避免接口通道配置冲突。`configs/segmentor_micro.json` 明确仅供 CPU 合成验证；其 `[4,8,16]` 通道、K=2、bias 和其他数值均不是正式实验默认值。样例输入 `[1,1,17,18,19]` 的 coarse/final 形状分别为 `[1,16,5,5,5]`、`[1,16,17,18,19]`。
+将 python 替换为目标环境解释器。若缺少构建工具，应在独立开发环境先补齐；不要为安装本包覆盖现有 GPU 环境。较大依赖由用户手动下载。本机在 .venv-backbone-cpu 中实际验证上述安装。
 
-独立的 `forward_with_diagnostics(image)` 返回 `SegmentorDiagnostics(output, encoder, coarse, nodes, relation, writeback, fused)`，用于只读检查来源与梯度。普通 forward 不接受诊断参数，不返回 Q/K/V/A 或轮次历史，不向模块属性缓存中间结果；自动微分仍保留反向所需计算图。诊断入口的中间张量不 detach，长期持有会增加内存占用。
+仓库脚本和既有测试也支持直接从 clone 运行：入口定位自身仓库的 src/，不依赖本地绝对路径或工作目录名称。不要求本地文件夹改名；现有 venv 内含绝对路径，迁移文件夹后应重建环境，不能假定 venv 可直接搬迁。
+
+## CPU 验证
+
+原有 **190 项**测试分为张量 137 项和数据 53 项。两套环境有意分开，避免为单元测试混装 GPU 或影像依赖：
 
 ```powershell
-.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_segmentor.py -v
+.\.venv-backbone-cpu\Scripts\python.exe -B scripts/run_tests.py --suite tensor
+.\.venv-resampling\Scripts\python.exe -B scripts/run_tests.py --suite data
 ```
 
-新增测试包括融合手算/解析梯度/数值梯度、对象身份与唯一调用顺序、各轴奇偶/单例尺寸、final-only 反向及诊断释放。仅测试代码会用 hooks 阻断 G 的梯度或替换 G，分别证明最终分支到粗头的路径经过回写，以及 G 对最终结果有影响；生产前向不含这些干预。既有全部回归命令见上文。保留有限性/autocast 检查及后续 AMD 同步开销审查事项；未验证 GPU、AMP、真实 CT 或正式训练。
+只有标准库时可运行 `python -B scripts/run_tests.py --suite metadata`（43 项）。同时具备全部依赖的独立 CPU 环境可使用 --suite all。Linux 将解释器替换为相应 venv 的 bin/python。
 
-## 独立 JointLoss
+该入口遇到失败、导入错误、零测试或任何跳过均返回非零；新增测试文件未归入组也会报错。直接 unittest discover 仍可用于单文件开发，但缺依赖时的 skip 不能视为完整验收。测试只用合成张量和临时合成 NIfTI，不需要 AMOS 或 GPU。
 
-`JointLoss(epsilon=..., lambda_c=..., align_corners=...)` 三项均必填、无默认值。METHOD_SPEC 已确定 `mean_b(final_CE+final_DiceLoss+lambda_c*(coarse_CE+coarse_DiceLoss))`；未冻结的是 lambda_c 数值、统一 epsilon 数值及粗分支插值 align_corners，不能从微型测试数值推断正式配置。下面仅展示接线，不提供默认数值：
+| 测试文件 | 数量 |
+|---|---:|
+| test_backbone / test_coarse_nodes | 22 / 24 |
+| test_dynamic_relation / test_node_to_space | 27 / 23 |
+| test_segmentor / test_joint_loss | 20 / 21 |
+| test_metadata / test_candidate_estimates / test_fidelity | 32 / 11 / 10 |
+
+## 模型与损失接口
 
 ```python
-from organ_relation.joint_loss import JointLoss
+import json
+import torch
+from organ_relation.models.segmentor import Segmentor
+from organ_relation.models.segmentor_config import SegmentorConfig
 
+with open("configs/segmentor_micro.json", encoding="utf-8") as stream:
+    config = json.load(stream)
+torch.set_num_threads(config["probe"]["cpu_threads"])
+torch.manual_seed(config["probe"]["seed"])
+model = Segmentor(SegmentorConfig(**config["model"]))
+image = torch.randn(*config["probe"]["input_shape_bcdhw"])
+output = model(image)
+print(output.coarse_logits.shape, output.final_logits.shape)
+# [1,16,5,5,5] 和 [1,16,17,18,19]；仅 CPU 微型示例。
+```
+
+数据流为 `image → Encoder → F,skips → CoarseHead(F) → SpaceToNode(F,P) → DynamicRelation → zK → NodeToSpace(原F,zK) → G → ResidualFusion(原F,G) → Fprime → Decoder(Fprime,原skips)`。普通前向只返回 coarse/final logits；显式 forward_with_diagnostics(image) 才返回中间量和各轮记录。诊断保留计算图，不应长期持有。
+
+```python
+from organ_relation.losses import JointLoss
+
+# 以下两个 explicit_* 必须由调用方明确提供，不在此选择正式数值。
 criterion = JointLoss(epsilon=model.config.epsilon,
                       lambda_c=explicit_lambda_c,
                       align_corners=explicit_coarse_align_corners)
-output = model(image)  # 模型仍然不接收标签。
 loss = criterion(output.coarse_logits, output.final_logits, label)
-loss.total.backward()  # 此处仅说明接口；本项目尚无 optimizer 或训练循环。
 ```
 
-label 为 `[B,D,H,W]` 的 int64 类别索引 0–15。coarse logits 先三线性插值到 final/label 网格再 softmax，final logits 直接 softmax，GT 永不插值。CE 等价于每病例 `-mean_x(log(S[label(x)]+epsilon))`，包含背景；不调用 CrossEntropyLoss、不 clamp。Dice 是每病例每前景类 `(2*intersection+epsilon)/(predicted_mass+target_count+epsilon)`，全部 15 类等权平均，包括空类，然后两个分支按公式相加再 batch 平均。两个分支共用同一个 epsilon，与模型配置的同符号约定保持一致。
+label 为同输入网格 [B,D,H,W] 的 int64 类别索引 0–15。粗 logits 先插值再 softmax，GT 不插值；CE 使用 log(S+epsilon) 且包含背景，Dice 按病例计算全部 15 个前景类，再组合分支并 batch 平均。详细公式唯一维护在 METHOD_SPEC。S=1 时 CE 可略为负值，这是冻结公式的结果。
 
-返回 `JointLossResult(total, per_case, coarse, final)`；total 为标量、per_case 为 `[B]`，coarse/final 是 `BranchLoss(ce, dice_per_class, dice_loss, segmentation)`，形状分别为 `[B]`、`[B,15]`、`[B]`、`[B]`。仅返回小型统计，梯度保留；gather/scatter_add 避免稠密 one-hot GT。epsilon/lambda_c/align_corners 为调用方配置，不在无参数 loss 的 state_dict 中。
+当前完整模型/loss 支持已验证的 CPU FP32/FP64、关闭 autocast。finite/autocast 检查保留；GPU 同步开销、完整双分支内存和 GPU scatter 归约的数值/复现性留待 AMD 实测。
 
-冻结公式有一个需保留的数值性质：S=1 时 `-log(1+epsilon)<0`，因此 CE/总损失并非严格非负；这不是实现错误，不能通过截零或替换标准 CE 修正。当前支持 FP32/FP64、关闭 autocast，严格检查类别、shape/dtype/device 和有限性。全体积概率与反向内存、scatter 归约的 GPU 数值/复现性和运行时检查同步开销均待 AMD 阶段验证。
+## 工具入口与配置
 
-```powershell
-.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_joint_loss.py -v
+| 入口 | 用途及输入 |
+|---|---|
+| scripts/stat_training_ct.py | --data-root、--output-dir；标准库，只读取 NIfTI 头 |
+| scripts/estimate_preprocessing.py | --metadata、--output-dir；不读取 CT 体素 |
+| scripts/test_resampling_fidelity.py | --data-root、--metadata、--output-dir；CPU 小样本保真度 |
+| scripts/summarize_fidelity.py | --report-dir；只汇总已有探索结果 |
+| scripts/audit_backbone_shapes.py | --estimates、--output；纯尺寸推导 |
+| scripts/check_backbone.py | --device cpu、--output；微型骨干一次前后向，非完整模型 benchmark |
+
+各入口支持 --help。例如从仓库根目录运行：
+
+```text
+python -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir reports/ct_stats_run01
+python -B scripts/estimate_preprocessing.py --metadata reports/ct_stats_run01/metadata.json --output-dir reports/candidates_run01
 ```
 
-测试包含手算、错误插值顺序/全 batch Dice/标准 CE 反例、独立三线性插值和逐病例逐类别参考、双分支数值梯度，以及 Segmentor+JointLoss 完整反向。所有样例系数仅供合成测试；没有 optimizer、训练循环、DataLoader 或真实数据/GPU 运行。
+Windows 同样用 --data-root 指定实际位置。原始数据只读，运行输出放在数据目录之外的新目录。头统计无错误不代表体素内容或重采样质量已通过。探索重采样和汇总命令见 [fidelity_protocol.md](docs/fidelity_protocol.md)。
+
+ct_stats.json 定义训练清单选择及空间容差；preprocessing_candidates.json 为未冻结的 A/B/C 与假设 padding 对照；fidelity_pilot.json 为已记录的小样本探索协议。backbone_micro.json / segmentor_micro.json 只用于 CPU 合成测试。正式 spacing、模型宽度、loss 配置等仍待实验决策，样例不提供正式默认值。
+
+## 复现、数据保护与后续开发
+
+state_dict 保存已注册参数；重建模型还须保存完整 SegmentorConfig，包括 K、epsilon、步幅、归一化和插值等无参数设置。loss 的 epsilon/lambda_c/align_corners 不在 state_dict 中，必须另存；模型与 loss 使用一致的 epsilon。应保存 state_dict 与配置，不依赖整个 Python 模型对象的 pickle 跨源码重构恢复。
+
+正式实验另需记录 Git commit/dirty、依赖和 GPU 后端、随机种子及恢复所需 RNG 状态、数据划分/哈希、预处理及空间逆变换、评估协议；未来可恢复训练还需 optimizer 等状态。当前没有实现 checkpoint 或实验管理系统。
+
+数据、影像、权重、缓存、venv、预测、日志和 reports/ 默认忽略。不要用 git add -f 上传这些内容；也不要把患者 PNG/CSV 移到源码或 docs 绕过输出目录。已有 docs/*validation.md 是当时的历史记录，日期、测试数量及“未实现”描述只针对当时阶段；当前状态以本 README 和 METHOD_SPEC 为准。后续不为每个小阶段另建报告文件。
+
+下一步先实现完整范围的数据到 Tensor 契约及合成测试，再提供完整 Segmentor+JointLoss 的 AMD 手动验证入口。正式预处理、评估及实验配置须单独确认；不能把探索工具直接当作生产 Dataset，也不能根据微型骨干内存断言 AMD 24GB 可训练。NVIDIA 仅承担后续兼容验证。

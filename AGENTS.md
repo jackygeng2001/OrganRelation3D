@@ -1,6 +1,6 @@
 # 项目开发规范
 
-本目录为独立项目，暂名 organ-relation，可在确定正式名称后重命名。代码项目均放在项目文件夹的“代码”目录内。所有任务首先读取本文件和 METHOD_SPEC.md。
+本目录为独立项目；GitHub 仓库/发行名称为 OrganRelation3D，Python package 保持 organ_relation。论文方法名尚未确定，不虚构或提前绑定；本地目录名不影响包名。代码项目均放在项目文件夹的“代码”目录内。所有任务首先读取本文件和 METHOD_SPEC.md。
 
 ## 方法与任务边界
 
@@ -36,7 +36,9 @@
 - GitHub 用于阶段同步源代码、配置、方法文档、测试。未经明确发布任务不上传远程。
 - 不提交 AMOS 原始数据、患者影像、标签体积、权重、缓存、大型输出。病例级本地报告默认忽略；需要分享时先确认范围。
 - 正式实验记录 Git commit、完整配置、数据划分及哈希、环境、随机种子、评估结果。
-- 数据阶段及完整 Segmentor 前向已通过阶段验收。当前授权仅依据 METHOD_SPEC.md 实现独立 JointLoss 及 CPU 合成测试，不修改已验收模块。粗 logits 先三线性插值再 softmax，final logits 和 GT 不插值；概率 CE 使用 log(S+epsilon) 且含背景，Dice 每病例计算全部 15 个前景类（不跳过空类），再组合分支并 batch 平均。lambda_c、epsilon 数值及 coarse 插值 align_corners 未冻结，必须显式传参，不设默认值；epsilon 须与模型同符号约定一致。Segmentor 仍只接收 image，监督标签仅进入 loss。仅运行 Windows CPU 合成及全部回归；不实现训练入口、optimizer、DataLoader、augmentation、checkpoint 或 AMP，不运行真实 CT、GPU 或正式训练。正式宽度、spacing 等仍未冻结。
+- 数据阶段、完整 Segmentor 与独立 JointLoss 已通过阶段验收。工程整理不得改变已验收的公式、数值行为、配置值或测试断言。lambda_c、epsilon 和 coarse 插值 align_corners 仍须显式传参，正式数值未冻结。当前没有训练入口、optimizer、DataLoader、augmentation、checkpoint 或 AMP；后续新增工作以用户当轮授权为准。
+- 源码按职责归入 models/ 与 data/，单个损失保留 losses.py，复现工具为 provenance.py。模型不依赖数据工具或 loss；各包 __init__.py 保持轻量。无实际代码时不建立空目录，不增加泛化框架。
+- 原有 190 项回归由 scripts/run_tests.py 按 tensor/data 两组执行，任何跳过不算验收通过。依赖由 environments/ 分设备管理；本包 editable install 不自动选择或替换 PyTorch 后端。
 
 ## 验收和交付
 

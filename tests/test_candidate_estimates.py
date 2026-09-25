@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
-from organ_relation.candidate_estimates import estimate_case, estimate_dataset, run
+from organ_relation.data.candidate_estimates import estimate_case, estimate_dataset, run
 
 ROOT = Path(__file__).resolve().parents[1]
 

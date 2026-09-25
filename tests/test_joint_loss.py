@@ -19,9 +19,9 @@ except ModuleNotFoundError as exc:
 else:
     TORCH_AVAILABLE = True
     from torch.nn import functional as functional
-    from organ_relation.joint_loss import JointLoss, BranchLoss, JointLossResult
-    from organ_relation.segmentor import Segmentor
-    from organ_relation.segmentor_config import SegmentorConfig
+    from organ_relation.losses import JointLoss, BranchLoss, JointLossResult
+    from organ_relation.models.segmentor import Segmentor
+    from organ_relation.models.segmentor_config import SegmentorConfig
 
 
 def reference_resize(logits, target_shape, align_corners):
@@ -120,8 +120,8 @@ class JointLossTests(unittest.TestCase):
         def resize(*args, **kwargs):
             captured['up'] = interpolate(*args, **kwargs)
             return captured['up']
-        with patch('organ_relation.joint_loss.functional.interpolate', side_effect=resize) as resize_spy, \
-                patch('organ_relation.joint_loss.torch.softmax', wraps=torch.softmax) as softmax_spy:
+        with patch('organ_relation.losses.functional.interpolate', side_effect=resize) as resize_spy, \
+                patch('organ_relation.losses.torch.softmax', wraps=torch.softmax) as softmax_spy:
             criterion(coarse, final, label)
         self.assertEqual(resize_spy.call_count, 1)
         self.assertIs(resize_spy.call_args.args[0], coarse)

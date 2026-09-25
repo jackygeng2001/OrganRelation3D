@@ -11,9 +11,9 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
 try:
     import numpy as np
     import nibabel as nib
-    from organ_relation.fidelity import (affine4, build_target_grid, resample,
+    from organ_relation.data.fidelity import (affine4, build_target_grid, resample,
         antialias_sigmas, load_pair, label_metrics, ct_metrics)
-    from organ_relation.nifti_header import read_header
+    from organ_relation.data.nifti_header import read_header
     AVAILABLE=True
 except ImportError:
     AVAILABLE=False
@@ -123,7 +123,7 @@ class FidelityTests(unittest.TestCase):
             with self.assertRaises(ValueError):load_pair(ip,lp)
 
     def test_sequential_pilot_end_to_end_and_source_unchanged(self):
-        from organ_relation.fidelity_pilot import main
+        from organ_relation.data.fidelity_pilot import main
         root=Path(__file__).resolve().parents[1]
         config=json.loads((root/'configs/fidelity_pilot.json').read_text(encoding='utf-8'))
         with tempfile.TemporaryDirectory() as tmp:

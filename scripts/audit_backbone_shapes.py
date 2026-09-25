@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from organ_relation.backbone_config import BackboneConfig
-from organ_relation.ct_stats import PROJECT_ROOT,git_state,sha256
+from organ_relation.models.backbone_config import BackboneConfig
+from organ_relation.provenance import PROJECT_ROOT,git_state,sha256
 
 
 def audit_shapes(records,config):
@@ -38,7 +38,7 @@ def main():
     result={'scope':'shape algebra only; micro config is not formal architecture; no tensor/GPU memory claim',
             'config':raw,'git':git_state(),'estimates_sha256':sha256(args.estimates),
             'config_sha256':sha256(args.config),'script_sha256':sha256(Path(__file__)),
-            'shape_module_sha256':sha256(PROJECT_ROOT/'src/organ_relation/backbone_config.py'),
+            'shape_module_sha256':sha256(PROJECT_ROOT/'src/organ_relation/models/backbone_config.py'),
             'case_count':len({r['case_id'] for r in rows}),'case_candidate_count':len(rows),'rows':rows}
     output.parent.mkdir(parents=True,exist_ok=True)
     output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')

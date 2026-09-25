@@ -12,7 +12,7 @@ import weakref
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from organ_relation.segmentor_config import SegmentorConfig
+from organ_relation.models.segmentor_config import SegmentorConfig
 try:
     import torch
 except ModuleNotFoundError as exc:
@@ -21,8 +21,8 @@ except ModuleNotFoundError as exc:
     TORCH_AVAILABLE = False
 else:
     TORCH_AVAILABLE = True
-    from organ_relation.residual_fusion import ResidualFusion
-    from organ_relation.segmentor import Segmentor, SegmentorOutput, SegmentorDiagnostics
+    from organ_relation.models.residual_fusion import ResidualFusion
+    from organ_relation.models.segmentor import Segmentor, SegmentorOutput, SegmentorDiagnostics
 
 
 def micro():

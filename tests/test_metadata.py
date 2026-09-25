@@ -13,8 +13,9 @@ from unittest.mock import patch
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"src"))
-from organ_relation.nifti_header import HeaderError, compare_geometry, parse_header, read_header
-from organ_relation.ct_stats import audit, git_state, quantile, select_training
+from organ_relation.data.nifti_header import HeaderError, compare_geometry, parse_header, read_header
+from organ_relation.data.ct_stats import audit, quantile, select_training
+from organ_relation.provenance import git_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -164,7 +165,7 @@ class HeaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td)/"case.nii.gz"
             p.write_bytes(b"dummy")
-            with patch("organ_relation.nifti_header.gzip.open", return_value=BoundedReader()):
+            with patch("organ_relation.data.nifti_header.gzip.open", return_value=BoundedReader()):
                 self.assertEqual(read_header(p)["shape_native"], [2,3,4])
 
 
@@ -216,7 +217,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(result["summary"]["anomaly_code_counts"], {"image_label_geometry_mismatch":1})
 
     def test_zlib_corruption_is_reported(self):
-        with patch("organ_relation.ct_stats.read_header", side_effect=zlib.error("bad compressed block")):
+        with patch("organ_relation.data.ct_stats.read_header", side_effect=zlib.error("bad compressed block")):
             result = audit(self.data, self.config_path, self.base/"output")
         self.assertEqual(result["summary"]["error_count"], 4)
         self.assertEqual(result["summary"]["readable_pair_count"], 0)
@@ -258,14 +259,14 @@ class AuditTests(unittest.TestCase):
         self.assertAlmostEqual(quantile([1.,2.,3.,4.], .9), 3.7)
 
     def test_git_provenance_explicit_utf8_for_chinese_path(self):
-        with patch("organ_relation.ct_stats.subprocess.check_output",
+        with patch("organ_relation.provenance.subprocess.check_output",
                    side_effect=[str(ROOT), "abc123", ""]) as run:
             self.assertEqual(git_state(), {"commit":"abc123", "dirty":False})
         for call in run.call_args_list:
             self.assertEqual(call.kwargs["encoding"], "utf-8")
 
     def test_parent_repository_not_claimed_as_project_commit(self):
-        with patch("organ_relation.ct_stats.subprocess.check_output", return_value=str(ROOT.parent)):
+        with patch("organ_relation.provenance.subprocess.check_output", return_value=str(ROOT.parent)):
             self.assertIsNone(git_state()["commit"])
 
 

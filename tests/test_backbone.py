@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from organ_relation.backbone_config import BackboneConfig
+from organ_relation.models.backbone_config import BackboneConfig
 ROOT=Path(__file__).resolve().parents[1]
 try:
     import torch
@@ -17,8 +17,8 @@ except ModuleNotFoundError as exc:
     TORCH_AVAILABLE=False
 else:
     TORCH_AVAILABLE=True
-    from organ_relation.backbone import Encoder3D,Decoder3D,UNetBackbone3D,resize_to_skip
-    from organ_relation.backbone_diagnostics import DeviceMemoryMonitor,parameter_inventory
+    from organ_relation.models.backbone import Encoder3D,Decoder3D,UNetBackbone3D,resize_to_skip
+    from organ_relation.models.diagnostics import DeviceMemoryMonitor,parameter_inventory
 
 
 def micro(**overrides):

@@ -12,18 +12,11 @@ import math
 from pathlib import Path
 import platform
 import re
-import subprocess
 import sys
 import zlib
 
+from ..provenance import PROJECT_ROOT, code_hashes, git_state, sha256
 from .nifti_header import HeaderError, compare_geometry, read_header
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
 
 def contained_path(root: Path, relative: str) -> Path:
     if not isinstance(relative, str) or Path(relative).is_absolute():
@@ -136,24 +129,6 @@ def summarize(records: list[dict], anomalies: list[dict], excluded_count: int) -
         "distributions": distributions, "representative_case_ids": representatives,
         "representative_note": "Metadata extremes only; candidate-resampled sizes and small-organ risks not evaluated.",
     }
-
-
-def git_state() -> dict:
-    def run(*args):
-        return subprocess.check_output(["git", "-C", str(PROJECT_ROOT), *args],
-                                       stderr=subprocess.DEVNULL, text=True,
-                                       encoding="utf-8").strip()
-    try:
-        if Path(run("rev-parse", "--show-toplevel")).resolve() != PROJECT_ROOT:
-            return {"commit": None, "reason": "not an independent project repository"}
-        return {"commit": run("rev-parse", "HEAD"), "dirty": bool(run("status", "--porcelain"))}
-    except (OSError, subprocess.CalledProcessError):
-        return {"commit": None, "reason": "no available project commit"}
-
-
-def code_hashes() -> dict:
-    files = sorted([*PROJECT_ROOT.glob("src/**/*.py"), *PROJECT_ROOT.glob("scripts/*.py")])
-    return {p.relative_to(PROJECT_ROOT).as_posix(): sha256(p) for p in files}
 
 
 def write_csv(path: Path, fields: list[str], rows: list[dict]):

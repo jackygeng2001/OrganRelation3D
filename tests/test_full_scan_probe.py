@@ -206,6 +206,100 @@ class ProbeTests(unittest.TestCase):
         self.assertIsNone(report['stages'][0]['device_used_bytes'])
         self.assertIn('unavailable_reason', ' '.join(report['stages'][0]))
 
+    def test_profile_preserves_outputs_loss_and_all_gradients(self):
+        plain_code, plain = self.run_probe(self.arguments('backward', 'plain'))
+        code, profiled = self.run_probe(self.arguments('backward', 'profiled')+['--profile-forward-memory'])
+        self.assertEqual((plain_code, code), (0, 0))
+        self.assertNotIn('forward_memory', plain)
+        self.assertEqual(plain['loss_values'], profiled['loss_values'])
+        self.assertEqual(plain['gradients'], profiled['gradients'])
+
+        from organ_relation.models.segmentor import Segmentor
+        from organ_relation.models.segmentor_config import SegmentorConfig
+        from organ_relation.models.forward_memory import ForwardMemoryProfile
+        config = json.loads((ROOT / 'configs/segmentor_micro.json').read_text())
+        model = Segmentor(SegmentorConfig(**config['model']))
+        reference = copy.deepcopy(model)
+        image = torch.randn(1, 1, 5, 7, 9, requires_grad=True)
+        reference_image = image.detach().clone().requires_grad_()
+        trace = {}
+        with ForwardMemoryProfile(model, 'cpu', trace, lambda: None):
+            actual = model(image)
+        expected = reference(reference_image)
+        for a, b in zip(actual, expected):
+            self.assertTrue(torch.equal(a, b))
+        sum(t.square().mean() for t in actual).backward()
+        sum(t.square().mean() for t in expected).backward()
+        self.assertTrue(torch.equal(image.grad, reference_image.grad))
+        for a, b in zip(model.parameters(), reference.parameters()):
+            self.assertIsNotNone(a.grad)
+            self.assertTrue(torch.equal(a.grad, b.grad))
+        self.assertTrue(all(not m._forward_hooks and not m._forward_pre_hooks for m in model.modules()))
+        json.dumps(trace, allow_nan=False)  # No tensor or nonfinite JSON payload.
+        stages = [e['name'] for e in trace['entries'] if e['kind'] == 'module' and e['parent'] == 0]
+        self.assertEqual(stages, ['encoder', 'coarse_head', 'space_to_node', 'relation',
+                                  'node_to_space', 'fusion', 'decoder'])
+        ops = [e['name'] for e in trace['entries'] if e['kind'] == 'operator']
+        self.assertIn('aten.cat.default', ops)
+        self.assertIn('aten.upsample_trilinear3d.default', ops)
+        self.assertTrue(all(e['status'] == 'passed' and e['peak_allocated_bytes'] is None
+                            for e in trace['entries']))
+
+    def test_profile_operator_oom_is_saved_and_hooks_are_removed(self):
+        from torch.utils._python_dispatch import TorchDispatchMode
+        from organ_relation.models.segmentor import Segmentor
+        captured = []
+        original = Segmentor.forward
+        def forward(model, image):
+            captured.append(model)
+            return original(model, image)
+        class FailConvolution(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                if str(func) == 'aten.convolution.default' and args[0].shape[1] == 12:
+                    raise torch.OutOfMemoryError('synthetic Tried to allocate 11.26 GiB')
+                return func(*args, **(kwargs or {}))
+        with FailConvolution(), patch.object(Segmentor, 'forward', forward):
+            code, report = self.run_probe(self.arguments('forward')+['--profile-forward-memory'])
+        self.assertEqual(code, 2)
+        self.assertTrue(report['oom'])
+        trace = report['forward_memory']
+        self.assertEqual(trace['status'], 'failed')
+        active = [trace['entries'][i] for i in trace['failure']['active_entries']]
+        self.assertEqual(active[-1]['name'], 'aten.convolution.default')
+        self.assertEqual(active[-2]['name'], 'decoder.blocks.1.layers.0')
+        self.assertEqual(active[-1]['inputs']['args'][0]['shape'], [1, 12, 4, 6, 8])
+        self.assertIn('11.26 GiB', trace['failure']['error'])
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(all(not m._forward_hooks and not m._forward_pre_hooks for m in captured[0].modules()))
+        self.assertTrue(all(e['status'] != 'running' for e in trace['entries']))
+
+    def test_profile_nested_peaks_survive_resets(self):
+        from organ_relation.models.forward_memory import ForwardMemoryProfile
+        trace = {}
+        profiler = ForwardMemoryProfile(torch.nn.Identity(), 'cuda:0', trace, lambda: None)
+        with patch.object(torch.cuda, 'synchronize'), patch.object(torch.cuda, 'reset_peak_memory_stats'), \
+             patch.object(torch.cuda, 'memory_allocated', return_value=10), \
+             patch.object(torch.cuda, 'memory_reserved', return_value=20), \
+             patch.object(torch.cuda, 'max_memory_allocated', side_effect=[100, 40, 90, 20]), \
+             patch.object(torch.cuda, 'max_memory_reserved', side_effect=[200, 80, 180, 40]):
+            root = profiler._start('module', 'root', (), {})
+            child = profiler._start('operator', 'op', (), {})
+            profiler._finish(child, None)
+            profiler._finish(root, None)
+        self.assertEqual(root['peak_allocated_bytes'], 90)
+        self.assertEqual(root['peak_reserved_bytes'], 180)
+        self.assertEqual(child['peak_allocated_bytes'], 90)
+        # The parent StageRecorder must not lose these peaks to the final reset.
+        report = dict(stages=[], forward_memory=trace)
+        recorder = probe.StageRecorder(torch, torch.device('cpu'), report, lambda: None)
+        recorder.run('forward', lambda: None)
+        self.assertEqual(report['stages'][0]['peak_allocated_bytes'], 90)
+
+    def test_profile_requires_forward(self):
+        code, report = self.run_probe(self.arguments('preprocess')+['--profile-forward-memory'])
+        self.assertEqual(code, 2)
+        self.assertIn('requires --through forward', report['error'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -27,6 +27,8 @@ def parser():
     p.add_argument('--selection-config', type=Path, default=ROOT / 'configs/ct_stats.json')
     p.add_argument('--model-config', type=Path, help='Explicit JSON with model fields; no capacity default')
     p.add_argument('--allow-micro-model', action='store_true', help='Explicit diagnostic use, never formal capacity validation')
+    p.add_argument('--profile-forward-memory', action='store_true',
+                   help='Opt-in module/ATen memory trace of normal autograd forward; adds synchronization overhead')
     p.add_argument('--through', choices=STAGES, required=True, help='Run prerequisites and stop after this stage')
     p.add_argument('--backend', choices=('rocm', 'cpu'), default='rocm')
     p.add_argument('--device', required=True, help='cuda:0 for ROCm; cpu only for small synthetic checks')
@@ -42,6 +44,8 @@ def parser():
 
 
 def check_arguments(args):
+    if args.profile_forward_memory and STAGES.index(args.through) < STAGES.index('forward'):
+        raise ValueError('--profile-forward-memory requires --through forward or later')
     if args.backend == 'cpu' and (args.device != 'cpu' or not args.cpu_synthetic):
         raise ValueError('CPU probe requires --device cpu --cpu-synthetic; never use real full scans on the laptop')
     if args.backend == 'rocm' and (not args.device.startswith('cuda:') or args.cpu_synthetic):
@@ -116,6 +120,13 @@ class StageRecorder:
                 entry['memory_unavailable_reason'] = str(memory_error)
             raise
         finally:
+            # Internal profiling resets allocator peaks at nested boundaries.
+            # Its root module includes every interval, even on an operator OOM.
+            if name == 'forward' and self.report.get('forward_memory', {}).get('entries'):
+                root = self.report['forward_memory']['entries'][0]
+                for key in ('peak_allocated_bytes', 'peak_reserved_bytes'):
+                    values = [v for v in (entry.get(key), root.get(key)) if v is not None]
+                    entry[key] = max(values, default=None)
             self.save()
 
 
@@ -212,7 +223,14 @@ def execute(args, report, save):
         report['optimizer'] = {'name': args.optimizer, 'options': options, 'purpose': 'single engineering step; not formal training config'}
         optimizer.zero_grad(set_to_none=True)
     # No autocast context; all model inputs/parameters are FP32.
-    output = recorder.run('forward', lambda: model(image))
+    def forward():
+        if not args.profile_forward_memory:
+            return model(image)
+        from organ_relation.models.forward_memory import ForwardMemoryProfile
+        report['forward_memory'] = {}
+        with ForwardMemoryProfile(model, device, report['forward_memory'], save):
+            return model(image)
+    output = recorder.run('forward', forward)
     report['output_shapes'] = {'coarse_logits': list(output.coarse_logits.shape), 'final_logits': list(output.final_logits.shape)}
     if args.through == 'forward':
         return

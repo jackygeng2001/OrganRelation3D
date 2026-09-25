@@ -26,6 +26,7 @@
 - 核心兼容 CPU、PyTorch ROCm 和 CUDA，优先标准 PyTorch 算子，禁止引入 AMD 不支持的 NVIDIA 专属扩展。
 - 入口统一管理 device；内部不得硬编码设备编号、GPU 或绝对数据路径。临时张量继承输入设备和适当 dtype。
 - 不同设备可使用不同 PyTorch 版本，使用版本特有 API 时必须有兼容处理和测试。
+- 保留当前模块的 finite/autocast 等运行时正确性检查。后续 AMD 性能测试须审查这些检查（尤其 finite 归约后的主机判断）可能造成的 GPU 同步开销；不得在公式验证阶段为性能擅自删除。
 - 环境说明分别维护，不能用辅助 CUDA 安装方案覆盖主 ROCm 环境。
 - 需要下载较大文件时，先暂停对应下载并提供明确命令，由用户手动完成；继续不依赖该下载的工作。不得自行启动新的大型依赖或数据下载。
 - pathlib 等跨平台路径工具；数据、缓存、权重和输出由入口配置。当前元数据统计仅依赖 Python 标准库。
@@ -35,7 +36,7 @@
 - GitHub 用于阶段同步源代码、配置、方法文档、测试。未经明确发布任务不上传远程。
 - 不提交 AMOS 原始数据、患者影像、标签体积、权重、缓存、大型输出。病例级本地报告默认忽略；需要分享时先确认范围。
 - 正式实验记录 Git commit、完整配置、数据划分及哈希、环境、随机种子、评估结果。
-- 数据统计、10 例真实 CT 保真度、Encoder/Decoder、CoarseHead 与 SpaceToNode 已通过阶段验收。当前授权仅依据 METHOD_SPEC.md 的冻结公式实现 Node-to-Node 动态有向关系推理及显式 GRU，不修改已验收模块行为。alpha[b,i,j] 始终为 i→j，沿 sender 轴求和；15 节点、210 条无自环有向边、独立 sigmoid；K 轮共享参数、同步更新、每轮重算边权，固定属性保持数值及梯度。仅使用 Windows CPU 合成张量验证并运行全部回归；不实现 Node-to-Space、Residual Fusion、联合损失或完整 Segmentor，不运行真实 CT 网络或 GPU 实验，不新增输入 padding 或有效域 mask。所有微型配置不能作为正式实验配置。
+- 数据统计、10 例真实 CT 保真度、Encoder/Decoder、CoarseHead、SpaceToNode 与 DynamicRelation 已通过阶段验收。当前授权仅依据 METHOD_SPEC.md 冻结公式实现 Node-to-Space，不修改已验收模块行为。Key 来自原始 F，Query/Value 来自 zK；三个矩阵投影无偏置，beta 为 15 个独立可学习标量；逐器官逐位置 sigmoid，按器官轴求和回写节点内容，不乘 P、不输入标签、不限制粗响应区域。仅使用 Windows CPU 合成张量验证并运行全部回归；不实现 Residual Fusion、联合损失或完整 Segmentor，不运行真实 CT 网络或 GPU 实验，不新增输入 padding 或有效域 mask。所有微型配置不能作为正式实验配置。
 
 ## 验收和交付
 

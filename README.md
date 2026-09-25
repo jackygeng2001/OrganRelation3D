@@ -1,6 +1,6 @@
 # organ-relation
 
-完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 元数据统计、候选网格估算、少量真实重采样保真度测试、可变尺寸 U-Net 骨干、CoarseHead、SpaceToNode 及动态有向关系推理与显式 GRU。尚未实现空间回写、残差融合、联合损失、完整 Segmentor 或正式训练。
+完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 数据工具、可变尺寸 U-Net 骨干、CoarseHead、SpaceToNode、动态有向关系推理与显式 GRU，以及 NodeToSpace 空间匹配与节点内容回写。尚未实现残差融合、联合损失、完整 Segmentor 或正式训练。
 
 - [方法定义与待确认配置](METHOD_SPEC.md)
 - [开发和设备约束](AGENTS.md)
@@ -41,7 +41,7 @@ python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir 
 
 ## 项目布局
 
-`src/organ_relation/` 包含数据工具、骨干、粗头、节点构建和动态关系推理模块；`scripts/` 是入口；`tests/` 包含数据、几何、网络模块及公式/梯度测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。空间回写、残差融合、完整 Segmentor、训练与真实数据推理尚未实现。
+`src/organ_relation/` 包含数据工具、骨干、粗头、节点构建、动态关系和空间回写模块；`scripts/` 是入口；`tests/` 包含数据、几何、网络模块及公式/梯度测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。残差融合、完整 Segmentor、训练与真实数据推理尚未实现。
 
 ## 后续门槛
 
@@ -143,3 +143,27 @@ zK = relation(nodes.z0, nodes.centroid, nodes.size, nodes.confidence)
 ```
 
 该测试覆盖独立循环参考、边方向、GRU reset 顺序、同步更新、每轮重算边权、参数共享及输入/参数梯度；全部既有回归命令见上文。
+
+## Node-to-Space 空间匹配与节点内容回写
+
+`NodeToSpace(channels=C, attention_channels=da, content_channels=Cg, beta_init=0.0)` 接收原始最深层 F:[B,C,Df,Hf,Wf] 和更新后 zK:[B,15,C]，默认返回 G:[B,Cg,Df,Hf,Wf]；三个维度由调用方配置，测试不冻结正式取值。
+
+```python
+from organ_relation.node_to_space import NodeToSpace
+
+writeback = NodeToSpace(C, attention_channels=da, content_channels=Cg).to(
+    device=F.device, dtype=F.dtype)
+G = writeback(F, zK)  # 原始 F；关系推理后的 zK。没有残差融合。
+```
+
+Q=W_Q(zK):[B,15,da]，K=W_K(F):[B,N,da]，V=W_V(zK):[B,15,Cg]。三个 Linear 均无 bias，beta 为 [15] 可学习参数。`A=sigmoid(Q@K.transpose(1,2)/sqrt(da)+beta[None,:,None])` 的形状为 [B,15,N]；每个器官、每个位置独立门控，无 softmax、不乘 P。`G=(V.transpose(1,2)@A).reshape(B,Cg,Df,Hf,Wf)` 沿器官轴求和，回写 V 而非原 F，不生成 [B,15,Cg,Df,Hf,Wf] 张量。空间展开时 W 轴最快。
+
+`return_diagnostics=True` 返回 `NodeToSpaceResult(G,Q,K,V,A)`，保留梯度，供只读诊断；长期保存会延长计算图生命周期。默认标准 Linear 初始化和 beta 零初始化是工程初值，beta_init 可配置，正式实验应记录配置和种子。参数总数为 `C*(2da+Cg)+15`。接口不接受标签、P、z0 关键字或外部 attention；形状不能证明输入来源，调用方仍须保证使用原 F 和 zK。
+
+当前支持 FP32/FP64 且关闭 autocast，拒绝非法 shape/dtype、设备不一致、非有限输入和检测到的非有限中间结果。保留所有已有模块的严格检查；后续 AMD 性能测试须审查 finite 归约及主机判断导致的 GPU 同步开销，本阶段不为性能删除。真实 CT、GPU 显存、AMD/CUDA 与混合精度尚未验证。
+
+```powershell
+.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_node_to_space.py -v
+```
+
+测试包含手算、独立标量循环、FP64 输入与全部参数数值梯度，以及已有模块至 G 的 CPU 合成梯度链路；未实现 Segmentor 或训练损失。既有全部回归命令见上文。

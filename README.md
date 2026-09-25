@@ -1,6 +1,6 @@
 # organ-relation
 
-完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 元数据统计、候选网格估算、少量真实重采样保真度测试、可变尺寸 U-Net 骨干、CoarseHead 与 SpaceToNode。尚未实现动态关系推理、空间回写、联合损失、完整 Segmentor 或正式训练。
+完整 CT 扫描范围的动态器官关系分割项目，暂名可修改。已实现 CPU 元数据统计、候选网格估算、少量真实重采样保真度测试、可变尺寸 U-Net 骨干、CoarseHead、SpaceToNode 及动态有向关系推理与显式 GRU。尚未实现空间回写、残差融合、联合损失、完整 Segmentor 或正式训练。
 
 - [方法定义与待确认配置](METHOD_SPEC.md)
 - [开发和设备约束](AGENTS.md)
@@ -41,7 +41,7 @@ python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir 
 
 ## 项目布局
 
-`src/organ_relation/` 包含元数据、候选估算、CPU 保真度、可配置 3D U-Net 骨干、粗头和节点构建模块；`scripts/` 是入口；`tests/` 包含数据、几何、骨干及节点公式/梯度测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。关系推理、空间回写、完整 Segmentor、训练与真实数据推理尚未实现。
+`src/organ_relation/` 包含数据工具、骨干、粗头、节点构建和动态关系推理模块；`scripts/` 是入口；`tests/` 包含数据、几何、网络模块及公式/梯度测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。空间回写、残差融合、完整 Segmentor、训练与真实数据推理尚未实现。
 
 ## 后续门槛
 
@@ -116,3 +116,30 @@ CPU 复现命令（`src` 由测试入口加入路径）：
 ```
 
 两套既有 CPU 环境分别执行张量与数据测试；不需要改动 GPU 环境。模块测试中的标量探针只用于检查自动微分，不是方法的联合训练损失。
+
+## 动态有向关系与显式 GRU
+
+`DynamicRelation(channels=C, relation_channels=Cr, rounds=K)` 接收 `z0:[B,15,C]`、`centroid:[B,15,3]`、`size/confidence:[B,15,1]`，默认返回 `zK:[B,15,C]`。这些构造参数必须显式配置，测试不冻结正式 C、Cr、K。
+
+```python
+from organ_relation.dynamic_relation import DynamicRelation
+
+# C、Cr、K 从调用方配置读取；nodes 来自 SpaceToNode。
+relation = DynamicRelation(C, relation_channels=Cr, rounds=K).to(
+    device=nodes.z0.device, dtype=nodes.z0.dtype)
+zK = relation(nodes.z0, nodes.centroid, nodes.size, nodes.confidence)
+```
+
+关系描述严格按 `[z_i;z_j;c_j-c_i;s_i;s_j;q_i;q_j]` 排列。`alpha[b,i,j]` 为 i→j，逐边 sigmoid 后将对角线置零；没有入边归一化、均值、对称化或器官屏蔽。消息通过 `alpha.transpose(1,2) @ W_m(z)` 聚合，W_m 无偏置。GRU 的六个矩阵、三个偏置显式实现：`U_z(rho*z)` 在 reset 后做线性映射，`u` 是候选写入比例。每轮先完成全部边和消息，再同步产生新 z；下一轮重新计算边，固定属性不修改、不 detach。
+
+`return_diagnostics=True` 返回 `RelationResult(zK, rounds)`；每个 `RelationRound(alpha, messages, z)` 的形状依次为 `[B,15,15]`、`[B,15,C]`、`[B,15,C]`。索引 t 记录从 z^(t) 到 z^(t+1) 的过程。诊断张量保留计算图，调用方应只读使用，长期保留会延长计算图生命周期；默认不额外保存诊断历史。
+
+参数总数为 `Cr*(2C+9)+1+7C²+3C`，与 K 无关。K 轮、全部节点和边复用同一套参数。重建时应从记录的配置恢复 C、Cr、K；state_dict 不包含 K。参数按标准 nn.Linear 初始化，正式实验仍须记录初始化约定及随机种子。
+
+当前仅验证 Windows CPU 的 FP32/FP64、关闭 autocast；非法 shape、混合设备/dtype 和 NaN/Inf 输入会被拒绝。有限性检查在 GPU 上可能带来同步开销，需后续实测。未运行真实 CT、GPU 或训练。
+
+```powershell
+.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_dynamic_relation.py -v
+```
+
+该测试覆盖独立循环参考、边方向、GRU reset 顺序、同步更新、每轮重算边权、参数共享及输入/参数梯度；全部既有回归命令见上文。

@@ -102,7 +102,7 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 | Encoder3D | image | F, skips |
 | CoarseHead | F | CoarsePrediction(logits, probabilities)，均 [B,16,Df,Hf,Wf] |
 | SpaceToNode | F, coarse_probabilities | OrganNodes(z0, mass, centroid, size, confidence) |
-| DynamicRelation | z0, fixed_attributes | zK，可选诊断 |
+| DynamicRelation | z0, centroid, size, confidence | zK:[B,15,C]；可选 RelationResult(zK, rounds) |
 | NodeToSpace | F, zK | G，可选 A |
 | ResidualFusion | F,G | Fprime |
 | Decoder3D | Fprime, skips | final_logits |
@@ -111,6 +111,8 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 | Evaluator | prediction, label, geometry | 逐病例逐器官指标 |
 
 当前粗头和节点的工程接口分别见 `src/organ_relation/coarse_head.py`、`src/organ_relation/space_to_node.py`。`OrganNodes` 的节点轴始终对应类别 1–15；centroid 最后一轴依次是特征网格 D、H、W。mass/centroid/size/confidence 使用具名字段，不与 z0 的语义通道混排；全部保留梯度。粗头 bias 与节点 epsilon 必须显式配置，未冻结正式数值。当前节点数值实现限定 FP32/FP64 且关闭 autocast；混合精度归约策略尚未验证。这些是接口与数值支持范围说明，不改变上述公式。
+
+`src/organ_relation/dynamic_relation.py` 实现 `DynamicRelation(channels=C, relation_channels=Cr, rounds=K)` 和显式 `FormulaGRU`。C、Cr、K 须显式给出；默认前向仅返回 zK，`return_diagnostics=True` 返回每轮 `RelationRound(alpha, messages, z)`，分别对应该轮旧状态计算的边权、接收消息及同步更新后的状态，均保留梯度。属性以独立具名参数传入，质量 mass 不进入关系描述；不接受标签或外部边 mask。当前限定 FP32/FP64、关闭 autocast，拒绝非有限输入；不改变公式。参数初始化采用 PyTorch Linear 默认实现，正式初始化及随机种子应随实验配置记录；K 不存于 state_dict，重建时须使用原配置。
 
 ## 尚待确认，不能当作已冻结配置
 

@@ -41,7 +41,7 @@ python3 -B scripts/stat_training_ct.py --data-root /path/to/amos22 --output-dir 
 
 ## 项目布局
 
-`src/organ_relation/` 包含元数据、候选估算和 CPU 保真度模块；`scripts/` 是入口；`tests/` 包含合成头、几何和统计测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是方法外的说明。网络、训练、推理模块暂不创建，后续经明确任务逐阶段增加。
+`src/organ_relation/` 包含元数据、候选估算、CPU 保真度和可配置 3D U-Net 骨干模块；`scripts/` 是入口；`tests/` 包含数据、几何和骨干测试；`configs/` 是探索配置；`docs/` 和 `environments/` 是说明。关系模块、完整 Segmentor、训练与真实数据推理尚未实现。
 
 ## 后续门槛
 
@@ -64,3 +64,16 @@ python -B scripts/estimate_preprocessing.py --metadata reports/ct_stats_20260922
 可变完整输入与解码尺寸对齐的工程研究见 [variable_shape_unet_review.md](docs/variable_shape_unet_review.md)。这些研究均不冻结正式 spacing/尺寸，不新增节点 mask，也不能代替完整网络 AMD 显存测试。
 
 本轮 10 例真实 CPU 运行、53 项测试及限制记录见 [fidelity_cpu_validation.md](docs/fidelity_cpu_validation.md)；病例级报告与复核图仅留在本地 reports/fidelity_20260923_run01/。
+
+## 可变尺寸 3D U-Net 骨干
+
+实现与接口见 [backbone_stage1.md](docs/backbone_stage1.md)，实测记录见 [backbone_cpu_validation.md](docs/backbone_cpu_validation.md)。Encoder 返回 F 与高到低分辨率 skips；Decoder 接受 F 或后续同形 Fprime，按实际 skip 尺寸解码，输出同范围 16 类 logits。没有显式输入补齐、裁剪或节点 mask。
+
+configs/backbone_micro.json 只用于微型合成测试，不是正式结构或输入配置。骨干使用独立 `.venv-backbone-cpu` 与 CPU PyTorch；大文件下载由用户执行，不覆盖重采样、AMD 或 CUDA 环境。
+
+```powershell
+.\.venv-backbone-cpu\Scripts\python.exe -B -m unittest discover -s tests -p test_backbone.py -v
+.\.venv-backbone-cpu\Scripts\python.exe -B scripts/check_backbone.py --device cpu --output reports/backbone_cpu_new.json
+```
+
+scripts/audit_backbone_shapes.py 仅从候选统计 JSON 推导各级 shape；scripts/check_backbone.py 只运行一次合成前后向，不实现训练或方法联合损失。两者均拒绝覆盖已有报告。GPU 显存接口已预留，但本轮未实测 GPU 或完整 CT 网络。

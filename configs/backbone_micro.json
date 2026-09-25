@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "purpose": "cpu_synthetic_test_not_formal_experiment",
+  "model": {
+    "channels": [4, 8, 16],
+    "downsample_strides": [[2, 2, 2], [2, 2, 2]],
+    "normalization": "group",
+    "norm_groups": 2,
+    "norm_eps": 0.00001,
+    "negative_slope": 0.01,
+    "conv_bias": false,
+    "head_bias": true,
+    "align_corners": false
+  },
+  "probe": {
+    "input_shape_bcdhw": [1, 1, 17, 18, 19],
+    "seed": 20260923,
+    "cpu_threads": 2,
+    "dtype": "float32"
+  }
+}

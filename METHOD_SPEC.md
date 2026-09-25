@@ -124,6 +124,7 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 ## 分阶段验收
 
 1. 已完成元数据读取 CPU 测试及 200 例训练 CT 头信息统计、三候选网格估算，以及其中 10 例的真实 CPU 重采样保真度试验。候选分析见 docs/preprocessing_candidates.md，探索协议和实测验收记录见 docs/fidelity_protocol.md、docs/fidelity_cpu_validation.md。没有冻结保真度阈值、正式 spacing/尺寸/边界或有效域；不代表全部 200 例体素检查或 GPU 验证。
+   数据阶段已获用户验收；第一阶段 Encoder/Decoder 骨干与微型 CPU 测试已实现，结构接口见 docs/backbone_stage1.md，实测见 docs/backbone_cpu_validation.md。仅骨干直接连接不代表已实现下述图模块或联合损失；正式层数、宽度、归一化、步幅、插值约定仍未冻结。
 2. CPU 公式：手算软池化/属性，方向/无自环/求和，独立 sigmoid，指定 GRU，同步动态更新、回写和损失。
 3. CPU 梯度：平滑点数值梯度与参考实现比较；最终损失经过语义/固定属性路径；标签变动不得改变前向输出。完整小网络集成与优化器覆盖测试。
 4. AMD 主环境：正式结构的前向/双损失/反向/优化器状态显存、真实数据处理、短测及恢复；之后才允许正式训练。

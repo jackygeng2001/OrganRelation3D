@@ -1,0 +1,3 @@
+# CPU laptop only. Never use this installation file in ROCm/CUDA environments.
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.8.0+cpu

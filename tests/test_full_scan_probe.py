@@ -46,6 +46,118 @@ class ProbeTests(unittest.TestCase):
         probe.check_arguments(args)
         self.assertEqual(args.betas, (0.9, 0.999))
 
+    def test_rocm_channels_last_requires_process_environment_before_data_loading(self):
+        args = self.arguments('forward') + ['--memory-format', 'channels_last_3d']
+        args[args.index('--backend')+1] = 'rocm'
+        args[args.index('--device')+1] = 'cuda:0'
+        args.remove('--cpu-synthetic')
+        from organ_relation.data.full_scan import FullScanDataset
+        for index, value in enumerate((None, '0', 'true')):
+            with self.subTest(value=value), patch.dict(probe.os.environ, {}, clear=True):
+                if value is not None:
+                    probe.os.environ['PYTORCH_MIOPEN_SUGGEST_NHWC'] = value
+                attempt = list(args)
+                attempt[attempt.index('--output')+1] = str(self.root / f'guard_{index}.json')
+                with patch.object(FullScanDataset, 'from_amos_training', side_effect=AssertionError('data loaded')), \
+                     patch.object(torch.cuda, 'set_device', side_effect=AssertionError('GPU called')):
+                    code, report = self.run_probe(attempt)
+                self.assertEqual(code, 2)
+                self.assertIn('PYTORCH_MIOPEN_SUGGEST_NHWC=1 before starting Python', report['error'])
+                self.assertEqual(report['stages'], [])
+                self.assertEqual(report['memory_format'], 'channels_last_3d')
+                self.assertEqual(report['environment']['backend_environment']['PYTORCH_MIOPEN_SUGGEST_NHWC'], value)
+                self.assertEqual(probe.os.environ.get('PYTORCH_MIOPEN_SUGGEST_NHWC'), value)
+        with patch.dict(probe.os.environ, {'PYTORCH_MIOPEN_SUGGEST_NHWC': '1'}):
+            probe.check_arguments(probe.parser().parse_args(args))  # Validation only; no GPU.
+
+    def test_default_does_not_require_rocm_layout_environment(self):
+        args = self.arguments('forward')
+        args[args.index('--backend')+1] = 'rocm'
+        args[args.index('--device')+1] = 'cuda:0'
+        args.remove('--cpu-synthetic')
+        with patch.dict(probe.os.environ, {}, clear=True):
+            parsed = probe.parser().parse_args(args)
+            self.assertEqual(parsed.memory_format, 'contiguous')
+            probe.check_arguments(parsed)
+
+    def test_cpu_channels_last_needs_no_rocm_environment_or_miopen_api(self):
+        with patch.dict(probe.os.environ, {}, clear=True), patch.object(torch.backends, 'miopen', None, create=True):
+            code, report = self.run_probe(self.arguments('backward') + ['--memory-format', 'channels_last_3d'])
+        self.assertEqual(code, 0, report)
+        self.assertIsNone(report['environment']['miopen_immediate'])
+        self.assertIsNone(report['environment']['backend_environment']['PYTORCH_MIOPEN_SUGGEST_NHWC'])
+
+    def test_memory_format_layout_provenance_numerics_and_no_persistent_state(self):
+        original_run = probe.StageRecorder.run
+        captured = {}
+        def record(recorder, name, operation):
+            result = original_run(recorder, name, operation)
+            captured[name] = result
+            if name == 'transfer':
+                result[0].requires_grad_()  # Test input gradients, without changing the production entry point.
+            return result
+        modes = [('default', []), ('explicit', ['--memory-format', 'contiguous']),
+                 ('cl3d', ['--memory-format', 'channels_last_3d']),
+                 ('profiled', ['--memory-format', 'channels_last_3d', '--profile-forward-memory']),
+                 ('default_after', [])]
+        backend_env = {'PYTORCH_MIOPEN_SUGGEST_NHWC': '1', 'MIOPEN_FIND_MODE': 'NORMAL',
+                       'PYTORCH_ALLOC_CONF': 'max_split_size_mb:128'}
+        for shape in ((8, 6, 4), (15, 13, 9)):
+            # Moderate synthetic intensities make the numerical comparison well-conditioned.
+            synthetic_pair(self.data, shape=shape, slope=.001, intercept=-.1)
+            reference = None
+            for mode, flags in modes:
+                with self.subTest(shape=shape, mode=mode):
+                    captured = {}
+                    with patch.dict(probe.os.environ, backend_env), patch.object(probe.StageRecorder, 'run', record):
+                        environment_before = dict(probe.os.environ)
+                        code, report = self.run_probe(self.arguments('backward', f'{shape[0]}_{mode}') + flags)
+                        self.assertEqual(dict(probe.os.environ), environment_before)
+                    self.assertEqual(code, 0, report)
+                    cl3d = mode in ('cl3d', 'profiled')
+                    self.assertEqual(report['memory_format'], 'channels_last_3d' if cl3d else 'contiguous')
+                    for key, value in backend_env.items():
+                        self.assertEqual(report['environment']['backend_environment'][key], value)
+                    self.assertEqual('forward_memory' in report, mode == 'profiled')
+                    image, label = captured['transfer']
+                    sample = captured['preprocess']
+                    model = captured['model_setup']
+                    self.assertTrue(image.is_contiguous(memory_format=torch.channels_last_3d if cl3d else torch.contiguous_format))
+                    self.assertTrue(torch.equal(image, sample.image.unsqueeze(0)))
+                    self.assertEqual(image.dtype, torch.float32)
+                    self.assertEqual(label.dtype, torch.int64)
+                    self.assertTrue(torch.equal(label, sample.label.unsqueeze(0)))
+                    self.assertEqual(label.data_ptr(), sample.label.data_ptr())  # CPU batching only; no label copy/reformat.
+                    self.assertEqual(label.stride(), sample.label.unsqueeze(0).stride())
+                    self.assertEqual(report['memory_layout']['image_stride'], list(image.stride()))
+                    self.assertEqual(report['memory_layout']['label_stride'], list(label.stride()))
+                    for name, module in model.named_modules():
+                        self.assertFalse(module._forward_hooks or module._forward_pre_hooks or module._backward_hooks)
+                        if isinstance(module, torch.nn.Conv3d):
+                            self.assertTrue(module.weight.is_contiguous(memory_format=torch.channels_last_3d if cl3d else torch.contiguous_format))
+                            self.assertEqual(report['memory_layout']['conv_weight_strides'][name], list(module.weight.stride()))
+                            if cl3d and module.kernel_size == (3, 3, 3) and module.in_channels > 1:
+                                self.assertFalse(module.weight.is_contiguous())
+                    if reference is None:
+                        reference, reference_report = captured, report
+                    self.assertEqual(report['config'], reference_report['config'])
+                    self.assertEqual(report['model_config'], reference_report['model_config'])
+                    self.assertEqual(report['model_config_sha256'], reference_report['model_config_sha256'])
+                    self.assertEqual(report['gradients']['missing_gradients'], [])
+                    self.assertEqual(report['gradients']['nonfinite_gradients'], [])
+                    tolerance = dict(rtol=2e-4, atol=2e-5) if cl3d else dict(rtol=0, atol=0)
+                    for actual, expected in zip(captured['forward'], reference['forward']):
+                        torch.testing.assert_close(actual, expected, **tolerance)
+                    torch.testing.assert_close(captured['loss'].total, reference['loss'].total, **tolerance)
+                    torch.testing.assert_close(image.grad, reference['transfer'][0].grad, **tolerance)
+                    expected_parameters = dict(reference['model_setup'].named_parameters())
+                    self.assertEqual(set(vars(model)), set(vars(reference['model_setup'])))
+                    for name, parameter in model.named_parameters():
+                        expected = expected_parameters[name]
+                        self.assertTrue(torch.equal(parameter, expected), name)
+                        self.assertIsNotNone(parameter.grad, name)
+                        torch.testing.assert_close(parameter.grad, expected.grad, **tolerance, msg=name)
+
     def test_each_prefix_stops_after_requested_stage(self):
         for stage in probe.STAGES[:-1]:
             with self.subTest(stage=stage):

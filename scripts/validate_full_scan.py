@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import importlib.metadata
 import json
 import math
+import os
 from pathlib import Path
 import platform
 import sys
@@ -27,6 +28,8 @@ def parser():
     p.add_argument('--selection-config', type=Path, default=ROOT / 'configs/ct_stats.json')
     p.add_argument('--model-config', type=Path, help='Explicit JSON with model fields; no capacity default')
     p.add_argument('--allow-micro-model', action='store_true', help='Explicit diagnostic use, never formal capacity validation')
+    p.add_argument('--memory-format', choices=('contiguous', 'channels_last_3d'), default='contiguous',
+                   help='Image/model layout only; ROCm channels_last_3d requires process-start PYTORCH_MIOPEN_SUGGEST_NHWC=1; also supports CPU synthetic checks')
     p.add_argument('--profile-forward-memory', action='store_true',
                    help='Opt-in module/ATen memory trace of normal autograd forward; adds synchronization overhead')
     p.add_argument('--through', choices=STAGES, required=True, help='Run prerequisites and stop after this stage')
@@ -50,6 +53,9 @@ def check_arguments(args):
         raise ValueError('CPU probe requires --device cpu --cpu-synthetic; never use real full scans on the laptop')
     if args.backend == 'rocm' and (not args.device.startswith('cuda:') or args.cpu_synthetic):
         raise ValueError('ROCm requires explicit cuda:N and no --cpu-synthetic')
+    if (args.backend == 'rocm' and args.memory_format == 'channels_last_3d'
+            and os.environ.get('PYTORCH_MIOPEN_SUGGEST_NHWC') != '1'):
+        raise ValueError('ROCm channels_last_3d requires PYTORCH_MIOPEN_SUGGEST_NHWC=1 before starting Python; no automatic backend/layout fallback')
     if args.through == 'step' and (args.optimizer is None or args.lr is None):
         raise ValueError('--through step requires explicit --optimizer and --lr')
     if args.through != 'step' and (args.optimizer is not None or args.lr is not None):
@@ -179,6 +185,7 @@ def execute(args, report, save):
     report['environment']['deterministic_algorithms'] = torch.are_deterministic_algorithms_enabled()
     report['environment']['cudnn_benchmark'] = torch.backends.cudnn.benchmark
     report['environment']['cudnn_deterministic'] = torch.backends.cudnn.deterministic
+    report['environment']['miopen_immediate'] = getattr(getattr(torch.backends, 'miopen', None), 'immediate', None)
     recorder = StageRecorder(torch, device, report, save)
     processor = FullScanPreprocessor(config['preprocessing'], args.candidate,
                                      max_voxels=262144 if args.backend == 'cpu' else None)
@@ -198,8 +205,14 @@ def execute(args, report, save):
     if args.through == 'preprocess':
         return
     # Dataset owns sample/channel axes; this single-case probe owns batching.
-    image, label = recorder.run('transfer', lambda: (
-        sample.image.unsqueeze(0).to(device), sample.label.unsqueeze(0).to(device)))
+    def transfer():
+        image = sample.image.unsqueeze(0).to(device)
+        label = sample.label.unsqueeze(0).to(device)
+        if args.memory_format == 'channels_last_3d':
+            image = image.contiguous(memory_format=torch.channels_last_3d)
+        report['memory_layout'] = {'image_stride': list(image.stride()), 'label_stride': list(label.stride())}
+        return image, label
+    image, label = recorder.run('transfer', transfer)
     del sample
     if args.through == 'transfer':
         return
@@ -207,7 +220,13 @@ def execute(args, report, save):
         model = Segmentor(model_config)
         report['parameter_count'] = sum(p.numel() for p in model.parameters())
         report['parameter_bytes'] = sum(p.numel()*p.element_size() for p in model.parameters())
-        return model.to(device=device, dtype=torch.float32)
+        model = model.to(device=device, dtype=torch.float32)
+        if args.memory_format == 'channels_last_3d':
+            model.to(memory_format=torch.channels_last_3d)
+        report['memory_layout']['conv_weight_strides'] = {
+            name: list(module.weight.stride()) for name, module in model.named_modules()
+            if isinstance(module, torch.nn.Conv3d)}
+        return model
     model = recorder.run('model_setup', setup_model)
     model.train()
     criterion = JointLoss(epsilon=config['epsilon'], **config['loss'])
@@ -271,8 +290,14 @@ def main(argv=None):
     report = {'schema_version': 1, 'utc_time': datetime.now(timezone.utc).isoformat(),
               'case_id': args.case, 'candidate': args.candidate, 'through': args.through,
               'device': args.device, 'dtype': 'float32', 'status': 'running', 'oom': False,
+              'memory_format': args.memory_format,
               'shape_dhw': None, 'stages': [], 'git': git_state(), 'source_sha256': code_hashes(),
-              'environment': {'python': platform.python_version(), 'platform': platform.platform()},
+              'environment': {'python': platform.python_version(), 'platform': platform.platform(),
+                              'backend_environment': {
+                                  'PYTORCH_MIOPEN_SUGGEST_NHWC': os.environ.get('PYTORCH_MIOPEN_SUGGEST_NHWC'),
+                                  **{k: v for k, v in sorted(os.environ.items())
+                                     if k.startswith(('MIOPEN_', 'PYTORCH_MIOPEN_'))
+                                     or k in ('PYTORCH_ALLOC_CONF', 'PYTORCH_CUDA_ALLOC_CONF')}}},
               'notes': ['Single cold pass, train mode; timings include runtime finite checks and no warmup.',
                         'Stage allocator peaks include live allocations from preceding stages.',
                         'Whole-device memory is an optional backend snapshot, never a measured device peak.',

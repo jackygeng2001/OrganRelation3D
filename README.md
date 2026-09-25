@@ -168,6 +168,8 @@ python -B scripts/validate_full_scan.py --data-root /path/to/amos22 --case amos_
 
 每个报告包含共同的病例/config/shape/dtype/Git/环境上下文及分阶段时间、allocator 显存峰值、OOM/失败位置和梯度检查。可用时记录 mem_get_info 的整卡瞬时快照；不可用为 null，不把它称为整卡峰值。时间为首轮同步 wall time，包含 finite 检查，未做预热；一次 optimizer step 不代表稳态训练峰值。
 
+默认 memory format 保持原 contiguous 路径。可显式传入 `--memory-format channels_last_3d`，仅转换 image / model，不改变 label、模型公式或科学配置；ROCm 要求启动进程前设置 `PYTORCH_MIOPEN_SUGGEST_NHWC=1`，否则提前报错。CPU 合成小例也支持该选项。请求布局、实际输入/卷积权重 stride 及相关 backend 环境会记录到 JSON。使用范围、已测结果和无逐算子 profiling 的 AMD 命令见 [AMD 环境说明](environments/amd-rocm.md#显式-channels-last-3d-执行选项)。
+
 定位 forward 显存时显式增加 `--profile-forward-memory`（要求 `--through forward` 或以后）。该选项仅在正常 forward 外临时安装 module hooks 和 ATen dispatch 观察器，不调用保留中间张量的 diagnostics，不改变 autograd、dtype 或模型配置。JSON 的 `forward_memory` 保存模块/算子输入输出 shape、stride、逻辑字节数、同步时间、前后 allocated/reserved 和各作用域峰值；逻辑字节数不能把共享 storage 的 view 重复相加。嵌套区间峰值会合并回父模块及外层 forward，CPU 显存字段为 null。OOM 尽量在算子异常尚未退出模型栈时记录活动模块、算子、错误原文和 traceback；失败后不同步、不清缓存、不重试。后端卷积内部 workspace/隐式复制不单独可见，失败申请也不计入已分配峰值，不能仅凭卷积 OOM 就断言是 workspace。逐算子同步会影响时间及分配器复用，结果是诊断运行而非正常性能基准。观察器使用 PyTorch `TorchDispatchMode`，当前环境测试之外的版本仍需兼容验证。
 
 正式容量尚未选定时可先运行预处理/搬运或显式微型兼容探针，不能宣称正式模型已通过 24GB 验证。本轮 Windows 只测试合成 NIfTI；--backend cpu 必须同时 --device cpu --cpu-synthetic，并在头读取阶段限制原/目标体素数≤262144，超出直接拒绝，不缩小扫描。

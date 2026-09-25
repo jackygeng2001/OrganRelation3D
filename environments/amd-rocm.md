@@ -1,7 +1,7 @@
 # AMD 主实验环境
 
 用户指定：Ubuntu 24.04.4 LTS、RX 7900 XTX 24GB、PyTorch 2.11.0 + ROCm 7.2。
-本项目尚未验证该设备，不安装或修改现有环境。当前统计脚本仅使用标准库，Python >=3.10 可直接运行，无 GPU 依赖。
+用户已在该环境完成微型 Segmentor 的真实完整扫描验证；这不代表正式模型容量验收。不安装或修改现有环境。当前统计脚本仅使用标准库，Python >=3.10 可直接运行，无 GPU 依赖。
 完整模型测试命令见下文，由用户 GitHub 同步后手动运行返回结果。使用已有 ROCm 环境，不能执行 CUDA 环境安装方案。
 
 第一阶段骨干已提供配置和 `DeviceMemoryMonitor`，以及 scripts/check_backbone.py 合成诊断入口。
@@ -9,7 +9,7 @@
 具体命令和指标限制见 [backbone_stage1.md](../docs/backbone_stage1.md)。当前只预留入口，未在 AMD 上运行。
 不得安装 `requirements-backbone-cpu.txt` 覆盖此环境，微型骨干探针不代表完整模型显存验收。
 
-## 完整模型单病例验证（待用户在 AMD 实测）
+## 完整模型单病例验证
 
 使用已配置好的 ROCm Python 环境，不执行 CPU/CUDA PyTorch 安装命令。完整数据模块需要 Python>=3.11 和 NumPy、SciPy、NiBabel；先检查已有依赖：
 
@@ -42,3 +42,28 @@ AdamW/lr 是上述单步探针的显式示例，不是正式训练参数。SGD/A
 JSON 包含病例、候选/实际网格、输入 shape、模型与 baseline 配置/哈希、参数量、每阶段时间/显存/OOM、环境和 Git 状态。mem_get_info 可用时记录整卡瞬时 free/total/used（包括其他进程）；不支持时为 null 并保存原因，不称整卡峰值。不调用外部显卡工具或伪造整卡统计。
 
 退出码 0：执行到请求阶段通过；2：失败，查看 status/error/active_stage/stages。OOM 不重试、不换输入、不自动改候选，进程退出后先分析结果。每病例/候选建议独立进程，避免上一例 allocator/optimizer 状态影响比较。请返回 JSON；结果是工程可行性信息，不是 Dice 或模型性能。
+
+## 显式 channels-last 3D 执行选项
+
+默认 `--memory-format contiguous` 保留原搬运和模型初始化路径。显式传入 `--memory-format channels_last_3d` 时，入口在 transfer 阶段对 image 调用 `contiguous(memory_format=torch.channels_last_3d)`，在 model_setup 阶段对 model 调用 `to(memory_format=torch.channels_last_3d)`；label 不转换。逻辑 shape 仍为 `[B,C,D,H,W]`，不改轴语义、模型数学、科学配置、FP32 或 autograd，也不安装 hooks 或强制转换中间 feature。
+
+ROCm 必须在启动 Python 前设置 `PYTORCH_MIOPEN_SUGGEST_NHWC=1`；缺失或不为 `1` 时入口在读取体素前报错，不自动设置环境或回退。CPU 合成小例也支持该 memory-format 选项，不要求 MIOpen 环境变量；CPU 结果不能证明 GPU solver。此验证入口仍只接受 ROCm / CPU，未增加 NVIDIA CUDA 执行入口，核心模型的 CUDA 行为不变。
+
+用户已通过临时包装脚本验证：PyTorch 2.11.0+rocm7.2 / RX 7900 XTX，amos_0097 + A、`[210,365,365]`、micro、FP32、batch 1，channels-last 3D 配合上述环境变量完成 forward / JointLoss / backward / gradient check；默认 NCDHW 曾在 forward OOM。该结果仅适用于已测环境与配置，不保证所有卷积均为 NDHWC 或 workspace 为零；实际 solver 需专门检查 MIOpen 日志。
+
+以下使用正式入口复测，不开启逐算子 profiling 或 MIOpen verbose logging。每次使用新的结果文件，结果目录已被 Git 忽略：
+
+```bash
+env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
+  PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+  python -B scripts/validate_full_scan.py \
+  --data-root /path/to/amos22 --case amos_0097 --candidate A \
+  --backend rocm --device cuda:0 \
+  --model-config configs/segmentor_micro.json --allow-micro-model \
+  --memory-format channels_last_3d --through backward \
+  --output reports/amos_0097_A_micro_cl3d_backward.json
+```
+
+JSON 的 `memory_format` 是请求的入口布局；`memory_layout` 记录实际 image / label stride 和各 Conv3d weight stride，不宣称所有中间张量保持该布局。`environment.backend_environment` 记录 `MIOPEN_*`、`PYTORCH_MIOPEN_*` 和 PyTorch allocator 配置变量，缺失的 `PYTORCH_MIOPEN_SUGGEST_NHWC` 记录为 null；同时记录可用的 MIOpen immediate 状态和既有 benchmark / deterministic 状态。仅记录这些设置，不自动修改。
+
+正常阶段计时和 allocated / reserved 峰值仍保留在 `stages`；`--through backward` 自动包含 loss 和梯度检查。该运行减少了逐算子观察开销，但仍是含原 finite 检查的单次冷启动验证，不等同于稳态训练吞吐。需要再次定位时，可另外显式增加 `--profile-forward-memory`。

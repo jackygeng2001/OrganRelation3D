@@ -92,6 +92,8 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 
 粗 logits 先插值再 softmax，不下采样标签替代。病例内计算后 batch 平均，不跨 batch Dice、不跳过缺失器官、不加类别权重或其他损失。log(S+epsilon) 不能静默替换为截断概率或普通 CE。当前统一 epsilon=1e-6，同一符号使用一致约定。
 
+独立诊断对照（用户授权，非上述 JointLoss baseline 的替换）：backbone-only 的 `SegmentationLoss` 可显式选择 `ce_reduction_mode=foreground_background_balanced`。保持 `l(x)=-log(S_true(x)+epsilon)`，逐病例计算 `0.5*mean(l|label=0)+0.5*mean(l|label>0)`，再加原有 15 类 DiceLoss，最后 batch 平均；不进一步均衡前景器官。缺省 `voxel_mean` 与所有历史配置仍用原公式，JointLoss 不变。若某病例无背景或无前景，该组均值未定义，当前对照明确拒绝，不补零或另设权重。配置 `train_backbone_only_overfit_balanced_ce.json` 仅增加 CE reduction 选项，从 step 0 独立运行；mode 纳入 checkpoint 身份，不允许从 voxel-mean 运行迁移或延长为 balanced 运行。
+
 真实标签只用于监督与评估，不输入模型、节点或关系，也不用于存在性判断及裁剪采样。最终损失必须经回写、图、语义和属性路径反传至粗头和编码器；固定属性不表示 detach。推理保留同一核心前向，不计算损失。
 
 ## 接口契约

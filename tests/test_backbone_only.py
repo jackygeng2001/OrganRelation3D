@@ -114,18 +114,21 @@ class BackboneOnlyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 SegmentationLoss(epsilon=epsilon)
 
-    def trainer(self, directory, *, resume=False, extend_to=None, steps=4, board=False):
+    def trainer(self, directory, *, resume=False, extend_to=None, steps=4, board=False,
+                ce_reduction_mode='voxel_mean'):
         seed_all(712)
         model = BackboneOnly(model_config()).to(memory_format=torch.channels_last_3d)
         optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0, foreach=False, fused=False)
         opts = fixtures.config()['training']
         opts.update(max_steps=steps, validation_every=2, diagnostics_every=1, checkpoint_every=2)
         identity = dict(mode='backbone_only_final', model=model_config().to_dict(),
+                        ce_reduction_mode=ce_reduction_mode,
                         training=opts, loss={'epsilon': 1e-6}, optimizer='AdamW',
                         preprocessing='synthetic', provenance='test', data={'manifest_hash': 'test'})
         identity = json.loads(json.dumps(identity))  # Same canonical identity as the CLI.
         data = fixtures.RandomCases()
-        return Trainer(model, SegmentationLoss(epsilon=1e-6), optimizer, data, ['one', 'two', 'three'],
+        return Trainer(model, SegmentationLoss(epsilon=1e-6, ce_reduction_mode=ce_reduction_mode),
+                       optimizer, data, ['one', 'two', 'three'],
                        device='cpu', options=opts, identity=identity, run_dir=directory,
                        validation_dataset=data, validation_case_ids=['one', 'two', 'three'],
                        resume=directory / 'last.ckpt' if resume else None, tensorboard=board,

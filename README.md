@@ -313,3 +313,9 @@ env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
 每次 monitor 的病例 ledger 保存原有 15 类 hard Dice/计数，并新增 `diagnostic`；JSONL 的 `diagnostic_cases` 按 case ID 保存相同标量：`final_soft_dice`（15 类均值）、`predicted_foreground_voxels`、`foreground_true_positive_voxels`（预测类别与 GT 完全相同且 GT>0）、`gt_foreground_voxels`、GT 前景位置上的 `gt_foreground_true_class_mean_probability` 与 `gt_foreground_background_mean_probability`。GT 无前景时两种概率均值记 null。TP 不把预测成另一前景器官算作正确。TensorBoard 另外记录 `Monitor/FinalSoftDice_Mean`（病例等权平均），其他附加诊断查 JSONL/ledger；不长期保留概率体积。
 
 本对照只回答普通骨干在相同条件下能否拟合单病例；不据此改动关系方法、损失、强度方案或优化器，也不自动开展第二个对照。
+
+用户指定的首个 CE 单变量对照使用 `configs/train_backbone_only_overfit_balanced_ce.json`；它与上述配置仅相差新增 `ce_reduction_mode=foreground_background_balanced`。运行时替换 `--config`，并使用新的 `--run-dir runs/backbone_only_amos0109_3sp1_B_balanced_ce_200`，不要传旧 checkpoint 的 `--resume`。其余病例、初始化、200 steps、每 25 步监测/保存/诊断、预处理与 AdamW 全部相同。缺省仍为 `voxel_mean`；完整方法的 JointLoss 不变，训练入口拒绝将 balanced 选项用于完整模型。
+
+balanced CE 在每个病例内按背景/全部前景分别平均，再各取 0.5；不是 15 器官均权 CE。无前景或无背景时明确报错，不暗设空组策略。`run.json`/checkpoint 身份与每条训练/monitor 日志记录 `ce_reduction_mode`，改变模式不能 resume 或通过 `--extend-to` 绕过校验。新 balanced run 自身中断后仍可正常恢复。
+
+每 25 步 monitor 的 `diagnostic_cases[case_id]`（及病例 ledger）额外记录 `CE_bg_mean`、`CE_fg_mean`、`balanced_ce`；与原 hard/soft Dice、前景计数、TP、概率诊断一起保留。训练行的 `final.ce` 是当前模式实际使用的 CE；voxel-mean monitor 中的 `balanced_ce` 只是对照统计，不参与该模式训练。空组观测值记 null，console 不展开这些字段。

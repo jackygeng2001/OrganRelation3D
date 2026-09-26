@@ -52,7 +52,7 @@ def execute(args):
         raise ValueError('--extend-to requires --resume and a positive total; not a split preparation option')
     import torch
     from organ_relation.data.full_scan import FullScanDataset, FullScanPreprocessor, ScanPair
-    from organ_relation.losses import JointLoss, SegmentationLoss
+    from organ_relation.losses import CE_REDUCTION_MODES, JointLoss, SegmentationLoss
     from organ_relation.models.backbone_only import BackboneOnly
     from organ_relation.models.segmentor import Segmentor
     from organ_relation.models.segmentor_config import SegmentorConfig
@@ -65,6 +65,11 @@ def execute(args):
     mode = config.get('mode', 'organ_relation_joint')
     if mode not in ('organ_relation_joint', 'backbone_only_final'):
         raise ValueError('unsupported model/loss mode')
+    ce_reduction_mode = config.get('ce_reduction_mode', 'voxel_mean')
+    if ce_reduction_mode not in CE_REDUCTION_MODES:
+        raise ValueError('unsupported ce_reduction_mode')
+    if mode == 'organ_relation_joint' and ce_reduction_mode != 'voxel_mean':
+        raise ValueError('balanced CE is an isolated backbone-only diagnostic; JointLoss remains unchanged')
     base = args.config.resolve().parent
     selection = read_json(base / config['selection_config'])
     manifest = training_manifest(args.data_root, selection)
@@ -162,12 +167,12 @@ def execute(args):
         loss_config.update(baseline['loss'])
         criterion = JointLoss(**loss_config)
     else:
-        criterion = SegmentationLoss(**loss_config)
+        criterion = SegmentationLoss(**loss_config, ce_reduction_mode=ce_reduction_mode)
     data_identity = dict(manifest=manifest, manifest_hash=digest(manifest), split=artifact['development'],
                          split_hash=artifact['split_hash'], role=data['role'], actual_train=chosen,
                          actual_validation=val_records, subset_hash=digest([chosen, val_records]),
                          case_identity=case_identity)
-    identity = dict(model=model_config.to_dict(), loss=loss_config,
+    identity = dict(model=model_config.to_dict(), loss=loss_config, ce_reduction_mode=ce_reduction_mode,
                     preprocessing=dict(candidate=data['candidate'], **baseline['preprocessing']),
                     optimizer=optimizer_config, runtime=runtime, training=options, data=data_identity,
                     provenance=dict(git=git_state(), source_hashes=code_hashes()),
@@ -180,8 +185,8 @@ def execute(args):
                         cudnn_deterministic=torch.backends.cudnn.deterministic,
                         backend_environment={k: v for k, v in os.environ.items()
                             if k.startswith(('MIOPEN_', 'PYTORCH_MIOPEN_')) or k in ('PYTORCH_ALLOC_CONF', 'PYTORCH_CUDA_ALLOC_CONF')}))
-    # Leave existing joint identities intact; diagnostic runs are a separate,
-    # explicit identity and cannot resume full-model weights/optimizer state.
+    # Diagnostic model identity is separate from the unchanged joint model/loss
+    # payload; CE reduction above is explicit for both modes in new run identities.
     if mode == 'backbone_only_final':
         identity.update(mode=mode, initialization='retain_encoder_decoder_from_seeded_full_segmentor')
     # Normalize tuples to JSON lists so saved manifest and checkpoint identities agree.

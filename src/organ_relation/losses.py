@@ -10,7 +10,7 @@ from torch.nn import functional as functional
 
 
 class BranchLoss(NamedTuple):
-    ce: Tensor  # [B], includes background, averaged over this case's voxels.
+    ce: Tensor  # [B], selected per-case reduction; JointLoss uses voxel mean.
     dice_per_class: Tensor  # [B,15], class axis corresponds to labels 1..15.
     dice_loss: Tensor  # [B], 1 - mean over all 15 foreground classes.
     segmentation: Tensor  # [B], ce + dice_loss, both coefficients exactly 1.
@@ -29,18 +29,38 @@ class FinalLossResult(NamedTuple):
     final: BranchLoss
 
 
+CE_REDUCTION_MODES = ('voxel_mean', 'foreground_background_balanced')
+
+
+def foreground_background_ce_means(voxel_loss: Tensor, foreground: Tensor) -> tuple[Tensor, Tensor]:
+    """Per-case group means from [B,N] losses; NaN denotes an absent group.
+
+    Absence is exposed for logging, never silently reweighted in training.
+    Counts are accumulated as integers; epsilon is only inside log(S+epsilon).
+    """
+    fg_count = foreground.sum(dim=1)
+    bg_count = (~foreground).sum(dim=1)
+    fg = torch.where(foreground, voxel_loss, 0).sum(dim=1) / fg_count.clamp_min(1)
+    bg = torch.where(~foreground, voxel_loss, 0).sum(dim=1) / bg_count.clamp_min(1)
+    return (bg.masked_fill(bg_count == 0, float('nan')),
+            fg.masked_fill(fg_count == 0, float('nan')))
+
+
 class SegmentationLoss(nn.Module):
-    """Unweighted final-only CE + foreground Dice, shared with JointLoss.
+    """Final-only CE + foreground Dice; voxel-mean CE unless explicitly selected.
 
     No resizing, coarse branch or auxiliary coefficient. Supervision remains
     outside the model; all 15 foreground classes participate in each case.
     """
 
-    def __init__(self, *, epsilon: float):
+    def __init__(self, *, epsilon: float, ce_reduction_mode: str = 'voxel_mean'):
         super().__init__()
         if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)) or not math.isfinite(epsilon) or epsilon <= 0:
             raise ValueError('epsilon must be a finite positive number')
         self.epsilon = float(epsilon)
+        if ce_reduction_mode not in CE_REDUCTION_MODES:
+            raise ValueError('unsupported ce_reduction_mode')
+        self.ce_reduction_mode = ce_reduction_mode
 
     def forward(self, final_logits: Tensor, label: Tensor) -> FinalLossResult:
         if not isinstance(final_logits, Tensor) or final_logits.ndim != 5 or min(final_logits.shape) < 1 or final_logits.shape[1] != 16:
@@ -61,18 +81,28 @@ class SegmentationLoss(nn.Module):
         indices = label.flatten(start_dim=1)
         target_count = label.new_zeros(label.shape[0], 16).scatter_add(
             1, indices, torch.ones_like(indices)).to(dtype=final_logits.dtype)
-        final = _segmentation_branch(torch.softmax(final_logits, dim=1), label, target_count, self.epsilon)
+        final = _segmentation_branch(torch.softmax(final_logits, dim=1), label, target_count,
+                                     self.epsilon, self.ce_reduction_mode)
         total = final.segmentation.mean()
         if not torch.isfinite(total):
             raise ValueError('segmentation loss produced a non-finite value')
         return FinalLossResult(total, final.segmentation, final)
 
 
-def _segmentation_branch(probabilities: Tensor, label: Tensor, target_count: Tensor, epsilon: float) -> BranchLoss:
+def _segmentation_branch(probabilities: Tensor, label: Tensor, target_count: Tensor, epsilon: float,
+                         ce_reduction_mode: str = 'voxel_mean') -> BranchLoss:
     flat = probabilities.flatten(start_dim=2)  # [B,16,N]
     indices = label.flatten(start_dim=1)  # [B,N]
     matched = flat.gather(1, indices.unsqueeze(1)).squeeze(1)  # S at the true class.
-    ce = -torch.log(matched + epsilon).mean(dim=1)
+    if ce_reduction_mode == 'voxel_mean':
+        ce = -torch.log(matched + epsilon).mean(dim=1)  # Historical operation order unchanged.
+    elif ce_reduction_mode == 'foreground_background_balanced':
+        bg, fg = foreground_background_ce_means(-torch.log(matched + epsilon), indices > 0)
+        if not (torch.isfinite(bg).all() and torch.isfinite(fg).all()):
+            raise ValueError('balanced CE requires both background and foreground in every case')
+        ce = 0.5 * bg + 0.5 * fg
+    else:
+        raise ValueError('unsupported ce_reduction_mode')
     # Equivalent to sum_x S_c(x)*T_c(x), without dense [B,16,D,H,W] one-hot GT.
     intersection = probabilities.new_zeros(probabilities.shape[0], 16).scatter_add(1, indices, matched)
     predicted_count = flat.sum(dim=2)

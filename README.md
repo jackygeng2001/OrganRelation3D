@@ -314,8 +314,13 @@ env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
 
 本对照只回答普通骨干在相同条件下能否拟合单病例；不据此改动关系方法、损失、强度方案或优化器，也不自动开展第二个对照。
 
-用户指定的首个 CE 单变量对照使用 `configs/train_backbone_only_overfit_balanced_ce.json`；它与上述配置仅相差新增 `ce_reduction_mode=foreground_background_balanced`。运行时替换 `--config`，并使用新的 `--run-dir runs/backbone_only_amos0109_3sp1_B_balanced_ce_200`，不要传旧 checkpoint 的 `--resume`。其余病例、初始化、200 steps、每 25 步监测/保存/诊断、预处理与 AdamW 全部相同。缺省仍为 `voxel_mean`；完整方法的 JointLoss 不变，训练入口拒绝将 balanced 选项用于完整模型。
+用户指定的首个 CE 单变量对照使用 `configs/train_backbone_only_overfit_balanced_ce.json`；它与上述配置仅相差新增 `ce_reduction_mode=foreground_background_balanced`。运行时替换 `--config`，并使用新的 `--run-dir runs/backbone_only_amos0109_3sp1_B_balanced_ce_200`，不要传旧 checkpoint 的 `--resume`。其余病例、初始化、200 steps、每 25 步监测/保存/诊断、预处理与 AdamW 全部相同。缺省仍为 `voxel_mean`；缺省 JointLoss 保持原公式；完整模型独立 balanced 对照见下文。
 
 balanced CE 在每个病例内按背景/全部前景分别平均，再各取 0.5；不是 15 器官均权 CE。无前景或无背景时明确报错，不暗设空组策略。`run.json`/checkpoint 身份与每条训练/monitor 日志记录 `ce_reduction_mode`，改变模式不能 resume 或通过 `--extend-to` 绕过校验。新 balanced run 自身中断后仍可正常恢复。
 
 每 25 步 monitor 的 `diagnostic_cases[case_id]`（及病例 ledger）额外记录 `CE_bg_mean`、`CE_fg_mean`、`balanced_ce`；与原 hard/soft Dice、前景计数、TP、概率诊断一起保留。训练行的 `final.ce` 是当前模式实际使用的 CE；voxel-mean monitor 中的 `balanced_ce` 只是对照统计，不参与该模式训练。空组观测值记 null，console 不展开这些字段。
+
+
+完整 OrganRelation3D 的 balanced-CE 单变量对照使用 `configs/train_single_case_overfit_balanced_ce.json`，运行命令沿用 `scripts/train.py`，显式传 `--cases amos_0109` 和新目录 `--run-dir runs/full_amos0109_3sp1_B_balanced_ce_200`，首次不传 `--resume`。新配置与 `train_single_case_overfit.json` 只差 CE mode 和 max_steps 从 100 到 200，保留病例选择接口、B/3S-P1、相同 seed、AdamW、FP32 和每 25 步保存/monitor/诊断。
+
+JointLoss 的 coarse/final 都使用选定 CE reduction，各自 Dice 不变；coarse 仍先插值 logits 到 GT 网格再 softmax。总损失为 final + 0.5×coarse。每次 balanced joint monitor 在 JSONL 的 `ce_diagnostic_cases[case_id].coarse/final` 中记录 `CE_bg_mean / CE_fg_mean / balanced_ce`，病例 ledger 对应字段为 `ce_branches`；双分支顺序计算统计，不同时持有两份完整概率体积。普通训练行仍记录各分支实际 CE/Dice/segmentation，console 布局不变。checkpoint 的 CE mode、配置及来源严格校验保留，禁止用旧 voxel-mean checkpoint 开始新对照。

@@ -10,7 +10,8 @@ import torch
 import test_backbone_only as backbone
 import test_training as fixtures
 from organ_relation.losses import JointLoss, SegmentationLoss
-from organ_relation.training.engine import final_diagnostic_metrics
+from organ_relation.training.engine import final_diagnostic_metrics, joint_ce_diagnostic_metrics
+from organ_relation.models.segmentor import SegmentorOutput
 from organ_relation.metrics import hard_dice
 from organ_relation.training.state import atomic_json, load_checkpoint
 
@@ -142,6 +143,12 @@ class BalancedCETests(unittest.TestCase):
                     self.assertIn('balanced_ce', case)
 
     def test_cli_balanced_synthetic_run_and_resume_identity(self):
+        self.cli_balanced_run('train_backbone_only_overfit_balanced_ce.json')
+
+    def test_cli_joint_balanced_full_segmentor_monitor_checkpoint_and_resume(self):
+        self.cli_balanced_run('train_single_case_overfit_balanced_ce.json')
+
+    def cli_balanced_run(self, config_name):
         spec = importlib.util.spec_from_file_location('balanced_cli', ROOT / 'scripts/train.py')
         cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
         data = self.root / 'data'; data.mkdir(); fixtures.synthetic_pair(data, shape=(12, 12, 12))
@@ -152,7 +159,7 @@ class BalancedCETests(unittest.TestCase):
         selection = json.loads((ROOT / 'configs/ct_stats.json').read_text())
         artifact = fixtures.create_development(fixtures.training_manifest(data, selection), 17, 1)
         split = self.root / 'split.json'; fixtures.write_split(split, artifact)
-        cfg = json.loads((ROOT / 'configs/train_backbone_only_overfit_balanced_ce.json').read_text())
+        cfg = json.loads((ROOT / 'configs' / config_name).read_text())
         for key in ('model_config', 'baseline_config', 'selection_config'):
             cfg[key] = str(ROOT / 'configs' / cfg[key])
         cfg['runtime'].update(backend='cpu', device='cpu', cpu_threads=1)
@@ -168,3 +175,108 @@ class BalancedCETests(unittest.TestCase):
         identity = json.loads((run / 'run.json').read_text())['identity']
         self.assertEqual(identity['ce_reduction_mode'], BALANCED)
         self.assertEqual(load_checkpoint(run / 'last.ckpt', identity)['progress']['global_step'], 2)
+        if cfg.get('mode', 'organ_relation_joint') == 'organ_relation_joint':
+            self.assertEqual(identity['loss']['lambda_c'], .5)
+            rows = self.fixture.fixture.rows(run)
+            for row in rows:
+                self.assertEqual(row['mode'], 'organ_relation_joint')
+                self.assertEqual(row['ce_reduction_mode'], BALANCED)
+                if row['phase'] == 'train_monitor':
+                    for case in row['ce_diagnostic_cases'].values():
+                        self.assertEqual(set(case), {'coarse', 'final'})
+                        for branch in case.values():
+                            self.assertEqual(set(branch), {'CE_bg_mean', 'CE_fg_mean', 'balanced_ce'})
+            cfg['ce_reduction_mode'] = 'voxel_mean'; atomic_json(path, cfg)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt')]), 2)
+
+    def test_joint_config_only_reduction_and_200_step_difference(self):
+        old = json.loads((ROOT / 'configs/train_single_case_overfit.json').read_text())
+        new = json.loads((ROOT / 'configs/train_single_case_overfit_balanced_ce.json').read_text())
+        self.assertEqual(new.pop('ce_reduction_mode'), BALANCED)
+        self.assertEqual(new['training']['max_steps'], 200)
+        new['training']['max_steps'] = old['training']['max_steps']
+        self.assertEqual(new, old)
+
+    def test_joint_default_historical_vector_formula_and_gradients_bit_exact(self):
+        # Frozen pre-mode vector operations, independent of the current reducer.
+        def old_branch(logits, label):
+            p = logits.softmax(1)
+            flat, indices = p.flatten(2), label.flatten(1)
+            matched = flat.gather(1, indices.unsqueeze(1)).squeeze(1)
+            ce = -torch.log(matched + 1e-6).mean(1)
+            count = label.new_zeros(label.shape[0], 16).scatter_add(
+                1, indices, torch.ones_like(indices)).to(logits.dtype)
+            inter = p.new_zeros(p.shape[0], 16).scatter_add(1, indices, matched)
+            dice = (2 * inter[:, 1:] + 1e-6) / (flat.sum(2)[:, 1:] + count[:, 1:] + 1e-6)
+            dl = 1 - dice.mean(1)
+            return ce, dice, dl, ce + dl
+        for dtype in (torch.float32, torch.float64):
+            final, label = self.example(dtype)
+            coarse = torch.randn(2, 16, 1, 1, 2, dtype=dtype, requires_grad=True)
+            for align in (False, True):
+                args = dict(epsilon=1e-6, lambda_c=.5, align_corners=align)
+                actual = JointLoss(**args)(coarse, final, label)
+                explicit = JointLoss(**args, ce_reduction_mode='voxel_mean')(coarse, final, label)
+                up = torch.nn.functional.interpolate(coarse, size=label.shape[1:], mode='trilinear', align_corners=align)
+                rc, rf = old_branch(up, label), old_branch(final, label)
+                for branch, reference in ((actual.coarse, rc), (actual.final, rf)):
+                    for a, b in zip(branch, reference):
+                        self.assertTrue(torch.equal(a, b))
+                ref = (rf[3] + .5 * rc[3]).mean()
+                self.assertTrue(torch.equal(actual.total, ref))
+                self.assertTrue(torch.equal(actual.total, explicit.total))
+                ga = torch.autograd.grad(actual.total, (coarse, final), retain_graph=True)
+                gb = torch.autograd.grad(ref, (coarse, final), retain_graph=True)
+                for a, b in zip(ga, gb):
+                    self.assertTrue(torch.equal(a, b))
+
+    def test_joint_balanced_both_branches_reference_lambda_batch_and_resize_order(self):
+        final, label = self.example()
+        coarse = torch.randn(2, 16, 1, 1, 2, dtype=torch.float64, requires_grad=True)
+        for weight in (.5, .37):
+            criterion = JointLoss(epsilon=1e-6, lambda_c=weight, align_corners=False, ce_reduction_mode=BALANCED)
+            actual = criterion(coarse, final, label)
+            up = torch.nn.functional.interpolate(coarse, size=label.shape[1:], mode='trilinear', align_corners=False)
+            references = []
+            original = JointLoss(epsilon=1e-6, lambda_c=weight, align_corners=False)(coarse, final, label)
+            for logits, branch, old in ((up, actual.coarse, original.coarse),
+                                        (final, actual.final, original.final)):
+                p = logits.softmax(1)
+                per_case = []
+                for b in range(2):
+                    loss = -torch.log(p[b].gather(0, label[b].unsqueeze(0)).squeeze(0) + 1e-6)
+                    per_case.append(.5 * loss[label[b] == 0].mean() + .5 * loss[label[b] > 0].mean())
+                ce = torch.stack(per_case)
+                torch.testing.assert_close(branch.ce, ce, rtol=1e-14, atol=1e-14)
+                self.assertTrue(torch.equal(branch.dice_per_class, old.dice_per_class))
+                self.assertTrue(torch.equal(branch.dice_loss, old.dice_loss))
+                references.append(ce + old.dice_loss)
+            reference = references[1] + weight * references[0]
+            torch.testing.assert_close(actual.per_case, reference)
+            torch.testing.assert_close(actual.total, reference.mean())
+            ga = torch.autograd.grad(actual.total, (coarse, final), retain_graph=True)
+            gb = torch.autograd.grad(reference.mean(), (coarse, final), retain_graph=True)
+            for a, b in zip(ga, gb):
+                torch.testing.assert_close(a, b, rtol=1e-12, atol=1e-12)
+            wrong = torch.nn.functional.interpolate(coarse.softmax(1), size=label.shape[1:],
+                                                    mode='trilinear', align_corners=False)
+            wrong_loss = -torch.log(wrong.gather(1, label.unsqueeze(1)).squeeze(1) + 1e-6)
+            wrong_ce = torch.stack([.5*wrong_loss[b][label[b] == 0].mean()
+                                   + .5*wrong_loss[b][label[b] > 0].mean() for b in range(2)])
+            self.assertGreater((wrong_ce - actual.coarse.ce).abs().max().item(), 1e-3)
+
+    def test_joint_monitor_both_branch_group_values_match_actual_ce(self):
+        final, label = self.example()
+        final, label = final[:1], label[:1]
+        coarse = torch.randn(1, 16, 1, 1, 2, dtype=torch.float64)
+        criterion = JointLoss(epsilon=1e-6, lambda_c=.5, align_corners=False, ce_reduction_mode=BALANCED)
+        record = joint_ce_diagnostic_metrics(SegmentorOutput(coarse, final), label, criterion)
+        actual = criterion(coarse, final, label)
+        for name in ('coarse', 'final'):
+            self.assertEqual(record[name]['balanced_ce'], getattr(actual, name).ce.item())
+            self.assertAlmostEqual(record[name]['balanced_ce'],
+                                   .5 * record[name]['CE_bg_mean'] + .5 * record[name]['CE_fg_mean'])
+        for bad in ('class_balanced', None):
+            with self.assertRaisesRegex(ValueError, 'ce_reduction_mode'):
+                JointLoss(epsilon=1e-6, lambda_c=.5, align_corners=False, ce_reduction_mode=bad)

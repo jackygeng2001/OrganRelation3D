@@ -10,7 +10,7 @@ from torch.nn import functional as functional
 
 
 class BranchLoss(NamedTuple):
-    ce: Tensor  # [B], selected per-case reduction; JointLoss uses voxel mean.
+    ce: Tensor  # [B], selected per-case reduction; voxel mean by default.
     dice_per_class: Tensor  # [B,15], class axis corresponds to labels 1..15.
     dice_loss: Tensor  # [B], 1 - mean over all 15 foreground classes.
     segmentation: Tensor  # [B], ce + dice_loss, both coefficients exactly 1.
@@ -115,13 +115,15 @@ def _segmentation_branch(probabilities: Tensor, label: Tensor, target_count: Ten
 class JointLoss(nn.Module):
     """Separate supervised module; never passes label to the Segmentor.
 
-    No constructor defaults: load epsilon/lambda_c/align_corners explicitly from
-    the baseline config. The caller must use the same epsilon as the model.
+    Load epsilon/lambda_c/align_corners explicitly from the baseline config.
+    CE defaults to historical voxel mean; balanced reduction requires opt-in.
+    The caller must use the same epsilon as the model.
     Returns only scalar/small per-case statistics, not full probability volumes.
     FP32/FP64 outside autocast are supported. Config is not in state_dict.
     """
 
-    def __init__(self, *, epsilon: float, lambda_c: float, align_corners: bool):
+    def __init__(self, *, epsilon: float, lambda_c: float, align_corners: bool,
+                 ce_reduction_mode: str = 'voxel_mean'):
         super().__init__()
         for name, value in (('epsilon', epsilon), ('lambda_c', lambda_c)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -131,9 +133,13 @@ class JointLoss(nn.Module):
         self.epsilon = float(epsilon)
         self.lambda_c = float(lambda_c)
         self.align_corners = align_corners
+        if ce_reduction_mode not in CE_REDUCTION_MODES:
+            raise ValueError('unsupported ce_reduction_mode')
+        self.ce_reduction_mode = ce_reduction_mode
 
     def extra_repr(self) -> str:
-        return f'epsilon={self.epsilon!r}, lambda_c={self.lambda_c!r}, align_corners={self.align_corners!r}'
+        return (f'epsilon={self.epsilon!r}, lambda_c={self.lambda_c!r}, align_corners={self.align_corners!r}, '
+                f'ce_reduction_mode={self.ce_reduction_mode!r}')
 
     def _validate(self, coarse_logits: Tensor, final_logits: Tensor, label: Tensor) -> None:
         for name, value in (('coarse_logits', coarse_logits), ('final_logits', final_logits)):
@@ -162,7 +168,7 @@ class JointLoss(nn.Module):
                 raise ValueError(f'{name} must be representable and positive in the logits dtype')
 
     def _branch(self, probabilities: Tensor, label: Tensor, target_count: Tensor) -> BranchLoss:
-        return _segmentation_branch(probabilities, label, target_count, self.epsilon)
+        return _segmentation_branch(probabilities, label, target_count, self.epsilon, self.ce_reduction_mode)
 
     def forward(self, coarse_logits: Tensor, final_logits: Tensor, label: Tensor) -> JointLossResult:
         self._validate(coarse_logits, final_logits, label)

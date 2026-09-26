@@ -68,8 +68,6 @@ def execute(args):
     ce_reduction_mode = config.get('ce_reduction_mode', 'voxel_mean')
     if ce_reduction_mode not in CE_REDUCTION_MODES:
         raise ValueError('unsupported ce_reduction_mode')
-    if mode == 'organ_relation_joint' and ce_reduction_mode != 'voxel_mean':
-        raise ValueError('balanced CE is an isolated backbone-only diagnostic; JointLoss remains unchanged')
     base = args.config.resolve().parent
     selection = read_json(base / config['selection_config'])
     manifest = training_manifest(args.data_root, selection)
@@ -165,7 +163,7 @@ def execute(args):
     loss_config = dict(epsilon=baseline['epsilon'])
     if mode == 'organ_relation_joint':
         loss_config.update(baseline['loss'])
-        criterion = JointLoss(**loss_config)
+        criterion = JointLoss(**loss_config, ce_reduction_mode=ce_reduction_mode)
     else:
         criterion = SegmentationLoss(**loss_config, ce_reduction_mode=ce_reduction_mode)
     data_identity = dict(manifest=manifest, manifest_hash=digest(manifest), split=artifact['development'],

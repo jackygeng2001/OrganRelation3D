@@ -93,6 +93,22 @@ def final_diagnostic_metrics(logits, label, criterion, hard_metrics):
                 gt_foreground_background_mean_probability=probabilities[:, 0][foreground].mean().item() if count else None)
 
 
+def joint_ce_diagnostic_metrics(output, label, criterion):
+    """Single-case scalar monitor; process branches sequentially to bound memory."""
+    def branch(logits):
+        matched = logits.softmax(1).gather(1, label.unsqueeze(1)).squeeze(1)
+        bg, fg = foreground_background_ce_means(
+            -torch.log(matched.flatten(1) + criterion.epsilon), label.flatten(1) > 0)
+        return dict(CE_bg_mean=bg[0].item(), CE_fg_mean=fg[0].item(),
+                    balanced_ce=(0.5 * bg[0] + 0.5 * fg[0]).item())
+
+    coarse = branch(torch.nn.functional.interpolate(
+        output.coarse_logits, size=tuple(label.shape[1:]), mode='trilinear',
+        align_corners=criterion.align_corners))
+    final = branch(output.final_logits)
+    return dict(coarse=coarse, final=final)
+
+
 class Trainer:
     def __init__(self, model, criterion, optimizer, dataset, case_ids, *, device,
                  options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None,
@@ -235,6 +251,8 @@ class Trainer:
                         if self.mode == 'backbone_only_final':
                             record['diagnostic'] = final_diagnostic_metrics(
                                 output.final_logits, label, self.criterion, record)
+                        elif self.ce_reduction_mode == 'foreground_background_balanced':
+                            record['ce_branches'] = joint_ce_diagnostic_metrics(output, label, self.criterion)
                         del image, label, output
                     ledger.commit(case, data_identity, record)
                     self._sync()
@@ -253,6 +271,9 @@ class Trainer:
         if self.mode == 'backbone_only_final':
             row['diagnostic_cases'] = {case: record['diagnostic']
                                        for case, record in zip(self.validation_case_ids, records)}
+        elif self.ce_reduction_mode == 'foreground_background_balanced':
+            row['ce_diagnostic_cases'] = {case: record['ce_branches']
+                                          for case, record in zip(self.validation_case_ids, records)}
         self.log.append(row)
         self.board.record(row)
         self.state['pending_validation'] = False

@@ -32,6 +32,8 @@ def parser():
     p.add_argument('--cases', nargs='+', help='Explicit subset of the configured training role')
     p.add_argument('--cpu-synthetic', action='store_true', help='Only with CPU config; enforces small voxel/channel limits')
     p.add_argument('--stop-after', type=int, help='Safe invocation step budget for resume acceptance, not a new run length')
+    p.add_argument('--no-tensorboard', action='store_true', help='Disable scalar observer; JSONL/checkpoints unchanged')
+    p.add_argument('--quiet-console', action='store_true', help='Disable presentation only; errors still visible')
     return p
 
 
@@ -51,6 +53,7 @@ def execute(args):
     from organ_relation.models.segmentor import Segmentor
     from organ_relation.models.segmentor_config import SegmentorConfig
     from organ_relation.training.engine import Trainer, validate_options
+    from organ_relation.training.console import TrainingConsole
 
     config = read_json(args.config)
     if config.get('schema_version') != 1:
@@ -168,11 +171,11 @@ def execute(args):
     identity = json.loads(json.dumps(identity))
     if identity['provenance']['git'].get('commit') is None:
         raise ValueError('training requires readable Git/source provenance; use a Git clone')
-    print('Training cases:', [r['case_id'] for r in chosen], 'role:', data['role'], flush=True)
     trainer = Trainer(model, criterion, optimizer, train_data, [r['case_id'] for r in chosen],
                       device=runtime['device'], options=options, identity=identity, run_dir=args.run_dir,
                       validation_dataset=val_data, validation_case_ids=[r['case_id'] for r in val_records],
-                      resume=args.resume)
+                      resume=args.resume, console=TrainingConsole(enabled=not args.quiet_console),
+                      tensorboard=not args.no_tensorboard)
     trainer.run(stop_after=args.stop_after)
 
 

@@ -13,9 +13,11 @@ from torch.utils.data import DataLoader
 
 from ..evaluation.progress import CaseLedger
 from ..metrics import METRIC_PROTOCOL, hard_dice, summarize_dice
+from .console import TrainingConsole
 from .progress import ProgressClock
 from .state import (ScalarLog, atomic_json, capture_rng, digest, load_checkpoint,
                     restore_rng, save_checkpoint)
+from .tensorboard import TensorBoardObserver
 
 
 def validate_options(options):
@@ -65,7 +67,8 @@ def gradient_diagnostics(model):
 
 class Trainer:
     def __init__(self, model, criterion, optimizer, dataset, case_ids, *, device,
-                 options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None):
+                 options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None,
+                 console=None, tensorboard=False):
         validate_options(options)
         if not case_ids or len(dataset) != len(case_ids) or len(set(case_ids)) != len(case_ids):
             raise ValueError('invalid training case list')
@@ -78,6 +81,9 @@ class Trainer:
         self.validation_dataset, self.validation_case_ids = validation_dataset, list(validation_case_ids)
         self.device, self.options, self.identity = torch.device(device), options, identity
         self.run_dir = Path(run_dir)
+        self.console = console if console is not None else TrainingConsole(enabled=False)
+        self.board = TensorBoardObserver(self.run_dir, enabled=tensorboard)
+        self.resume_path = resume
         self.total = min(v for v in (options['max_steps'],
                          options['max_epochs'] * len(dataset) if options['max_epochs'] else None) if v is not None)
         self.epochs = math.ceil(self.total / len(dataset))
@@ -156,6 +162,7 @@ class Trainer:
             sampler_generator=self.sampler_generator.get_state(),
             loader_generator=self.loader_generator.get_state(),
             log=self.log.position(self.state['global_step'])))
+        self.board.flush()  # Observer failure never invalidates a saved checkpoint.
 
     def _validation(self):
         step = self.state['global_step']
@@ -169,6 +176,7 @@ class Trainer:
         clock = ProgressClock(self.options['eta_window'], self.options['eta_warmup'])
         records = []
         training_rng = capture_rng(self.device)
+        self.console.validation_start(len(self.validation_case_ids), self.options['validation_role'])
         self.model.eval()
         try:
             for index, case in enumerate(self.validation_case_ids):
@@ -188,16 +196,56 @@ class Trainer:
                     clock.add(time.perf_counter() - started)
                 records.append(record)
                 eta = clock.estimate(len(self.validation_case_ids) - index - 1)
-                print(f'validation {index+1}/{len(self.validation_case_ids)} case={case} ETA={eta}', flush=True)
+                self.console.validation_case(case, eta)
         finally:
             self.model.train()
             restore_rng(training_rng, self.device)
-        self.log.append(dict(run_id=self.run_id, phase=self.options['validation_role'],
-                             global_step=step, epoch=self.state['epoch'], metrics=summarize_dice(records)))
+            self.console.validation_end()
+        row = dict(run_id=self.run_id, phase=self.options['validation_role'],
+                   global_step=step, epoch=self.state['epoch'], metrics=summarize_dice(records))
+        self.log.append(row)
+        self.board.record(row)
         self.state['pending_validation'] = False
         self.checkpoint()  # Same completed optimizer boundary, validation now committed.
+        self.console.validation_summary(row)
+
+    def _start_observers(self):
+        rng = capture_rng(self.device)
+        try:
+            last = None
+            if self.console.enabled:
+                with self.log.path.open(encoding='utf-8') as stream:
+                    for line in stream:
+                        row = json.loads(line)
+                        if row['phase'] == 'train':
+                            last = row
+                next_case = 'complete'
+                if self.state['global_step'] < self.total:
+                    order = self.state['order']
+                    if not order:
+                        preview = torch.Generator().set_state(self.sampler_generator.get_state())
+                        order = (torch.randperm(len(self.case_ids), generator=preview).tolist()
+                                 if self.options['shuffle'] else list(range(len(self.case_ids))))
+                    next_case = self.case_ids[order[self.state['cursor']]]
+                self.console.start(self.identity, self.options, self.case_ids, self.total, self.epochs,
+                                   self.state, resume=self.resume_path, next_case=next_case, last=last)
+            self.board.start(self.state['global_step'], self.log.path)
+        finally:
+            # Lazy observer imports/initialization must not alter training RNG.
+            restore_rng(rng, self.device)
 
     def run(self, *, stop_after=None):
+        """Observers start after state restoration and close on every exit path."""
+        try:
+            self._start_observers()
+            result = self._run(stop_after=stop_after)
+            self.console.finish()
+            return result
+        finally:
+            self.board.close()
+            self.console.close()
+
+    def _run(self, *, stop_after=None):
         """Optional invocation budget stops safely without changing the run identity."""
         if stop_after is not None and (type(stop_after) is not int or stop_after < 1):
             raise ValueError('stop_after must be positive')
@@ -211,6 +259,7 @@ class Trainer:
             index = self.state['order'][self.state['cursor']]
             case, epoch = self.case_ids[index], self.state['epoch'] + 1
             step = self.state['global_step'] + 1
+            self.console.begin_step(epoch, self.state['cursor'])
             self._sync()
             if self.device.type == 'cuda':
                 torch.cuda.reset_peak_memory_stats(self.device)
@@ -256,9 +305,8 @@ class Trainer:
             row['progress'] = self.clock.estimate(remaining, epoch_remaining)
             row['progress']['scope'] = 'training steps only; validation/checkpoint time excluded'
             self.log.append(row)
-            print(f'epoch {epoch}/{self.epochs} step {step}/{self.total} case={case} shape={row["shape"]} '
-                  f'lr={lr:g} loss={row["total_loss"]:.6f} time={elapsed:.3f}s '
-                  f'progress={row["progress"]} memory={row["memory"]}', flush=True)
+            self.board.record(row)
+            self.console.train_step(row)
             due = bool(self.options['validation_every'] and step % self.options['validation_every'] == 0)
             self.state['pending_validation'] = due
             invocation_done = stop_after is not None and step-start_step >= stop_after
@@ -266,6 +314,8 @@ class Trainer:
                 self.checkpoint()
             if due:
                 self._validation()
+            if self.state['cursor'] == 0 or not remaining:
+                self.console.epoch_end(monitored=due)
             if invocation_done:
                 break
         return dict(self.state)

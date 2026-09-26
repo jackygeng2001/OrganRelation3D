@@ -1,5 +1,9 @@
 # AMD 主实验环境
 
+训练观测依赖单独维护在 `requirements-monitoring.txt`。现有 ROCm 环境中运行 `python -m pip install -r environments/requirements-monitoring.txt` 补齐观测依赖；不包含 torch，不安装 TensorFlow，不切换 GPU 后端。当前 pin 为 tensorboard=2.20.0、tqdm=4.67.1、setuptools=80.9.0（TensorBoard CLI 需要 pkg_resources，过新的 setuptools 会使界面入口导入失败）。本轮只在 Windows CPU 实测，AMD 观测功能待用户运行。已收到用户的真实 AMD 10-step smoke 通过结果。
+
+在另一个终端运行 `tensorboard --logdir runs --host 127.0.0.1 --port 6006 --load_fast=false`，本机浏览器打开 http://127.0.0.1:6006。使用标准事件加载器读取 purge/restart 标记；如果从笔记本查看，可自行通过 SSH 端口转发访问，不默认开放公网监听。完整 step-100 overfit 命令和恢复边界见 README 的训练观测一节。
+
 用户指定：Ubuntu 24.04.4 LTS、RX 7900 XTX 24GB、PyTorch 2.11.0 + ROCm 7.2。
 用户已在该环境完成微型 Segmentor 的真实完整扫描验证；这不代表正式模型容量验收。不安装或修改现有环境。当前统计脚本仅使用标准库，Python >=3.10 可直接运行，无 GPU 依赖。
 完整模型测试命令见下文，由用户 GitHub 同步后手动运行返回结果。使用已有 ROCm 环境，不能执行 CUDA 环境安装方案。

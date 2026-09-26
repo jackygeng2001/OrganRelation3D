@@ -1,5 +1,7 @@
 # Windows CPU 开发环境
 
+训练观测测试另需 `environments/requirements-monitoring.txt`（TensorBoard 2.20.0、tqdm 4.67.1、setuptools 80.9.0）。在独立 CPU 环境中用 `python -m pip install -r environments/requirements-monitoring.txt` 安装，不涉及 GPU/PyTorch 安装方案。本机本轮已补齐这些小型依赖，将 setuptools 从 84.0.0 调整到 80.9.0 以满足 TensorBoard CLI 的 pkg_resources 导入，并用真实 event 文件测试 purge、flush/close；影像依赖仍按下文已有 PYTHONPATH 方式组合。`--suite training` 同时运行训练状态和观测层测试，`--suite all` 回归全部测试。
+
 元数据统计及其测试仅依赖 Python >=3.10 标准库，无 pip 安装步骤、不导入 torch。
 本轮已使用 Codex 提供的 Python 3.12.14 Windows 运行时；本机可用 python 命令时按 README 执行即可。
 张量 CPU 环境沿用 `.venv-backbone-cpu`，已验证 PyTorch 2.8.0+cpu 下完整 Segmentor 与 JointLoss 的合成公式和梯度；不等于真实 CT 或 GPU 验证。

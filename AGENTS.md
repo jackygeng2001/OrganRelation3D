@@ -43,6 +43,7 @@
 - smoke、单/双病例 overfit、pilot、正式训练共用 training/；batch=1、num_workers=0。完整 optimizer step 边界原子保存全部恢复状态；严格校验配置、split/manifest、来源指纹，不静默兼容不同实验。病例级评估 ledger 与训练 checkpoint 分离。标量日志提交位置随 checkpoint 保存，恢复时截断未提交尾部。
 - 固定 160/40 development split 用于选择模型；冻结后完整 200 official training CT 从头训练。官方 validation 必须先核实来源，不进入训练或反复调参；hidden test 仅影像，计划官方 DSC/NSD 评价。阶段验收配置 3S-P1/B 不是最终模型或 spacing。
 - 训练/验证计时窗口独立，ETA 先 warm up；诊断和 checkpoint 频率必须可配置。CPU 恢复测试严格对照轨迹；未冻结 GPU 确定性时不得要求 AMD 逐位相同。
+- Console/TensorBoard 仅为 observer，不能改变训练、RNG、采样、ETA、指标及 checkpoint 语义。JSONL/checkpoint 是事实来源；TensorBoard 恢复须清除未提交事件（包括同一步未提交的验证），写入失败明确停用 observer 而不误报训练失败。只记录 scalar，不默认写体积、histogram 或 embedding。
 
 ## 验收和交付
 

@@ -1,0 +1,5 @@
+# Observer dependencies only; does not select or replace PyTorch/CUDA/ROCm.
+tensorboard==2.20.0
+tqdm==4.67.1
+# TensorBoard 2.20 CLI imports pkg_resources; keep a compatible build-tool version.
+setuptools==80.9.0

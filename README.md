@@ -2,7 +2,7 @@
 
 完整 CT 扫描范围的三维腹部多器官分割科研项目，面向 AMOS22 CT。GitHub 仓库名称为 **OrganRelation3D**，Python package 为 **organ_relation**。论文方法名称尚未确定，仓库名称不代表论文方法命名。
 
-已完成：200 例训练 CT 头信息统计、三候选网格估算、10 例真实 CT 的 CPU 重采样保真度探索，以及完整 Segmentor / 独立 JointLoss 的 CPU 公式、形状和梯度验证。现已提供完整扫描 Dataset、资源探针及第一版可恢复训练/内部验证入口。用户已完成 AMD FP32 capacity backward 基线；**新增训练系统仅通过 CPU 合成测试，尚未进行 AMD 训练验收或正式实验。**
+已完成：200 例训练 CT 头信息统计、三候选网格估算、10 例真实 CT 的 CPU 重采样保真度探索，以及完整 Segmentor / 独立 JointLoss 的 CPU 公式、形状和梯度验证。现已提供完整扫描 Dataset、资源探针及可恢复训练/内部验证入口。用户已完成 AMD FP32 capacity backward 基线和真实 10-step smoke；**新增 Console/TensorBoard 观测层仅完成 CPU 验收，尚未开展正式实验。**
 
 方法唯一工程依据：[METHOD_SPEC.md](METHOD_SPEC.md)。开发与三台设备规范：[AGENTS.md](AGENTS.md)。完整扫描、15 个前景节点、单次前向和全局有向关系保持不变；真实标签只进入监督损失和评估。
 
@@ -225,3 +225,42 @@ PYTORCH_MIOPEN_SUGGEST_NHWC=1 python -B scripts/train.py \
 新增 CPU 接受测试运行 `python -B scripts/run_tests.py --suite training`。覆盖连续训练与中途/epoch 边界恢复的精确 CPU 轨迹、优化器/RNG/病例顺序、损坏与不匹配拒绝、日志回滚、pending 验证、ETA、split 隔离以及临时 NIfTI→完整 Segmentor→JointLoss→AdamW→保存/恢复。无 AMD 逐位一致承诺；其验收需检查状态/顺序、数值连续性与真实运行显存。
 
 本阶段 Windows CPU：新增训练组 23 项通过；全量 252 项通过，零跳过。仅使用小张量及临时合成 NIfTI，没有运行真实 CT 训练或 GPU。
+
+## Console 与 TensorBoard 观测
+
+已收到用户的 AMD 10-step smoke 通过结果；本轮仅为训练入口增加独立观测层，新增代码只在 CPU 测试。`training/console.py` 提供固定两列启动/摘要、TTY 下的 tqdm、独立 monitor/validation 进度条和简短恢复块。单/双病例用 run 级进度，多病例用 epoch 级进度；non-TTY 禁用动态条，仅打印启动与阶段摘要。`Last Loss` 是最近一次训练 loss，不冒充 epoch 均值；`Monitor Dice` 来自训练病例监测，不叫 Val Dice。正常诊断不展开模块字典；完整标量仍在 JSONL。ETA 算法与计时范围不变。
+
+`training/tensorboard.py` 默认向 `<run-dir>/tensorboard/` 写 scalar。可用 `--no-tensorboard`、`--quiet-console` 独立关闭观测；这些 CLI 开关不进入数值配置或 checkpoint 身份。完整有效训练配置仍在 run.json。依赖见 `environments/requirements-monitoring.txt`，不包含 torch/TensorFlow，不覆盖 GPU 后端：
+
+```bash
+python -m pip install -r environments/requirements-monitoring.txt
+tensorboard --logdir runs --host 127.0.0.1 --port 6006 --load_fast=false
+```
+
+浏览器打开 http://127.0.0.1:6006；使用标准事件加载器处理 restart/purge 标记。默认只监听本机；无需上传日志或建立远程开发环境。
+
+观测依赖固定 TensorBoard 2.20.0、tqdm 4.67.1、setuptools 80.9.0；最后一项用于兼容 TensorBoard CLI 的 pkg_resources 导入。只升级/补齐观测依赖，不安装 TensorFlow 或替换 PyTorch。
+
+scalar 包括 `Train/{Total_Loss,Coarse_CE,Coarse_DiceLoss,Final_CE,Final_DiceLoss,SoftDice_Mean}`、`Optimizer/LR`、`System/{Step_Time,GPU_Peak_Allocated_GiB,GPU_Peak_Reserved_GiB}`。诊断触发时写 `GradNorm/{Encoder,CoarseHead,Relation,NodeToSpace,Fusion,Decoder}`；仅 monitor/validation 完成时写 `Monitor/HardDice_Mean`、`Val/HardDice_Mean` 和 `MonitorDice/<organ>`、`ValDice/<organ>`。15 个器官按 METHOD_SPEC 标签顺序命名；null Dice 和 CPU 不可用显存不伪造为 0。无 volume、histogram、embedding 或图片。
+
+恢复仍先校验 checkpoint 并回滚 JSONL。checkpoint 提交在 K 时，writer 使用 **purge_step=K，再仅重放已提交 JSONL 中 K 的记录**，然后从 K+1 继续。相比只 purge K+1，这还能清除“训练 K 已提交、验证 K event 已写但验证 checkpoint 未提交”的残留；已提交验证会重放一次，未提交验证由原 pending/ledger 机制完成。event 文件物理保留，TensorBoard 有效曲线不重复。若此前停用/故障造成历史缺点，JSONL 仍完整，不将缺失曲线当作训练失败或自动补造数据。
+
+writer 在 checkpoint 成功后 flush；正常结束、`--stop-after` 和异常退出均执行 flush/close。写入/flush/close 失败仅输出一次明确的 observer 警告并停用 TensorBoard；已成功的 checkpoint 不失效，训练继续。观测不持有模型张量、计算图或更改 RNG；不计入训练 step throughput。不得同时启动两个进程写同一 run。
+
+同一秒快速重启时，默认 event 文件名中的 PID/未补零计数器可能排错。observer 只在启动阶段最多等待约一秒，让新文件时间戳严格晚于旧文件，保证 purge 后读；明显时钟回退则停用 observer 并告警，不无限等待或改变训练状态。
+
+进入单病例 overfit 的第一个 100-step 区间时使用新 run，沿用已有 split（不重新生成）。`train_single_case_overfit.json` 仅将 sanity 的总步数改成 100、保存和 monitor 周期改成 25，其余参数完全继承，包括 3S-P1/B、AdamW、FP32、每步诊断与完整 CT；不代表已选定最终训练配置：
+
+```bash
+git pull --ff-only origin main
+AMOS_ROOT="/absolute/path/to/amos22"
+env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
+  PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+  python -B scripts/train.py --config configs/train_single_case_overfit.json \
+    --data-root "$AMOS_ROOT" --split runs/splits/development_160_40.json \
+    --run-dir runs/overfit_1case_3sp1_B_100
+```
+
+默认仍为固定 train 列表第一例；若此前 smoke 显式选了其他 train 病例，同样追加 `--cases <该病例ID>`。不要直接 resume 旧源码/10-step 配置的 smoke checkpoint；本轮未放宽严格来源与配置校验。新 overfit 中断后，同一命令追加 `--resume runs/overfit_1case_3sp1_B_100/last.ckpt`，保留相同 config/病例/环境；最后一次保存后未提交的步会重跑。只有到 100 步的数值趋势经审查后，再确定后续运行长度。
+
+本轮新增 21 项观测测试；Windows CPU 全量 273 项通过，零跳过。包括真实 TensorBoard event 的 scalar/purge、同一步 pending validation、写入故障隔离、TTY/non-TTY、启用/关闭的模型/optimizer/RNG/轨迹严格对照、启动中断清理和 TensorBoard CLI 导入。未运行 GPU。

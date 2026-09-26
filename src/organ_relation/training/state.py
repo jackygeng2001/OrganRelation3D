@@ -75,7 +75,7 @@ def save_checkpoint(path, state):
     atomic_bytes(path, MAGIC + hashlib.sha256(payload).digest() + payload)
 
 
-def load_checkpoint(path, identity):
+def load_checkpoint(path, identity, *, extension=False):
     raw = Path(path).read_bytes()
     start = len(MAGIC)
     if not raw.startswith(MAGIC) or len(raw) <= start + 32:
@@ -90,9 +90,13 @@ def load_checkpoint(path, identity):
     if not isinstance(state, dict) or not required <= state.keys() or state['schema_version'] != 1:
         raise ValueError('incomplete checkpoint state')
     if state['identity'] != identity:
-        keys = sorted(k for k in set(state['identity']) | set(identity)
-                      if state['identity'].get(k) != identity.get(k))
-        raise ValueError('resume identity mismatch: ' + ', '.join(keys))
+        if extension:
+            from .extension import check_extension_identity
+            check_extension_identity(state['identity'], identity)
+        else:
+            keys = sorted(k for k in set(state['identity']) | set(identity)
+                          if state['identity'].get(k) != identity.get(k))
+            raise ValueError('resume identity mismatch: ' + ', '.join(keys))
     if state['scheduler'] is not None:
         raise ValueError('scheduler is not implemented in training v1')
     return state

@@ -66,7 +66,7 @@ class TrainingTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def trainer(self, directory, *, resume=False, validation=False, options=None, identity=None):
+    def trainer(self, directory, *, resume=False, validation=False, options=None, identity=None, extend_to=None):
         seed_all(712)
         model = TinyModel().to(memory_format=torch.channels_last_3d)
         optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0, foreach=False, fused=False)
@@ -81,7 +81,7 @@ class TrainingTests(unittest.TestCase):
             optimizer, dataset, ['one', 'two', 'three'], device='cpu', options=opts,
             identity=ident, run_dir=directory, validation_dataset=dataset if validation else None,
             validation_case_ids=['one', 'two', 'three'] if validation else [],
-            resume=directory / 'last.ckpt' if resume else None)
+            resume=directory / 'last.ckpt' if resume else None, extend_to=extend_to)
 
     def quiet_run(self, trainer, **kwargs):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -187,6 +187,168 @@ class TrainingTests(unittest.TestCase):
             identity = copy.deepcopy(trainer.identity); identity[key] = 'changed'
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'identity mismatch'):
                 load_checkpoint(trainer.run_dir / 'last.ckpt', identity)
+
+    def test_extension_rejects_decrease_config_changes_and_missing_resume_without_writes(self):
+        directory = self.root / 'run'
+        with self.assertRaisesRegex(ValueError, 'requires --resume'):
+            self.trainer(directory, extend_to=200)
+        self.assertFalse(directory.exists())
+        trainer = self.trainer(directory, options={'max_steps': 100})
+        self.quiet_run(trainer, stop_after=2)
+        original_files = {p: p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+        for target in (50, 100, 2, 0, -1, True):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                self.trainer(directory, resume=True, options={'max_steps': 100}, extend_to=target)
+        changes = [('optimizer', {'name': 'AdamW', 'lr': .01}), ('model', 'other'),
+                   ('loss', 'changed'), ('preprocessing', 'changed'),
+                   ('data', {'manifest_hash': 'changed', 'split_hash': 'changed'}),
+                   ('runtime', {'device': 'changed'}), ('environment', {'torch': 'changed'})]
+        for key, value in changes:
+            identity = copy.deepcopy(trainer.identity); identity[key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                self.trainer(directory, resume=True, options={'max_steps': 100}, identity=identity, extend_to=200)
+        for key, value in [('max_steps', 200), ('max_epochs', 200), ('seed', 99),
+                           ('memory_format', 'contiguous'), ('validation_every', 1)]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.trainer(directory, resume=True, options={'max_steps': 100, key: value}, extend_to=200)
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            self.trainer(directory, resume=True, options={'max_steps': 200})
+        self.assertEqual(original_files, {p: p.read_bytes() for p in directory.rglob('*') if p.is_file()})
+
+    def test_extension_honors_epoch_limit_and_rejects_unbounded_step_config(self):
+        trainer = self.trainer(self.root / 'capped', options={'max_steps': 4, 'max_epochs': 2})
+        self.quiet_run(trainer)
+        with self.assertRaisesRegex(ValueError, 'max_epochs'):
+            self.trainer(trainer.run_dir, resume=True, options={'max_steps': 4, 'max_epochs': 2}, extend_to=7)
+        extended = self.trainer(trainer.run_dir, resume=True, options={'max_steps': 4, 'max_epochs': 2}, extend_to=6)
+        self.assertEqual(extended.total, 6)
+        self.quiet_run(extended)
+        self.assertEqual(extended.state['global_step'], 6)
+        epochs_only = self.trainer(self.root / 'epochs', options={'max_steps': None, 'max_epochs': 1})
+        self.quiet_run(epochs_only)
+        with self.assertRaisesRegex(ValueError, 'max_steps'):
+            self.trainer(epochs_only.run_dir, resume=True, options={'max_steps': None, 'max_epochs': 1}, extend_to=6)
+
+    def test_extension_commits_before_forward_and_survives_startup_failure(self):
+        trainer = self.trainer(self.root / 'run', options={'max_steps': 4})
+        self.quiet_run(trainer)
+        log = trainer.log.path.read_bytes(); run = (trainer.run_dir / 'run.json').read_bytes()
+        extended = self.trainer(trainer.run_dir, resume=True, options={'max_steps': 4}, extend_to=8)
+        with patch.object(extended, '_start_observers', side_effect=RuntimeError('startup')), self.assertRaises(RuntimeError):
+            self.quiet_run(extended)
+        saved = load_checkpoint(trainer.run_dir / 'last.ckpt', trainer.identity)
+        self.assertEqual(saved['progress']['global_step'], 4)
+        self.assertEqual(saved['horizon']['total_steps'], 8)
+        self.assertEqual(trainer.log.path.read_bytes(), log)
+        self.assertEqual((trainer.run_dir / 'run.json').read_bytes(), run)
+        resumed = self.trainer(trainer.run_dir, resume=True, options={'max_steps': 4})
+        self.assertEqual(resumed.total, 8)
+        self.quiet_run(resumed)
+        self.assertEqual(resumed.state['global_step'], 8)
+        with self.assertRaisesRegex(ValueError, 'strictly increase'):
+            self.trainer(trainer.run_dir, resume=True, options={'max_steps': 4}, extend_to=8)
+        again = self.trainer(trainer.run_dir, resume=True, options={'max_steps': 4}, extend_to=10)
+        self.quiet_run(again)
+        self.assertEqual([(e['previous_total_steps'], e['total_steps']) for e in again.horizon['extensions']], [(4, 8), (8, 10)])
+
+    def test_extension_atomic_failure_keeps_old_horizon(self):
+        trainer = self.trainer(self.root / 'run', options={'max_steps': 2})
+        self.quiet_run(trainer)
+        path = trainer.run_dir / 'last.ckpt'; before = path.read_bytes()
+        extended = self.trainer(trainer.run_dir, resume=True, options={'max_steps': 2}, extend_to=4)
+        with patch('organ_relation.training.state.os.replace', side_effect=OSError('power loss')), self.assertRaises(OSError):
+            self.quiet_run(extended)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_extension_rejects_corrupt_horizon_and_progress_before_expansion(self):
+        trainer = self.trainer(self.root / 'run', options={'max_steps': 2})
+        self.quiet_run(trainer)
+        path = trainer.run_dir / 'last.ckpt'
+        saved = load_checkpoint(path, trainer.identity)
+        for key in ('horizon', 'progress'):
+            bad = copy.deepcopy(saved)
+            if key == 'horizon':
+                bad['horizon']['total_steps'] = 3
+            else:
+                bad['progress']['global_step'] = 3
+            save_checkpoint(path, bad)
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.trainer(trainer.run_dir, resume=True, options={'max_steps': 2}, extend_to=4)
+
+    def test_extension_with_pending_validation_keeps_original_ledger_identity(self):
+        trainer = self.trainer(self.root / 'run', validation=True, options={'max_steps': 4})
+        original = CaseLedger.commit
+        def fail_second(ledger, case, data, result):
+            if case == 'two':
+                raise OSError('interrupted validation')
+            return original(ledger, case, data, result)
+        with patch.object(CaseLedger, 'commit', fail_second), self.assertRaises(OSError):
+            self.quiet_run(trainer)
+        resumed = self.trainer(trainer.run_dir, resume=True, validation=True,
+                               options={'max_steps': 4}, extend_to=6)
+        original_batch = resumed._batch
+        def batch(dataset, index, *, validation=False):
+            if validation and resumed.state['global_step'] == 2 and index == 0:
+                self.fail('completed validation case was repeated')
+            return original_batch(dataset, index, validation=validation)
+        with patch.object(resumed, '_batch', batch):
+            self.quiet_run(resumed)
+        rows = self.rows(trainer.run_dir)
+        self.assertEqual([r['global_step'] for r in rows if r['phase'] == 'train_monitor'], [2, 4, 6])
+
+    def test_extension_legacy_source_upgrade_is_narrow_and_normal_resume_stays_strict(self):
+        from organ_relation.training.extension import check_extension_identity, LEGACY_COMMIT
+        old = dict(provenance=dict(git=dict(commit=LEGACY_COMMIT, dirty=False),
+            source_hashes={'scripts/train.py': 'old', 'src/organ_relation/losses.py': 'frozen'}),
+            model='fixed', training={'max_steps': 100})
+        new = copy.deepcopy(old)
+        new['provenance']['git']['commit'] = 'new'
+        new['provenance']['source_hashes'].update({'scripts/train.py': 'new',
+            'src/organ_relation/training/extension.py': 'added'})
+        with patch('organ_relation.training.extension.LEGACY_SOURCES', digest(old['provenance']['source_hashes'])):
+            check_extension_identity(old, new)
+            for key in ('model', 'training'):
+                bad = copy.deepcopy(new); bad[key] = 'changed'
+                with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                    check_extension_identity(old, bad)
+            for path in ('src/organ_relation/losses.py', 'new_unreviewed.py'):
+                bad = copy.deepcopy(new); bad['provenance']['source_hashes'][path] = 'changed'
+                with self.assertRaisesRegex(ValueError, 'source mismatch'):
+                    check_extension_identity(old, bad)
+            bad = copy.deepcopy(new); bad['provenance']['git']['dirty'] = True
+            with self.assertRaisesRegex(ValueError, 'dirty checkout'):
+                check_extension_identity(old, bad)
+        trainer = self.trainer(self.root / 'run'); self.quiet_run(trainer, stop_after=1)
+        identity = copy.deepcopy(trainer.identity); identity['provenance'] = new['provenance']
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            load_checkpoint(trainer.run_dir / 'last.ckpt', identity)
+        with self.assertRaisesRegex(ValueError, 'provenance mismatch'):
+            load_checkpoint(trainer.run_dir / 'last.ckpt', identity, extension=True)
+
+        # A reviewed source upgrade keeps run.json/ledger identity anchored to
+        # the origin, while later ordinary resumes require the new provenance.
+        old_identity = copy.deepcopy(trainer.identity)
+        old_identity['provenance'] = old['provenance']
+        legacy = self.trainer(self.root / 'legacy', identity=old_identity)
+        self.quiet_run(legacy, stop_after=2)
+        original_run = (legacy.run_dir / 'run.json').read_bytes()
+        current_identity = copy.deepcopy(old_identity); current_identity['provenance'] = new['provenance']
+        with patch('organ_relation.training.extension.LEGACY_SOURCES', digest(old['provenance']['source_hashes'])):
+            upgraded = self.trainer(legacy.run_dir, resume=True, identity=current_identity, extend_to=9)
+            self.quiet_run(upgraded, stop_after=1)
+        self.assertEqual((legacy.run_dir / 'run.json').read_bytes(), original_run)
+        normal = self.trainer(legacy.run_dir, resume=True, identity=current_identity)
+        self.assertEqual(normal.total, 9)
+        self.quiet_run(normal)
+        self.assertEqual(normal.state['global_step'], 9)
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            self.trainer(legacy.run_dir, resume=True, identity=old_identity)
+
+    def test_extension_cli_requires_resume_before_loading_data(self):
+        spec = importlib.util.spec_from_file_location('extension_cli', ROOT / 'scripts/train.py')
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        with patch.object(cli, 'read_json', side_effect=AssertionError('config loaded')), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(['--config', 'unused', '--data-root', 'unused', '--extend-to', '200']), 2)
 
     def test_incomplete_corrupt_and_invalid_progress_checkpoints_rejected(self):
         trainer = self.trainer(self.root / 'run')
@@ -436,6 +598,12 @@ class TrainingTests(unittest.TestCase):
                 self.assertGreater(stats['update_norm'], 0, name)
         for path, raw in originals.items():
             self.assertEqual(path.read_bytes(), raw)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt'), '--extend-to', '3']), 0)
+        rows = [r for r in self.rows(run) if r['phase'] == 'train']
+        self.assertEqual([r['global_step'] for r in rows], [1, 2, 3])
+        self.assertEqual(rows[-1]['total_steps'], 3)
+        self.assertEqual(json.loads(cfg_path.read_text())['training']['max_steps'], 2)
         with patch.object(cli, 'git_state', return_value={'commit': None}), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(argv), 2)
 

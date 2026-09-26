@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 import test_training as training_fixtures
 from organ_relation.training.console import TrainingConsole, columns, duration
-from organ_relation.training.state import load_checkpoint
+from organ_relation.training.state import load_checkpoint, save_checkpoint, capture_rng
 from organ_relation.training.tensorboard import TensorBoardObserver, ORGAN_NAMES, scalar_values
 
 
@@ -48,6 +48,67 @@ class MonitoringTests(unittest.TestCase):
 
     def events(self, directory):
         return EventAccumulator(str(directory), size_guidance={'scalars': 0}).Reload()
+
+    def test_100_to_200_extension_exact_trajectory_rng_and_unique_tensorboard_steps(self):
+        options = dict(max_steps=200, checkpoint_every=25, diagnostics_every=25, validation_every=25)
+        whole = self.fixture.trainer(self.root / 'whole', validation=True, options=options)
+        self.fixture.quiet_run(whole)
+        expected = load_checkpoint(whole.run_dir / 'last.ckpt', whole.identity)
+        options['max_steps'] = 100
+        first = self.fixture.trainer(self.root / 'extended', validation=True, options=options)
+        first.board = TensorBoardObserver(first.run_dir)
+        self.fixture.quiet_run(first)
+        path = first.run_dir / 'last.ckpt'
+        middle = load_checkpoint(path, first.identity)
+        # Exercise the real pre-extension checkpoint schema as well.
+        middle.pop('horizon'); middle.pop('origin_identity')
+        save_checkpoint(path, middle)
+        original_run = (first.run_dir / 'run.json').read_bytes()
+        original_log = first.log.path.read_bytes()
+        resumed = self.fixture.trainer(first.run_dir, resume=True, validation=True,
+                                       options=options, extend_to=200)
+        self.assertEqual(resumed.run_id, first.run_id)
+        self.assertEqual(resumed.total, 200)
+        self.assertEqual(resumed.options['max_steps'], 100)
+        self.assertEqual(len(resumed.clock.samples), 0)
+        self.fixture.assert_nested_equal(middle['model'], resumed.model.state_dict())
+        self.fixture.assert_nested_equal(middle['optimizer'], resumed.optimizer.state_dict())
+        self.fixture.assert_nested_equal(middle['rng'], capture_rng(resumed.device))
+        self.fixture.assert_nested_equal(middle['progress'], resumed.state)
+        self.fixture.assert_nested_equal(middle['sampler_generator'], resumed.sampler_generator.get_state())
+        self.fixture.assert_nested_equal(middle['loader_generator'], resumed.loader_generator.get_state())
+        resumed.board = TensorBoardObserver(resumed.run_dir)
+        self.fixture.quiet_run(resumed)
+        actual = load_checkpoint(path, resumed.identity)
+        for key in ('model', 'optimizer', 'progress', 'rng', 'sampler_generator', 'loader_generator'):
+            self.fixture.assert_nested_equal(expected[key], actual[key])
+        self.assertEqual((first.run_dir / 'run.json').read_bytes(), original_run)
+        self.assertTrue(first.log.path.read_bytes().startswith(original_log))
+        rows, reference = self.fixture.rows(first.run_dir), self.fixture.rows(whole.run_dir)
+        self.assertEqual(len(rows), len(reference))
+        for a, b in zip(rows, reference):
+            for key in ('phase', 'epoch', 'global_step', 'case_id', 'total_loss', 'coarse', 'final',
+                        'soft_dice_per_organ', 'metrics', 'diagnostics'):
+                self.assertEqual(a.get(key), b.get(key), key)
+        training = [r for r in rows if r['phase'] == 'train']
+        self.assertEqual([r['global_step'] for r in training], list(range(1, 201)))
+        self.assertEqual(training[100]['total_steps'], 200)
+        self.assertEqual(training[100]['progress']['status'], 'warming up')
+        self.assertAlmostEqual(training[105]['progress']['eta_seconds'],
+                               training[105]['progress']['rolling_seconds'] * 94)
+        self.assertEqual(training[-1]['progress']['eta_seconds'], 0)
+        history = actual['horizon']
+        self.assertEqual((history['original_total_steps'], history['total_steps']), (100, 200))
+        self.assertEqual(len(history['extensions']), 1)
+        event = history['extensions'][0]
+        self.assertEqual((event['at_global_step'], event['previous_total_steps'], event['total_steps']), (100, 100, 200))
+        self.assertEqual(event['previous_provenance'], first.identity['provenance'])
+        self.assertEqual(event['execution_provenance'], resumed.identity['provenance'])
+        self.assertEqual(len(event['parent_checkpoint_sha256']), 64)
+        self.assertFalse(resumed.board.failed)
+        events = self.events(resumed.board.directory)
+        self.assertEqual([e.step for e in events.Scalars('Train/Total_Loss')], list(range(1, 201)))
+        self.assertEqual([e.step for e in events.Scalars('Monitor/HardDice_Mean')], list(range(25, 201, 25)))
 
     def start_console(self, stream, *, resume=False, cases=1):
         console = TrainingConsole(stream=stream)

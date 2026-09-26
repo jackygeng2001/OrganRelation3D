@@ -27,6 +27,7 @@ def parser():
     p.add_argument('--run-dir', type=Path)
     p.add_argument('--split', type=Path, help='Existing fixed split artifact; never regenerated while training')
     p.add_argument('--resume', type=Path, help='Trusted checkpoint in the original run directory')
+    p.add_argument('--extend-to', type=int, help='Explicitly increase the resumed run total; keep the original config unchanged')
     p.add_argument('--prepare-split', type=Path, help='Only write a NEW 160/40 artifact, then exit; no voxels loaded')
     p.add_argument('--split-seed', type=int, default=20260925)
     p.add_argument('--cases', nargs='+', help='Explicit subset of the configured training role')
@@ -47,6 +48,8 @@ def outside_data(path, data_root):
 
 
 def execute(args):
+    if args.extend_to is not None and (args.resume is None or args.extend_to < 1 or args.prepare_split):
+        raise ValueError('--extend-to requires --resume and a positive total; not a split preparation option')
     import torch
     from organ_relation.data.full_scan import FullScanDataset, FullScanPreprocessor, ScanPair
     from organ_relation.losses import JointLoss
@@ -175,7 +178,7 @@ def execute(args):
                       device=runtime['device'], options=options, identity=identity, run_dir=args.run_dir,
                       validation_dataset=val_data, validation_case_ids=[r['case_id'] for r in val_records],
                       resume=args.resume, console=TrainingConsole(enabled=not args.quiet_console),
-                      tensorboard=not args.no_tensorboard)
+                      tensorboard=not args.no_tensorboard, extend_to=args.extend_to)
     trainer.run(stop_after=args.stop_after)
 
 

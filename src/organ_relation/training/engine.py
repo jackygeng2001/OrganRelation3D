@@ -15,6 +15,7 @@ from ..evaluation.progress import CaseLedger
 from ..metrics import METRIC_PROTOCOL, hard_dice, summarize_dice
 from .console import TrainingConsole
 from .progress import ProgressClock
+from .extension import resolve_horizon
 from .state import (ScalarLog, atomic_json, capture_rng, digest, load_checkpoint,
                     restore_rng, save_checkpoint)
 from .tensorboard import TensorBoardObserver
@@ -68,8 +69,12 @@ def gradient_diagnostics(model):
 class Trainer:
     def __init__(self, model, criterion, optimizer, dataset, case_ids, *, device,
                  options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None,
-                 console=None, tensorboard=False):
+                 console=None, tensorboard=False, extend_to=None):
         validate_options(options)
+        if identity.get('training') != options:
+            raise ValueError('training options must match the strict run identity')
+        if extend_to is not None and (resume is None or type(extend_to) is not int or extend_to < 1):
+            raise ValueError('--extend-to requires --resume and a positive integer total')
         if not case_ids or len(dataset) != len(case_ids) or len(set(case_ids)) != len(case_ids):
             raise ValueError('invalid training case list')
         if options['validation_every'] and (validation_dataset is None or not validation_case_ids):
@@ -84,20 +89,22 @@ class Trainer:
         self.console = console if console is not None else TrainingConsole(enabled=False)
         self.board = TensorBoardObserver(self.run_dir, enabled=tensorboard)
         self.resume_path = resume
-        self.total = min(v for v in (options['max_steps'],
-                         options['max_epochs'] * len(dataset) if options['max_epochs'] else None) if v is not None)
-        self.epochs = math.ceil(self.total / len(dataset))
         self.clock = ProgressClock(options['eta_window'], options['eta_warmup'])
         self.sampler_generator = torch.Generator().manual_seed(options['seed'])
         self.loader_generator = torch.Generator().manual_seed(options['seed'] + 1)
         self.state = dict(global_step=0, epoch=0, order=[], cursor=0, pending_validation=False)
         if not resume and self.run_dir.exists() and any(self.run_dir.iterdir()):
             raise ValueError('new run directory must be empty; use --resume')
-        checkpoint = load_checkpoint(resume, identity) if resume else None
+        checkpoint = load_checkpoint(resume, identity, extension=extend_to is not None) if resume else None
+        self.horizon = resolve_horizon(options, len(dataset), checkpoint, extend_to, identity, resume)
+        self.total = self.horizon['total_steps']
+        self.epochs = math.ceil(self.total / len(dataset))
+        self.extension_pending = extend_to is not None
+        self.origin_identity = checkpoint.get('origin_identity', checkpoint['identity']) if checkpoint else identity
         if checkpoint:
             self._validate_progress(checkpoint)
             run = json.loads((self.run_dir / 'run.json').read_text(encoding='utf-8'))
-            if run != dict(run_id=checkpoint['run_id'], identity=identity):
+            if run != dict(run_id=checkpoint['run_id'], identity=self.origin_identity):
                 raise ValueError('resume requires the original run identity')
             if not (self.run_dir / 'metrics.jsonl').exists():
                 raise ValueError('resume requires the original run log')
@@ -157,6 +164,7 @@ class Trainer:
             return  # No completed optimizer step yet.
         save_checkpoint(self.run_dir / 'last.ckpt', dict(
             schema_version=1, run_id=self.run_id, identity=self.identity,
+            origin_identity=self.origin_identity, horizon=self.horizon,
             model=self.model.state_dict(), optimizer=self.optimizer.state_dict(), scheduler=None,
             progress=self.state, rng=capture_rng(self.device),
             sampler_generator=self.sampler_generator.get_state(),
@@ -168,7 +176,7 @@ class Trainer:
         step = self.state['global_step']
         ledger = CaseLedger(self.run_dir / 'validation' / f'step_{step:08d}', dict(
             run_id=self.run_id, model_hash=weights_hash(self.model),
-            run_identity_hash=digest(self.identity), metric_protocol=METRIC_PROTOCOL,
+            run_identity_hash=digest(self.origin_identity), metric_protocol=METRIC_PROTOCOL,
             preprocessing_hash=digest(self.identity['preprocessing']),
             manifest_hash=self.identity['data']['manifest_hash'],
             split_hash=self.identity['data'].get('split_hash'),
@@ -237,6 +245,11 @@ class Trainer:
     def run(self, *, stop_after=None):
         """Observers start after state restoration and close on every exit path."""
         try:
+            if self.extension_pending:
+                # Persist the new horizon at the already-completed optimizer
+                # boundary before observers, pending validation or another step.
+                self.checkpoint()
+                self.extension_pending = False
             self._start_observers()
             result = self._run(stop_after=stop_after)
             self.console.finish()

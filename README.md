@@ -263,4 +263,26 @@ env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
 
 默认仍为固定 train 列表第一例；若此前 smoke 显式选了其他 train 病例，同样追加 `--cases <该病例ID>`。不要直接 resume 旧源码/10-step 配置的 smoke checkpoint；本轮未放宽严格来源与配置校验。新 overfit 中断后，同一命令追加 `--resume runs/overfit_1case_3sp1_B_100/last.ckpt`，保留相同 config/病例/环境；最后一次保存后未提交的步会重跑。只有到 100 步的数值趋势经审查后，再确定后续运行长度。
 
+### 显式延长同一训练轨迹
+
+审查后需要从 100 延长到 200 steps 时，继续使用原始 100-step config，显式增加 `--resume ... --extend-to 200`。禁止直接编辑 config 的 max_steps 来恢复。普通 resume 的完整 identity 检查不变；extension 也要求 model/loss/preprocessing/optimizer/lr/data/split/seed/runtime/environment 及原始 training 配置全部匹配。
+
+```bash
+env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
+  PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+  python -B scripts/train.py --config configs/train_single_case_overfit.json \
+    --data-root "$AMOS_ROOT" --split runs/splits/development_160_40.json \
+    --cases amos_0109 --run-dir runs/overfit_1case_3sp1_B_100 \
+    --resume runs/overfit_1case_3sp1_B_100/last.ckpt --extend-to 200
+```
+
+- `--extend-to` 仅用于 resume；目标必须大于已完成 global_step、当前有效 total 和原始 max_steps。不接受降低或重复设置同一个上限；max_steps=null 的仅 epoch 运行不能用此接口扩展。
+- max_epochs 保持不变，目标超过其对应的步数上限时明确拒绝，不截短目标或绕过 epoch 限制。
+- `run_id` 与 `run.json` 保留，model/optimizer/RNG/sampler/order/cursor 全部从 checkpoint 恢复。metrics.jsonl 保留已提交前缀，TensorBoard 使用原目录和既有 purge/replay 规则；ETA 在新 total 下重新 warm up。
+- checkpoint 的 `horizon` 保存 `original_total_steps`、有效 `total_steps` 和追加的 `extensions` 历史，包括扩展发生的 global_step、前后 total、不变的 max_epochs、UTC 时间、父 checkpoint SHA-256、升级前后 provenance。`origin_identity` 保留最初运行身份；validation ledger 始终使用该原始身份，支持 pending validation 恢复。
+- 扩展先在已有完整 optimizer 边界原子保存，再开始下一步。保存成功后的中断恢复使用原 config 和普通 `--resume`，**去掉 `--extend-to 200`**；checkpoint 已记住 200。只有再次提高上限时才再次传入 `--extend-to`。
+- 针对已有 `88ea4fc9fd8bc2aa3ede2c3fe87b343c386e6941` 的旧 checkpoint，显式 extension 支持一次受控源码升级：校验该版本完整源码哈希清单，仅允许 `scripts/train.py`、`training/engine.py`、`training/state.py` 及新增 `training/extension.py` 的变化；模型、loss、data 及其他源码必须逐文件一致，目标 checkout 必须干净。不是通用忽略源码开关。原 provenance 保存在 origin/history，新的执行 provenance 成为后续普通 resume 的严格匹配目标；其他旧版本不自动迁移。
+
+该接口不启动新 run、不重新初始化训练轨迹，不引入 optimizer reset、scheduler 或新的科学配置。CPU 验收包含真实 100→200 的逐值轨迹对照及 TensorBoard step 去重；AMD 非确定性算子不要求逐位重现。
+
 本轮新增 21 项观测测试；Windows CPU 全量 273 项通过，零跳过。包括真实 TensorBoard event 的 scalar/purge、同一步 pending validation、写入故障隔离、TTY/non-TTY、启用/关闭的模型/optimizer/RNG/轨迹严格对照、启动中断清理和 TensorBoard CLI 导入。未运行 GPU。

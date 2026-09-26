@@ -13,7 +13,7 @@ from organ_relation.losses import JointLoss, SegmentationLoss
 from organ_relation.training.engine import final_diagnostic_metrics, joint_ce_diagnostic_metrics
 from organ_relation.models.segmentor import SegmentorOutput
 from organ_relation.metrics import hard_dice
-from organ_relation.training.state import atomic_json, load_checkpoint
+from organ_relation.training.state import atomic_json, load_checkpoint, digest
 
 BALANCED = 'foreground_background_balanced'
 ROOT = fixtures.ROOT
@@ -34,6 +34,115 @@ class BalancedCETests(unittest.TestCase):
         labels = torch.tensor([[[[0, 0, 0, 0], [0, 0, 0, 1]]],
                                [[[0, 1, 1, 1], [2, 2, 3, 15]]]])
         return logits, labels
+
+    def test_weight_defaults_explicit_5050_exact_outputs_and_gradients(self):
+        weights = dict(ce_background_weight=.5, ce_foreground_weight=.5)
+        for dtype in (torch.float32, torch.float64):
+            f, y = self.example(dtype)
+            c = torch.randn(2, 16, 1, 1, 2, dtype=dtype, requires_grad=True)
+            for kind in ('final', 'joint'):
+                cls = SegmentationLoss if kind == 'final' else JointLoss
+                args = dict(epsilon=1e-6, ce_reduction_mode=BALANCED)
+                if kind == 'joint':
+                    args.update(lambda_c=.5, align_corners=False)
+                inputs = (f, y) if kind == 'final' else (c, f, y)
+                a, b = cls(**args)(*inputs), cls(**args, **weights)(*inputs)
+                self.assertTrue(torch.equal(a.total, b.total))
+                for name in ('final',) if kind == 'final' else ('coarse', 'final'):
+                    for x, z in zip(getattr(a, name), getattr(b, name)):
+                        self.assertTrue(torch.equal(x, z))
+                tensors = (f,) if kind == 'final' else (c, f)
+                ga = torch.autograd.grad(a.total, tensors, retain_graph=True)
+                gb = torch.autograd.grad(b.total, tensors, retain_graph=True)
+                for x, z in zip(ga, gb):
+                    self.assertTrue(torch.equal(x, z))
+
+    def test_weighted_7030_formula_gradients_dice_and_joint_combination(self):
+        f, y = self.example()
+        kwargs = dict(epsilon=1e-6, ce_reduction_mode=BALANCED,
+                      ce_background_weight=.7, ce_foreground_weight=.3)
+        actual = SegmentationLoss(**kwargs)(f, y)
+        terms = -torch.log(f.softmax(1).gather(1, y.unsqueeze(1)).squeeze(1) + 1e-6)
+        ce = torch.stack([.7 * terms[b][y[b] == 0].mean() + .3 * terms[b][y[b] > 0].mean()
+                          for b in range(2)])
+        default = SegmentationLoss(epsilon=1e-6, ce_reduction_mode=BALANCED)(f, y)
+        self.assertTrue(torch.equal(default.final.dice_loss, actual.final.dice_loss))
+        reference = (ce + default.final.dice_loss).mean()
+        torch.testing.assert_close(actual.total, reference, rtol=1e-14, atol=1e-14)
+        torch.testing.assert_close(torch.autograd.grad(actual.total, f, retain_graph=True)[0],
+                                   torch.autograd.grad(reference, f, retain_graph=True)[0])
+        c = torch.randn(2, 16, 1, 1, 2, dtype=torch.float64, requires_grad=True)
+        joint = JointLoss(**kwargs, lambda_c=.5, align_corners=False)(c, f, y)
+        up = torch.nn.functional.interpolate(c, size=y.shape[1:], mode='trilinear', align_corners=False)
+        coarse = SegmentationLoss(**kwargs)(up, y)
+        torch.testing.assert_close(joint.total, (actual.per_case + .5 * coarse.per_case).mean())
+        for branch, expected in ((joint.final, actual.final), (joint.coarse, coarse.final)):
+            for x, z in zip(branch, expected):
+                self.assertTrue(torch.equal(x, z))
+
+    def test_invalid_group_weights_rejected(self):
+        for bg, fg in ((0, 1), (1, 0), (-.1, 1.1), (.7, .5), (.3, .3),
+                       (float('nan'), .5), (.5, float('inf')), (True, .5), ('0.5', .5), (None, .5)):
+            for cls in (SegmentationLoss, JointLoss):
+                args = dict(epsilon=1e-6, ce_reduction_mode=BALANCED,
+                            ce_background_weight=bg, ce_foreground_weight=fg)
+                if cls is JointLoss:
+                    args.update(lambda_c=.5, align_corners=False)
+                with self.assertRaisesRegex(ValueError, 'CE group weights'):
+                    cls(**args)
+
+    def test_7030_config_only_weights_differ(self):
+        old = json.loads((ROOT / 'configs/train_backbone_only_overfit_balanced_ce.json').read_text())
+        new = json.loads((ROOT / 'configs/train_backbone_only_overfit_bg70_fg30.json').read_text())
+        self.assertEqual(new.pop('ce_background_weight'), .7)
+        self.assertEqual(new.pop('ce_foreground_weight'), .3)
+        self.assertEqual(new, old)
+
+    def test_legacy_5050_identity_defaults_preserve_origin_hash_run_and_trajectory(self):
+        weights = dict(ce_background_weight=.5, ce_foreground_weight=.5)
+        first = self.fixture.trainer(self.root / 'legacy', ce_reduction_mode=BALANCED)
+        first.run(stop_after=2)
+        path = first.run_dir / 'last.ckpt'
+        raw, run = path.read_bytes(), (first.run_dir / 'run.json').read_bytes()
+        origin_hash = digest(first.identity)
+        resumed = self.fixture.trainer(first.run_dir, resume=True, ce_reduction_mode=BALANCED, ce_weights=weights)
+        self.assertEqual(path.read_bytes(), raw)  # Comparison never rewrites checkpoint.
+        self.assertEqual(digest(resumed.origin_identity), origin_hash)
+        resumed.run()
+        self.assertEqual((first.run_dir / 'run.json').read_bytes(), run)
+        whole = self.fixture.trainer(self.root / 'whole', ce_reduction_mode=BALANCED, ce_weights=weights)
+        whole.run()
+        a = load_checkpoint(path, resumed.identity)
+        b = load_checkpoint(whole.run_dir / 'last.ckpt', whole.identity)
+        self.assertEqual(digest(a['origin_identity']), origin_hash)
+        for key in ('model', 'optimizer', 'rng', 'progress', 'sampler_generator', 'loader_generator'):
+            self.fixture.fixture.assert_nested_equal(a[key], b[key])
+        for bad in (dict(resumed.identity, ce_background_weight=.7, ce_foreground_weight=.3),
+                    dict(resumed.identity, provenance='different source'),
+                    dict(resumed.identity, optimizer='different optimizer')):
+            with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                load_checkpoint(path, bad)
+            with self.assertRaises(ValueError):
+                load_checkpoint(path, bad, extension=True)
+
+    def test_weighted_7030_resume_exact_and_monitor_weighted_ce(self):
+        weights = dict(ce_background_weight=.7, ce_foreground_weight=.3)
+        def trainer(path, **kwargs):
+            return self.fixture.trainer(path, ce_reduction_mode=BALANCED, ce_weights=weights, **kwargs)
+        whole = trainer(self.root / 'whole'); whole.run()
+        first = trainer(self.root / 'split'); first.run(stop_after=2)
+        resumed = trainer(first.run_dir, resume=True); resumed.run()
+        a = load_checkpoint(whole.run_dir / 'last.ckpt', whole.identity)
+        b = load_checkpoint(resumed.run_dir / 'last.ckpt', resumed.identity)
+        for key in ('model', 'optimizer', 'rng', 'progress', 'sampler_generator', 'loader_generator'):
+            self.fixture.fixture.assert_nested_equal(a[key], b[key])
+        for row in self.fixture.fixture.rows(resumed.run_dir):
+            for name, value in weights.items():
+                self.assertEqual(row[name], value)
+            if row['phase'] == 'train_monitor':
+                for case in row['diagnostic_cases'].values():
+                    self.assertAlmostEqual(case['weighted_ce'], .7*case['CE_bg_mean']+.3*case['CE_fg_mean'], places=6)
+                    self.assertAlmostEqual(case['balanced_ce'], .5*case['CE_bg_mean']+.5*case['CE_fg_mean'], places=6)
 
     def test_voxel_mean_default_explicit_and_historical_ce_bit_exact(self):
         for dtype in (torch.float32, torch.float64):
@@ -148,6 +257,9 @@ class BalancedCETests(unittest.TestCase):
     def test_cli_joint_balanced_full_segmentor_monitor_checkpoint_and_resume(self):
         self.cli_balanced_run('train_single_case_overfit_balanced_ce.json')
 
+    def test_cli_weighted_7030_identity_and_resume(self):
+        self.cli_balanced_run('train_backbone_only_overfit_bg70_fg30.json')
+
     def cli_balanced_run(self, config_name):
         spec = importlib.util.spec_from_file_location('balanced_cli', ROOT / 'scripts/train.py')
         cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
@@ -174,6 +286,11 @@ class BalancedCETests(unittest.TestCase):
             self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt')]), 0)
         identity = json.loads((run / 'run.json').read_text())['identity']
         self.assertEqual(identity['ce_reduction_mode'], BALANCED)
+        for name in ('ce_background_weight', 'ce_foreground_weight'):
+            self.assertEqual(identity[name], cfg.get(name, .5))
+        for row in self.fixture.fixture.rows(run):
+            for name in ('ce_background_weight', 'ce_foreground_weight'):
+                self.assertEqual(row[name], cfg.get(name, .5))
         self.assertEqual(load_checkpoint(run / 'last.ckpt', identity)['progress']['global_step'], 2)
         if cfg.get('mode', 'organ_relation_joint') == 'organ_relation_joint':
             self.assertEqual(identity['loss']['lambda_c'], .5)
@@ -185,7 +302,8 @@ class BalancedCETests(unittest.TestCase):
                     for case in row['ce_diagnostic_cases'].values():
                         self.assertEqual(set(case), {'coarse', 'final'})
                         for branch in case.values():
-                            self.assertEqual(set(branch), {'CE_bg_mean', 'CE_fg_mean', 'balanced_ce'})
+                            self.assertEqual(set(branch), {'CE_bg_mean', 'CE_fg_mean', 'balanced_ce',
+                                                           'weighted_ce', 'ce_background_weight', 'ce_foreground_weight'})
             cfg['ce_reduction_mode'] = 'voxel_mean'; atomic_json(path, cfg)
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt')]), 2)

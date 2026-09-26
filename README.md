@@ -324,3 +324,10 @@ balanced CE 在每个病例内按背景/全部前景分别平均，再各取 0.5
 完整 OrganRelation3D 的 balanced-CE 单变量对照使用 `configs/train_single_case_overfit_balanced_ce.json`，运行命令沿用 `scripts/train.py`，显式传 `--cases amos_0109` 和新目录 `--run-dir runs/full_amos0109_3sp1_B_balanced_ce_200`，首次不传 `--resume`。新配置与 `train_single_case_overfit.json` 只差 CE mode 和 max_steps 从 100 到 200，保留病例选择接口、B/3S-P1、相同 seed、AdamW、FP32 和每 25 步保存/monitor/诊断。
 
 JointLoss 的 coarse/final 都使用选定 CE reduction，各自 Dice 不变；coarse 仍先插值 logits 到 GT 网格再 softmax。总损失为 final + 0.5×coarse。每次 balanced joint monitor 在 JSONL 的 `ce_diagnostic_cases[case_id].coarse/final` 中记录 `CE_bg_mean / CE_fg_mean / balanced_ce`，病例 ledger 对应字段为 `ce_branches`；双分支顺序计算统计，不同时持有两份完整概率体积。普通训练行仍记录各分支实际 CE/Dice/segmentation，console 布局不变。checkpoint 的 CE mode、配置及来源严格校验保留，禁止用旧 voxel-mean checkpoint 开始新对照。
+
+
+backbone-only 70:30 单变量对照使用 `configs/train_backbone_only_overfit_bg70_fg30.json`。它与 50:50 backbone 配置仅相差 `ce_background_weight=0.7`、`ce_foreground_weight=0.3`，保留原 mode 名。沿用 `scripts/train.py`，用新目录 `--run-dir runs/backbone_only_amos0109_3sp1_B_bg70_fg30_200`，首次不传 `--resume`；其余命令参数与 backbone-only balanced 对照一致。
+
+两个组权重均须为有限正数且和为 1，不自动归一化；未指定仍为 0.5/0.5。新 run.json/checkpoint identity 和每条训练/monitor 日志显式记录 resolved 权重。monitor 保留 `CE_bg_mean`、`CE_fg_mean` 与历史 `balanced_ce`（始终指 50:50 对照值），新增 `weighted_ce` 表示当前组权重下的 CE；训练行的 `final.ce` / `coarse.ce` 仍表示实际损失。空组规则、Dice、console 和 TensorBoard 已有含义不变。
+
+旧身份缺失权重时仅在比较中解释为 0.5/0.5，旧 run.json、origin identity 及其哈希不重写。权重改变仍拒绝普通 resume 和受控延长；新 70:30 run 自身可以完整续训。此兼容规则不绕过 Git/source provenance；不自动授权从旧源码版本跨版本恢复，既有来源校验继续生效。

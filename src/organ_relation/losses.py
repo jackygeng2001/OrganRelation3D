@@ -32,6 +32,16 @@ class FinalLossResult(NamedTuple):
 CE_REDUCTION_MODES = ('voxel_mean', 'foreground_background_balanced')
 
 
+def resolve_ce_weights(background=0.5, foreground=0.5):
+    """Validate, never renormalize. Tolerance only accommodates float rounding."""
+    for value in (background, foreground):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value < 1:
+            raise ValueError('CE group weights must be finite numbers strictly between 0 and 1')
+    if not math.isclose(background + foreground, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError('CE group weights must sum to 1')
+    return float(background), float(foreground)
+
+
 def foreground_background_ce_means(voxel_loss: Tensor, foreground: Tensor) -> tuple[Tensor, Tensor]:
     """Per-case group means from [B,N] losses; NaN denotes an absent group.
 
@@ -53,7 +63,8 @@ class SegmentationLoss(nn.Module):
     outside the model; all 15 foreground classes participate in each case.
     """
 
-    def __init__(self, *, epsilon: float, ce_reduction_mode: str = 'voxel_mean'):
+    def __init__(self, *, epsilon: float, ce_reduction_mode: str = 'voxel_mean',
+                 ce_background_weight: float = 0.5, ce_foreground_weight: float = 0.5):
         super().__init__()
         if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)) or not math.isfinite(epsilon) or epsilon <= 0:
             raise ValueError('epsilon must be a finite positive number')
@@ -61,6 +72,8 @@ class SegmentationLoss(nn.Module):
         if ce_reduction_mode not in CE_REDUCTION_MODES:
             raise ValueError('unsupported ce_reduction_mode')
         self.ce_reduction_mode = ce_reduction_mode
+        self.ce_background_weight, self.ce_foreground_weight = resolve_ce_weights(
+            ce_background_weight, ce_foreground_weight)
 
     def forward(self, final_logits: Tensor, label: Tensor) -> FinalLossResult:
         if not isinstance(final_logits, Tensor) or final_logits.ndim != 5 or min(final_logits.shape) < 1 or final_logits.shape[1] != 16:
@@ -82,7 +95,8 @@ class SegmentationLoss(nn.Module):
         target_count = label.new_zeros(label.shape[0], 16).scatter_add(
             1, indices, torch.ones_like(indices)).to(dtype=final_logits.dtype)
         final = _segmentation_branch(torch.softmax(final_logits, dim=1), label, target_count,
-                                     self.epsilon, self.ce_reduction_mode)
+                                     self.epsilon, self.ce_reduction_mode,
+                                     self.ce_background_weight, self.ce_foreground_weight)
         total = final.segmentation.mean()
         if not torch.isfinite(total):
             raise ValueError('segmentation loss produced a non-finite value')
@@ -90,7 +104,8 @@ class SegmentationLoss(nn.Module):
 
 
 def _segmentation_branch(probabilities: Tensor, label: Tensor, target_count: Tensor, epsilon: float,
-                         ce_reduction_mode: str = 'voxel_mean') -> BranchLoss:
+                         ce_reduction_mode: str = 'voxel_mean',
+                         ce_background_weight: float = 0.5, ce_foreground_weight: float = 0.5) -> BranchLoss:
     flat = probabilities.flatten(start_dim=2)  # [B,16,N]
     indices = label.flatten(start_dim=1)  # [B,N]
     matched = flat.gather(1, indices.unsqueeze(1)).squeeze(1)  # S at the true class.
@@ -100,7 +115,7 @@ def _segmentation_branch(probabilities: Tensor, label: Tensor, target_count: Ten
         bg, fg = foreground_background_ce_means(-torch.log(matched + epsilon), indices > 0)
         if not (torch.isfinite(bg).all() and torch.isfinite(fg).all()):
             raise ValueError('balanced CE requires both background and foreground in every case')
-        ce = 0.5 * bg + 0.5 * fg
+        ce = ce_background_weight * bg + ce_foreground_weight * fg
     else:
         raise ValueError('unsupported ce_reduction_mode')
     # Equivalent to sum_x S_c(x)*T_c(x), without dense [B,16,D,H,W] one-hot GT.
@@ -123,7 +138,8 @@ class JointLoss(nn.Module):
     """
 
     def __init__(self, *, epsilon: float, lambda_c: float, align_corners: bool,
-                 ce_reduction_mode: str = 'voxel_mean'):
+                 ce_reduction_mode: str = 'voxel_mean',
+                 ce_background_weight: float = 0.5, ce_foreground_weight: float = 0.5):
         super().__init__()
         for name, value in (('epsilon', epsilon), ('lambda_c', lambda_c)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -136,6 +152,8 @@ class JointLoss(nn.Module):
         if ce_reduction_mode not in CE_REDUCTION_MODES:
             raise ValueError('unsupported ce_reduction_mode')
         self.ce_reduction_mode = ce_reduction_mode
+        self.ce_background_weight, self.ce_foreground_weight = resolve_ce_weights(
+            ce_background_weight, ce_foreground_weight)
 
     def extra_repr(self) -> str:
         return (f'epsilon={self.epsilon!r}, lambda_c={self.lambda_c!r}, align_corners={self.align_corners!r}, '
@@ -168,7 +186,8 @@ class JointLoss(nn.Module):
                 raise ValueError(f'{name} must be representable and positive in the logits dtype')
 
     def _branch(self, probabilities: Tensor, label: Tensor, target_count: Tensor) -> BranchLoss:
-        return _segmentation_branch(probabilities, label, target_count, self.epsilon, self.ce_reduction_mode)
+        return _segmentation_branch(probabilities, label, target_count, self.epsilon, self.ce_reduction_mode,
+                                     self.ce_background_weight, self.ce_foreground_weight)
 
     def forward(self, coarse_logits: Tensor, final_logits: Tensor, label: Tensor) -> JointLossResult:
         self._validate(coarse_logits, final_logits, label)

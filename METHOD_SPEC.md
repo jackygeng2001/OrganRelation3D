@@ -96,6 +96,8 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 
 完整模型的独立 balanced-CE 对照：coarse logits 仍先三线性上采样到 GT 网格，再 softmax；final 与 coarse 各自使用同一 CE reduction 和各自原 DiceLoss，`total=mean_batch(final.segmentation+0.5*coarse.segmentation)`。不下采样 GT，不改 lambda_c=0.5。`train_single_case_overfit_balanced_ce.json` 与原完整 overfit 配置只差 CE mode 和 max_steps=200；病例通过 `--cases amos_0109` 指定，从新 run 的 step 0 开始。
 
+用户授权的组权重对照：两种 loss 的 `foreground_background_balanced` 模式可配置 `ce_background_weight=w_bg` 与 `ce_foreground_weight=w_fg`，使用 `w_bg*CE_bg_mean+w_fg*CE_fg_mean`；两者有限且严格大于 0、和为 1（仅浮点求和校验容差 1e-12，不自动归一化）。两项缺省均为 0.5，保持历史 50:50 的计算顺序与结果；voxel_mean 不使用组权重。70:30 backbone-only 对照仅显式设置 0.7/0.3，不改 Dice、初始化、lambda_c 或其他训练条件。新 run identity 保存 resolved 权重；旧身份缺失字段只在比较时按 0.5/0.5 解释，不修改原 run.json/origin identity/哈希，不放宽来源或其他配置校验。
+
 真实标签只用于监督与评估，不输入模型、节点或关系，也不用于存在性判断及裁剪采样。最终损失必须经回写、图、语义和属性路径反传至粗头和编码器；固定属性不表示 detach。推理保留同一核心前向，不计算损失。
 
 ## 接口契约

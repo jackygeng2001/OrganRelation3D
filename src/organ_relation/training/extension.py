@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 
-from .state import digest
+from .state import digest, identity_with_ce_weights
 
 
 LEGACY_COMMIT = '88ea4fc9fd8bc2aa3ede2c3fe87b343c386e6941'
@@ -22,7 +22,7 @@ def check_extension_identity(saved, current):
     # in checkpoint.horizon; users cannot smuggle config changes through it.
     old, new = copy.deepcopy(saved), copy.deepcopy(current)
     previous, execution = old.pop('provenance'), new.pop('provenance')
-    if old != new:
+    if identity_with_ce_weights(old) != identity_with_ce_weights(new):
         raise ValueError('extension identity mismatch: only explicit horizon increase is allowed')
     if previous == execution:
         return
@@ -56,7 +56,7 @@ def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume
     origin_science, execution_science = copy.deepcopy(origin), copy.deepcopy(identity)
     previous_provenance = origin_science.pop('provenance')
     execution_science.pop('provenance')
-    if origin_science != execution_science:
+    if identity_with_ce_weights(origin_science) != identity_with_ce_weights(execution_science):
         raise ValueError('original run identity mismatch outside provenance')
     for event in horizon['extensions']:
         at, target = event['at_global_step'], event['total_steps']

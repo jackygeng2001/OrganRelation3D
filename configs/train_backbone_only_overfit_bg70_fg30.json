@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "purpose": "isolated_backbone_only_overfit_diagnostic_not_paper_method",
+  "model_config": "segmentor_3stage_probe_p1.json",
+  "baseline_config": "baseline.json",
+  "selection_config": "ct_stats.json",
+  "split_artifact": null,
+  "data": {
+    "role": "development_train",
+    "candidate": "B",
+    "train_cases": [
+      "amos_0109"
+    ],
+    "train_limit": null,
+    "validation_cases": null,
+    "validation_limit": null
+  },
+  "optimizer": {
+    "name": "AdamW",
+    "lr": 0.0003,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "weight_decay": 0,
+    "foreach": false,
+    "fused": false
+  },
+  "runtime": {
+    "backend": "rocm",
+    "device": "cuda:0",
+    "dtype": "float32",
+    "cpu_threads": 2
+  },
+  "training": {
+    "max_steps": 200,
+    "max_epochs": null,
+    "batch_size": 1,
+    "num_workers": 0,
+    "seed": 20260925,
+    "shuffle": true,
+    "memory_format": "channels_last_3d",
+    "scheduler": null,
+    "checkpoint_every": 25,
+    "diagnostics_every": 25,
+    "validation_every": 25,
+    "validation_role": "train_monitor",
+    "eta_window": 20,
+    "eta_warmup": 5
+  },
+  "mode": "backbone_only_final",
+  "ce_reduction_mode": "foreground_background_balanced",
+  "ce_background_weight": 0.7,
+  "ce_foreground_weight": 0.3
+}

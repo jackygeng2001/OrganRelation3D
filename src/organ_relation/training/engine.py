@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from ..evaluation.progress import CaseLedger
 from ..metrics import METRIC_PROTOCOL, hard_dice, summarize_dice
-from ..losses import JointLoss, SegmentationLoss, foreground_background_ce_means
+from ..losses import JointLoss, SegmentationLoss, foreground_background_ce_means, resolve_ce_weights
 from .console import TrainingConsole
 from .progress import ProgressClock
 from .extension import resolve_horizon
@@ -84,8 +84,12 @@ def final_diagnostic_metrics(logits, label, criterion, hard_metrics):
     fg_mean = fg[0].item() if torch.isfinite(fg[0]) else None
     return dict(final_soft_dice=soft_dice,
                 ce_reduction_mode=criterion.ce_reduction_mode,
+                ce_background_weight=criterion.ce_background_weight,
+                ce_foreground_weight=criterion.ce_foreground_weight,
                 CE_bg_mean=bg_mean, CE_fg_mean=fg_mean,
                 balanced_ce=(0.5 * bg[0] + 0.5 * fg[0]).item() if bg_mean is not None and fg_mean is not None else None,
+                weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * fg[0]).item()
+                if bg_mean is not None and fg_mean is not None else None,
                 predicted_foreground_voxels=sum(o['predicted_voxels'] for o in hard_metrics['organs']),
                 foreground_true_positive_voxels=sum(o['true_positive'] for o in hard_metrics['organs']),
                 gt_foreground_voxels=count,
@@ -100,6 +104,9 @@ def joint_ce_diagnostic_metrics(output, label, criterion):
         bg, fg = foreground_background_ce_means(
             -torch.log(matched.flatten(1) + criterion.epsilon), label.flatten(1) > 0)
         return dict(CE_bg_mean=bg[0].item(), CE_fg_mean=fg[0].item(),
+                    ce_background_weight=criterion.ce_background_weight,
+                    ce_foreground_weight=criterion.ce_foreground_weight,
+                    weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * fg[0]).item(),
                     balanced_ce=(0.5 * bg[0] + 0.5 * fg[0]).item())
 
     coarse = branch(torch.nn.functional.interpolate(
@@ -123,6 +130,11 @@ class Trainer:
         self.ce_reduction_mode = getattr(criterion, 'ce_reduction_mode', 'voxel_mean')
         if identity.get('ce_reduction_mode', 'voxel_mean') != self.ce_reduction_mode:
             raise ValueError('criterion ce_reduction_mode must match checkpoint/run identity')
+        bg, fg = resolve_ce_weights(identity.get('ce_background_weight', 0.5),
+                                    identity.get('ce_foreground_weight', 0.5))
+        self.ce_weights = dict(ce_background_weight=bg, ce_foreground_weight=fg)
+        if (criterion.ce_background_weight, criterion.ce_foreground_weight) != (bg, fg):
+            raise ValueError('criterion CE weights must match checkpoint/run identity')
         if extend_to is not None and (resume is None or type(extend_to) is not int or extend_to < 1):
             raise ValueError('--extend-to requires --resume and a positive integer total')
         if not case_ids or len(dataset) != len(case_ids) or len(set(case_ids)) != len(case_ids):
@@ -268,6 +280,7 @@ class Trainer:
                    global_step=step, epoch=self.state['epoch'], metrics=summarize_dice(records))
         row['mode'] = self.mode
         row['ce_reduction_mode'] = self.ce_reduction_mode
+        row.update(self.ce_weights)
         if self.mode == 'backbone_only_final':
             row['diagnostic_cases'] = {case: record['diagnostic']
                                        for case, record in zip(self.validation_case_ids, records)}
@@ -369,6 +382,7 @@ class Trainer:
                        diagnostics=diagnostics)
             row['mode'] = self.mode
             row['ce_reduction_mode'] = self.ce_reduction_mode
+            row.update(self.ce_weights)
             if self.mode == 'organ_relation_joint':
                 row['coarse'] = {k: getattr(loss.coarse, k).detach().item()
                                  for k in ('ce', 'dice_loss', 'segmentation')}

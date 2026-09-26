@@ -413,10 +413,13 @@ class JointLossTests(unittest.TestCase):
 
     def test_required_explicit_configuration_without_default_weights_or_smoothing(self):
         signature = inspect.signature(JointLoss)
-        self.assertEqual(tuple(signature.parameters), ('epsilon', 'lambda_c', 'align_corners', 'ce_reduction_mode'))
+        self.assertEqual(tuple(signature.parameters), ('epsilon', 'lambda_c', 'align_corners', 'ce_reduction_mode',
+                                                      'ce_background_weight', 'ce_foreground_weight'))
         for name in ('epsilon', 'lambda_c', 'align_corners'):
             self.assertIs(signature.parameters[name].default, inspect.Parameter.empty)
         self.assertEqual(signature.parameters['ce_reduction_mode'].default, 'voxel_mean')
+        self.assertEqual(signature.parameters['ce_background_weight'].default, .5)
+        self.assertEqual(signature.parameters['ce_foreground_weight'].default, .5)
         options = dict(epsilon=.01, lambda_c=.37, align_corners=False)
         for name in options:
             missing = options.copy()

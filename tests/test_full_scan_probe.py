@@ -106,6 +106,58 @@ class ProbeTests(unittest.TestCase):
                 self.assertTrue(all(torch.isfinite(tensor).all() for tensor in output))
                 del model, image, output
 
+    def test_3stage_probe_config_inheritance_shapes_and_parameter_counts(self):
+        from organ_relation.models.segmentor import Segmentor
+        from organ_relation.models.segmentor_config import SegmentorConfig
+        micro = json.loads((ROOT / 'configs/segmentor_micro.json').read_text())
+        torch.set_num_threads(2)
+        for index, widths, count in ((1, [8, 16, 32], 97872), (2, [12, 24, 48], 218220)):
+            with self.subTest(probe=index):
+                raw = json.loads((ROOT / f'configs/segmentor_3stage_probe_p{index}.json').read_text())
+                expected = copy.deepcopy(micro['model'])
+                expected['backbone']['channels'] = widths
+                self.assertEqual(raw['model'], expected)
+                four_stage = json.loads((ROOT / f'configs/segmentor_4stage_probe_p{index}.json').read_text())
+                four_stage['model']['backbone']['channels'] = widths
+                four_stage['model']['backbone']['downsample_strides'] = [[2, 2, 2]] * 2
+                self.assertEqual(raw['model'], four_stage['model'])
+                self.assertEqual(raw['probe'], micro['probe'])
+                self.assertEqual(raw['schema_version'], micro['schema_version'])
+                self.assertEqual(raw['purpose'], '3stage_capacity_feasibility_probe')
+                config = SegmentorConfig(**raw['model'])
+                self.assertEqual(config.backbone.spatial_pyramid((210, 274, 274)),
+                                 ((210, 274, 274), (105, 137, 137), (53, 69, 69)))
+                model = Segmentor(config).to(memory_format=torch.channels_last_3d)
+                self.assertEqual(sum(p.numel() for p in model.parameters()), count)
+                image = torch.randn(*raw['probe']['input_shape_bcdhw']).contiguous(memory_format=torch.channels_last_3d)
+                with torch.no_grad():
+                    output = model(image)
+                self.assertEqual(output.coarse_logits.shape, (1, 16, 5, 5, 5))
+                self.assertEqual(output.final_logits.shape, (1, 16, 17, 18, 19))
+                self.assertTrue(all(torch.isfinite(tensor).all() for tensor in output))
+                del model, image, output
+
+    def test_3stage_probe_configs_load_and_forward_in_cpu_cli(self):
+        for index, count in ((1, 97872), (2, 218220)):
+            with self.subTest(probe=index):
+                path = ROOT / f'configs/segmentor_3stage_probe_p{index}.json'
+                raw = json.loads(path.read_text())
+                args = self.arguments('forward', f'3stage_p{index}')
+                args[args.index('--model-config')+1] = str(path)
+                args[args.index('--candidate')+1] = 'B'
+                args.remove('--allow-micro-model')
+                args += ['--memory-format', 'channels_last_3d']
+                code, report = self.run_probe(args)
+                self.assertEqual(code, 0, report)
+                self.assertEqual(report['model_config'], raw['model'])
+                self.assertEqual(report['model_purpose'], raw['purpose'])
+                self.assertEqual(report['parameter_count'], count)
+                self.assertFalse(report['formal_capacity_validated'])
+                self.assertEqual(report['output_shapes']['coarse_logits'], [1, 16, 1, 2, 2])
+                self.assertEqual(report['output_shapes']['final_logits'], [1, 16, 4, 5, 6])
+                self.assertEqual(report['stages'][-1]['stage'], 'forward')
+                self.assertTrue(all(stage['status'] == 'passed' for stage in report['stages']))
+
     def test_rocm_channels_last_requires_process_environment_before_data_loading(self):
         args = self.arguments('forward') + ['--memory-format', 'channels_last_3d']
         args[args.index('--backend')+1] = 'rocm'

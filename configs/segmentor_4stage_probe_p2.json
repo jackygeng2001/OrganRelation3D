@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "purpose": "4stage_capacity_feasibility_probe",
+  "note": "Resource feasibility only. Neither 4-stage backbone nor spacing B is frozen; 3-stage versus 4-stage requires separate scientific evaluation.",
+  "model": {
+    "backbone": {
+      "channels": [12, 24, 48, 96],
+      "downsample_strides": [[2, 2, 2], [2, 2, 2], [2, 2, 2]],
+      "normalization": "group",
+      "norm_groups": 2,
+      "norm_eps": 0.00001,
+      "negative_slope": 0.01,
+      "conv_bias": false,
+      "head_bias": true,
+      "align_corners": false
+    },
+    "coarse_bias": true,
+    "fusion_bias": true,
+    "epsilon": 0.000001,
+    "relation_channels": 8,
+    "rounds": 2,
+    "attention_channels": 4,
+    "content_channels": 6,
+    "beta_init": 0.0
+  },
+  "probe": {
+    "input_shape_bcdhw": [1, 1, 17, 18, 19],
+    "seed": 20260925,
+    "cpu_threads": 2,
+    "dtype": "float32"
+  }
+}

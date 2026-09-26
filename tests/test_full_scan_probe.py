@@ -46,6 +46,66 @@ class ProbeTests(unittest.TestCase):
         probe.check_arguments(args)
         self.assertEqual(args.betas, (0.9, 0.999))
 
+    def test_capacity_probe_configs_only_change_backbone_channels_and_strides(self):
+        micro = json.loads((ROOT / 'configs/segmentor_micro.json').read_text())
+        for index, widths in enumerate(([4, 8, 16, 32], [8, 16, 32, 64],
+                                         [12, 24, 48, 96], [16, 32, 64, 128])):
+            with self.subTest(probe=index):
+                raw = json.loads((ROOT / f'configs/segmentor_4stage_probe_p{index}.json').read_text())
+                expected = copy.deepcopy(micro['model'])
+                expected['backbone']['channels'] = widths
+                expected['backbone']['downsample_strides'] = [[2, 2, 2]] * 3
+                self.assertEqual(raw['model'], expected)
+                self.assertEqual(raw['probe'], micro['probe'])
+                self.assertEqual(raw['schema_version'], micro['schema_version'])
+                self.assertEqual(raw['purpose'], '4stage_capacity_feasibility_probe')
+
+    def test_all_capacity_configs_load_in_rocm_probe_before_hardware_check(self):
+        # CPU-only: exercise the actual CLI/config loader, then deliberately
+        # stop at backend availability. Never initialize or mock-run a GPU.
+        for index in range(4):
+            with self.subTest(probe=index):
+                path = ROOT / f'configs/segmentor_4stage_probe_p{index}.json'
+                raw = json.loads(path.read_text())
+                args = self.arguments('backward', f'capacity_load_{index}')
+                args[args.index('--model-config')+1] = str(path)
+                args[args.index('--backend')+1] = 'rocm'
+                args[args.index('--device')+1] = 'cuda:0'
+                args[args.index('--candidate')+1] = 'B'
+                args.remove('--cpu-synthetic')
+                args.remove('--allow-micro-model')
+                args += ['--memory-format', 'channels_last_3d']
+                with patch.dict(probe.os.environ, {'PYTORCH_MIOPEN_SUGGEST_NHWC': '1'}), \
+                     patch.object(torch.cuda, 'is_available', return_value=False), \
+                     patch.object(torch.cuda, 'set_device', side_effect=AssertionError('GPU called')):
+                    code, report = self.run_probe(args)
+                self.assertEqual(code, 2)
+                self.assertEqual(report['error'], 'requested ROCm backend is unavailable; no backend/device fallback')
+                self.assertEqual(report['model_config'], raw['model'])
+                self.assertEqual(report['model_purpose'], raw['purpose'])
+                self.assertFalse(report['formal_capacity_validated'])
+                self.assertEqual(report['stages'], [])
+
+    def test_capacity_probe_cpu_small_shapes_and_parameter_counts(self):
+        from organ_relation.models.segmentor import Segmentor
+        from organ_relation.models.segmentor_config import SegmentorConfig
+        torch.set_num_threads(2)
+        for index, count in enumerate((100756, 398032, 891948, 1582504)):
+            with self.subTest(probe=index):
+                raw = json.loads((ROOT / f'configs/segmentor_4stage_probe_p{index}.json').read_text())
+                config = SegmentorConfig(**raw['model'])
+                self.assertEqual(config.backbone.spatial_pyramid((210, 274, 274)),
+                                 ((210, 274, 274), (105, 137, 137), (53, 69, 69), (27, 35, 35)))
+                model = Segmentor(config).to(memory_format=torch.channels_last_3d)
+                self.assertEqual(sum(p.numel() for p in model.parameters()), count)
+                image = torch.randn(*raw['probe']['input_shape_bcdhw']).contiguous(memory_format=torch.channels_last_3d)
+                with torch.no_grad():
+                    output = model(image)
+                self.assertEqual(output.coarse_logits.shape, (1, 16, 3, 3, 3))
+                self.assertEqual(output.final_logits.shape, (1, 16, 17, 18, 19))
+                self.assertTrue(all(torch.isfinite(tensor).all() for tensor in output))
+                del model, image, output
+
     def test_rocm_channels_last_requires_process_environment_before_data_loading(self):
         args = self.arguments('forward') + ['--memory-format', 'channels_last_3d']
         args[args.index('--backend')+1] = 'rocm'

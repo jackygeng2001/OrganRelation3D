@@ -52,7 +52,8 @@ def execute(args):
         raise ValueError('--extend-to requires --resume and a positive total; not a split preparation option')
     import torch
     from organ_relation.data.full_scan import FullScanDataset, FullScanPreprocessor, ScanPair
-    from organ_relation.losses import JointLoss
+    from organ_relation.losses import JointLoss, SegmentationLoss
+    from organ_relation.models.backbone_only import BackboneOnly
     from organ_relation.models.segmentor import Segmentor
     from organ_relation.models.segmentor_config import SegmentorConfig
     from organ_relation.training.engine import Trainer, validate_options
@@ -61,6 +62,9 @@ def execute(args):
     config = read_json(args.config)
     if config.get('schema_version') != 1:
         raise ValueError('unsupported training config schema')
+    mode = config.get('mode', 'organ_relation_joint')
+    if mode not in ('organ_relation_joint', 'backbone_only_final'):
+        raise ValueError('unsupported model/loss mode')
     base = args.config.resolve().parent
     selection = read_json(base / config['selection_config'])
     manifest = training_manifest(args.data_root, selection)
@@ -148,16 +152,22 @@ def execute(args):
         raise ValueError('invalid AdamW betas')
     torch.set_num_threads(runtime['cpu_threads'])
     seed_all(options['seed'])
-    model = Segmentor(model_config).to(device=runtime['device'], dtype=torch.float32)
+    model_type = Segmentor if mode == 'organ_relation_joint' else BackboneOnly
+    model = model_type(model_config).to(device=runtime['device'], dtype=torch.float32)
     if options['memory_format'] == 'channels_last_3d':
         model.to(memory_format=torch.channels_last_3d)
     optimizer = torch.optim.AdamW(model.parameters(), **{k: v for k, v in optimizer_config.items() if k != 'name'})
-    criterion = JointLoss(epsilon=baseline['epsilon'], **baseline['loss'])
+    loss_config = dict(epsilon=baseline['epsilon'])
+    if mode == 'organ_relation_joint':
+        loss_config.update(baseline['loss'])
+        criterion = JointLoss(**loss_config)
+    else:
+        criterion = SegmentationLoss(**loss_config)
     data_identity = dict(manifest=manifest, manifest_hash=digest(manifest), split=artifact['development'],
                          split_hash=artifact['split_hash'], role=data['role'], actual_train=chosen,
                          actual_validation=val_records, subset_hash=digest([chosen, val_records]),
                          case_identity=case_identity)
-    identity = dict(model=model_config.to_dict(), loss=dict(epsilon=baseline['epsilon'], **baseline['loss']),
+    identity = dict(model=model_config.to_dict(), loss=loss_config,
                     preprocessing=dict(candidate=data['candidate'], **baseline['preprocessing']),
                     optimizer=optimizer_config, runtime=runtime, training=options, data=data_identity,
                     provenance=dict(git=git_state(), source_hashes=code_hashes()),
@@ -170,6 +180,10 @@ def execute(args):
                         cudnn_deterministic=torch.backends.cudnn.deterministic,
                         backend_environment={k: v for k, v in os.environ.items()
                             if k.startswith(('MIOPEN_', 'PYTORCH_MIOPEN_')) or k in ('PYTORCH_ALLOC_CONF', 'PYTORCH_CUDA_ALLOC_CONF')}))
+    # Leave existing joint identities intact; diagnostic runs are a separate,
+    # explicit identity and cannot resume full-model weights/optimizer state.
+    if mode == 'backbone_only_final':
+        identity.update(mode=mode, initialization='retain_encoder_decoder_from_seeded_full_segmentor')
     # Normalize tuples to JSON lists so saved manifest and checkpoint identities agree.
     identity = json.loads(json.dumps(identity))
     if identity['provenance']['git'].get('commit') is None:

@@ -249,7 +249,7 @@ writer 在 checkpoint 成功后 flush；正常结束、`--stop-after` 和异常�
 
 同一秒快速重启时，默认 event 文件名中的 PID/未补零计数器可能排错。observer 只在启动阶段最多等待约一秒，让新文件时间戳严格晚于旧文件，保证 purge 后读；明显时钟回退则停用 observer 并告警，不无限等待或改变训练状态。
 
-进入单病例 overfit 的第一个 100-step 区间时使用新 run，沿用已有 split（不重新生成）。`train_single_case_overfit.json` 仅将 sanity 的总步数改成 100、保存和 monitor 周期改成 25，其余参数完全继承，包括 3S-P1/B、AdamW、FP32、每步诊断与完整 CT；不代表已选定最终训练配置：
+进入单病例 overfit 的第一个 100-step 区间时使用新 run，沿用已有 split（不重新生成）。`train_single_case_overfit.json` 的总步数为 100，保存、monitor 和诊断周期均为 25；沿用 3S-P1/B、AdamW、FP32 与完整 CT，不代表已选定最终训练配置：
 
 ```bash
 git pull --ff-only origin main
@@ -286,3 +286,30 @@ env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
 该接口不启动新 run、不重新初始化训练轨迹，不引入 optimizer reset、scheduler 或新的科学配置。CPU 验收包含真实 100→200 的逐值轨迹对照及 TensorBoard step 去重；AMD 非确定性算子不要求逐位重现。
 
 本轮新增 21 项观测测试；Windows CPU 全量 273 项通过，零跳过。包括真实 TensorBoard event 的 scalar/purge、同一步 pending validation、写入故障隔离、TTY/non-TTY、启用/关闭的模型/optimizer/RNG/轨迹严格对照、启动中断清理和 TensorBoard CLI 导入。未运行 GPU。
+
+
+## Backbone-only overfit diagnostic
+
+`configs/train_backbone_only_overfit.json` 是隔离的诊断对照，不是论文方法或 Segmentor 的替代。`mode=backbone_only_final` 使用现有 Encoder3D → Decoder3D，只有 final logits；缺省 `organ_relation_joint` 继续使用完整 Segmentor + JointLoss。两者共用 `scripts/train.py`、AdamW、恢复/延长、ETA、console、TensorBoard 和病例 ledger。
+
+公平初始化：先按相同 seed 和完整 SegmentorConfig 在 CPU 构建 reference Segmentor，再仅保留其 encoder/decoder；额外模块不保留、不前向、不优化。这样 encoder/decoder state 及构建后的 PyTorch RNG 与完整模型逐值一致。`run.json` 保存 reference 全配置和初始化策略；其中 relation 配置仅用于复现初始化序列，不表示诊断模型包含关系模块。
+
+`SegmentationLoss(epsilon=1e-6)` 与 JointLoss 共用同一个分支算子：16 类概率 CE `-log(S_true+epsilon)` 加 15 前景类 soft Dice loss，逐病例再 batch 平均。诊断不计算 coarse，不乘辅助权重；JSONL 明确记录 mode，TensorBoard 不写 Coarse scalar。所有已有完整模型公式与预处理保持不变。
+
+独立新 run 固定 amos_0109 / B / 3S-P1 / FP32 / batch=1 / channels_last_3d / seed=20260925，200 steps，每 25 steps 保存、诊断和 train_monitor。AdamW lr=3e-4、betas=[0.9,0.999]、eps=1e-8、weight_decay=0，无 scheduler。沿用此前同一 split 和数据路径：
+
+```bash
+git pull --ff-only origin main
+AMOS_ROOT="/absolute/path/to/amos22"
+env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
+  PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+  python -B scripts/train.py --config configs/train_backbone_only_overfit.json \
+    --data-root "$AMOS_ROOT" --split runs/splits/development_160_40.json \
+    --run-dir runs/backbone_only_amos0109_3sp1_B_200
+```
+
+中断后同一命令加 `--resume runs/backbone_only_amos0109_3sp1_B_200/last.ckpt`；需要经审查延长时沿用 `--extend-to`。这是新对照，不能从完整模型 checkpoint 恢复。已有完整模型 run 的严格源码校验不放宽；继续旧 run 须使用其对应源码版本。
+
+每次 monitor 的病例 ledger 保存原有 15 类 hard Dice/计数，并新增 `diagnostic`；JSONL 的 `diagnostic_cases` 按 case ID 保存相同标量：`final_soft_dice`（15 类均值）、`predicted_foreground_voxels`、`foreground_true_positive_voxels`（预测类别与 GT 完全相同且 GT>0）、`gt_foreground_voxels`、GT 前景位置上的 `gt_foreground_true_class_mean_probability` 与 `gt_foreground_background_mean_probability`。GT 无前景时两种概率均值记 null。TP 不把预测成另一前景器官算作正确。TensorBoard 另外记录 `Monitor/FinalSoftDice_Mean`（病例等权平均），其他附加诊断查 JSONL/ledger；不长期保留概率体积。
+
+本对照只回答普通骨干在相同条件下能否拟合单病例；不据此改动关系方法、损失、强度方案或优化器，也不自动开展第二个对照。

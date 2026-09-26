@@ -17,12 +17,13 @@ def scalar_values(row):
     """Translate scalar log rows only; never touch live model tensors."""
     if row['phase'] == 'train':
         values = {'Train/Total_Loss': row['total_loss'],
-                  'Train/Coarse_CE': row['coarse']['ce'],
-                  'Train/Coarse_DiceLoss': row['coarse']['dice_loss'],
                   'Train/Final_CE': row['final']['ce'],
                   'Train/Final_DiceLoss': row['final']['dice_loss'],
                   'Train/SoftDice_Mean': sum(row['soft_dice_per_organ']) / 15,
                   'Optimizer/LR': row['lr'], 'System/Step_Time': row['step_seconds']}
+        if 'coarse' in row:
+            values.update({'Train/Coarse_CE': row['coarse']['ce'],
+                           'Train/Coarse_DiceLoss': row['coarse']['dice_loss']})
         for name in ('allocated', 'reserved'):
             value = row['memory'][f'peak_{name}_bytes']
             if value is not None:
@@ -35,6 +36,9 @@ def scalar_values(row):
         prefix = 'Monitor' if row['phase'] == 'train_monitor' else 'Val'
         metrics = row['metrics']
         values = {f'{prefix}/HardDice_Mean': metrics['mean_case_dice']}
+        if row.get('diagnostic_cases'):
+            cases = row['diagnostic_cases'].values()
+            values[f'{prefix}/FinalSoftDice_Mean'] = sum(c['final_soft_dice'] for c in cases) / len(cases)
         for organ in metrics['organs']:
             values[f'{prefix}Dice/{ORGAN_NAMES[organ["label"]-1]}'] = organ['mean_dice']
         return {k: v for k, v in values.items() if v is not None}

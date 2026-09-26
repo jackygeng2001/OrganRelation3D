@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 
 from ..evaluation.progress import CaseLedger
 from ..metrics import METRIC_PROTOCOL, hard_dice, summarize_dice
+from ..losses import JointLoss, SegmentationLoss
 from .console import TrainingConsole
 from .progress import ProgressClock
 from .extension import resolve_horizon
@@ -66,6 +67,25 @@ def gradient_diagnostics(model):
     return result
 
 
+def final_diagnostic_metrics(logits, label, criterion, hard_metrics):
+    """Single-case monitor only. TP requires the correct foreground CLASS.
+
+    Probability means are restricted to GT foreground for observation only;
+    they never enter model.forward or alter the supervised loss.
+    """
+    soft_dice = criterion(logits, label).final.dice_per_class[0].mean().item()
+    probabilities = logits.softmax(dim=1)
+    foreground = label > 0
+    count = foreground.sum().item()
+    true_probability = probabilities.gather(1, label.unsqueeze(1)).squeeze(1)
+    return dict(final_soft_dice=soft_dice,
+                predicted_foreground_voxels=sum(o['predicted_voxels'] for o in hard_metrics['organs']),
+                foreground_true_positive_voxels=sum(o['true_positive'] for o in hard_metrics['organs']),
+                gt_foreground_voxels=count,
+                gt_foreground_true_class_mean_probability=true_probability[foreground].mean().item() if count else None,
+                gt_foreground_background_mean_probability=probabilities[:, 0][foreground].mean().item() if count else None)
+
+
 class Trainer:
     def __init__(self, model, criterion, optimizer, dataset, case_ids, *, device,
                  options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None,
@@ -73,6 +93,10 @@ class Trainer:
         validate_options(options)
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
+        self.mode = identity.get('mode', 'organ_relation_joint')
+        expected_loss = {'organ_relation_joint': JointLoss, 'backbone_only_final': SegmentationLoss}.get(self.mode)
+        if expected_loss is None or not isinstance(criterion, expected_loss):
+            raise ValueError('unsupported or mismatched model/loss mode')
         if extend_to is not None and (resume is None or type(extend_to) is not int or extend_to < 1):
             raise ValueError('--extend-to requires --resume and a positive integer total')
         if not case_ids or len(dataset) != len(case_ids) or len(set(case_ids)) != len(case_ids):
@@ -198,6 +222,9 @@ class Trainer:
                         image, label = self._batch(self.validation_dataset, index, validation=True)
                         output = self.model(image)
                         record = hard_dice(output.final_logits.argmax(1)[0], label[0])
+                        if self.mode == 'backbone_only_final':
+                            record['diagnostic'] = final_diagnostic_metrics(
+                                output.final_logits, label, self.criterion, record)
                         del image, label, output
                     ledger.commit(case, data_identity, record)
                     self._sync()
@@ -211,6 +238,10 @@ class Trainer:
             self.console.validation_end()
         row = dict(run_id=self.run_id, phase=self.options['validation_role'],
                    global_step=step, epoch=self.state['epoch'], metrics=summarize_dice(records))
+        row['mode'] = self.mode
+        if self.mode == 'backbone_only_final':
+            row['diagnostic_cases'] = {case: record['diagnostic']
+                                       for case, record in zip(self.validation_case_ids, records)}
         self.log.append(row)
         self.board.record(row)
         self.state['pending_validation'] = False
@@ -280,7 +311,8 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             image, label = self._batch(self.dataset, index)
             output = self.model(image)  # Supervision never enters model.forward.
-            loss = self.criterion(output.coarse_logits, output.final_logits, label)
+            loss = (self.criterion(output.coarse_logits, output.final_logits, label)
+                    if self.mode == 'organ_relation_joint' else self.criterion(output.final_logits, label))
             loss.total.backward()
             check = bool(self.options['diagnostics_every'] and step % self.options['diagnostics_every'] == 0)
             diagnostics = gradient_diagnostics(self.model) if check else None
@@ -300,10 +332,13 @@ class Trainer:
             row = dict(run_id=self.run_id, phase='train', epoch=epoch, total_epochs=self.epochs,
                        global_step=step, total_steps=self.total, case_id=case,
                        shape=list(image.shape[2:]), lr=lr, total_loss=loss.total.detach().item(),
-                       coarse={k: getattr(loss.coarse, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
                        final={k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
                        soft_dice_per_organ=loss.final.dice_per_class.detach().cpu()[0].tolist(),
                        diagnostics=diagnostics)
+            row['mode'] = self.mode
+            if self.mode == 'organ_relation_joint':
+                row['coarse'] = {k: getattr(loss.coarse, k).detach().item()
+                                 for k in ('ce', 'dice_loss', 'segmentation')}
             del image, label, output, loss, before
             self._sync()
             elapsed = time.perf_counter() - started

@@ -41,7 +41,7 @@
     "memory_format": "channels_last_3d",
     "scheduler": null,
     "checkpoint_every": 25,
-    "diagnostics_every": 1,
+    "diagnostics_every": 25,
     "validation_every": 25,
     "validation_role": "train_monitor",
     "eta_window": 20,

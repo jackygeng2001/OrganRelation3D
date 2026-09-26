@@ -328,7 +328,7 @@ class MonitoringTests(unittest.TestCase):
         actual = json.loads(path.read_text())
         expected = training_fixtures.config()
         expected['purpose'] = actual['purpose']
-        expected['training'].update(max_steps=100, checkpoint_every=25, validation_every=25)
+        expected['training'].update(max_steps=100, checkpoint_every=25, validation_every=25, diagnostics_every=25)
         self.assertEqual(actual, expected)
 
     def test_tensorboard_cli_imports_and_exposes_standard_event_loader(self):

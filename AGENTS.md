@@ -34,11 +34,15 @@
 ## Git 与复现
 
 - GitHub 用于阶段同步源代码、配置、方法文档、测试。未经明确发布任务不上传远程。
+- 后续新提交使用 Conventional Commits，按职责选择 feat/fix/refactor/test/docs/chore/perf；不为统一格式重写既有历史。
 - 不提交 AMOS 原始数据、患者影像、标签体积、权重、缓存、大型输出。病例级本地报告默认忽略；需要分享时先确认范围。
 - 正式实验记录 Git commit、完整配置、数据划分及哈希、环境、随机种子、评估结果。
-- 数据阶段、完整 Segmentor 与独立 JointLoss 已通过阶段验收。工程整理不得改变已验收的公式、数值行为、配置值或测试断言。当前 baseline 为 epsilon=1e-6、lambda_c=0.5、coarse align_corners=False，继续显式传参。已授权完整扫描数据到 Tensor 与单病例 FP32 验证（包括一次 optimizer step），没有 epoch 训练循环、DataLoader 拼批、augmentation、scheduler、checkpoint 或 AMP；后续新增工作以用户当轮授权为准。
+- 数据阶段、完整 Segmentor 与独立 JointLoss 已通过阶段验收。工程整理不得改变已验收的公式、数值行为、配置值或测试断言。当前 baseline 为 epsilon=1e-6、lambda_c=0.5、coarse align_corners=False，继续显式传参。已实现统一可恢复训练入口；本轮仅授权 CPU 合成测试及提供 AMD 命令，未授权运行 GPU 或正式训练。无 augmentation、scheduler、AMP、activation checkpointing 或 gradient accumulation。
 - 源码按职责归入 models/ 与 data/，单个损失保留 losses.py，复现工具为 provenance.py。模型不依赖数据工具或 loss；各包 __init__.py 保持轻量。无实际代码时不建立空目录，不增加泛化框架。
 - 原有 190 项回归由 scripts/run_tests.py 按 tensor/data 两组执行；新增 fullscan 组验证真实文件格式的合成 NIfTI 与完整小网络链路，任何跳过不算验收通过。依赖由 environments/ 分设备管理；本包 editable install 不自动选择或替换 PyTorch 后端。
+- smoke、单/双病例 overfit、pilot、正式训练共用 training/；batch=1、num_workers=0。完整 optimizer step 边界原子保存全部恢复状态；严格校验配置、split/manifest、来源指纹，不静默兼容不同实验。病例级评估 ledger 与训练 checkpoint 分离。标量日志提交位置随 checkpoint 保存，恢复时截断未提交尾部。
+- 固定 160/40 development split 用于选择模型；冻结后完整 200 official training CT 从头训练。官方 validation 必须先核实来源，不进入训练或反复调参；hidden test 仅影像，计划官方 DSC/NSD 评价。阶段验收配置 3S-P1/B 不是最终模型或 spacing。
+- 训练/验证计时窗口独立，ETA 先 warm up；诊断和 checkpoint 频率必须可配置。CPU 恢复测试严格对照轨迹；未冻结 GPU 确定性时不得要求 AMD 逐位相同。
 
 ## 验收和交付
 

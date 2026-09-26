@@ -116,7 +116,7 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 
 `src/organ_relation/models/node_to_space.py` 实现 `NodeToSpace(channels=C, attention_channels=da, content_channels=Cg, beta_init=0.0)`。三个维度显式给出；默认返回 G，`return_diagnostics=True` 返回具名 G/Q/K/V/A，均保留梯度。Q:[B,15,da]、K:[B,N,da]、V:[B,15,Cg]、A:[B,15,N]，空间展开按 D/H/W（W 最快）。三个投影采用无偏置 Linear；beta 为独立参数向量 [15]，默认零初始化是可配置工程初值，不是冻结的正式实验配置。前向只接收原始 F 和 zK，无法从 shape 推断张量来源，调用方须保证来源正确。当前限定 FP32/FP64、关闭 autocast，保留有限性检查；AMD 性能阶段须审查其潜在 GPU 同步开销。本实现不含残差融合。
 
-`ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅含 Cg→C 的 1x1x1 Conv3d 与 F 相加，无额外尺度、gate、归一化或激活。`Segmentor(SegmentorConfig)` 按上述冻结顺序调用各模块，C 从骨干最深层宽度派生；phi bias 与粗头 bias 分别显式配置。`forward(image)` 仅返回原特征网格 coarse logits 与输入网格 final logits，不额外上采样粗头或执行最终 softmax。`forward_with_diagnostics(image)` 是独立的显式诊断入口，返回具名中间结果并保留梯度；普通前向不创建关系/回写诊断结果或模块缓存。配置见 `src/organ_relation/models/segmentor_config.py`；`configs/segmentor_micro.json` 只用于 CPU 合成测试，不冻结任何正式实验配置。损失独立于 Segmentor，尚无训练流程。
+`ResidualFusion(channels=C, content_channels=Cg, bias=...)` 仅含 Cg→C 的 1x1x1 Conv3d 与 F 相加，无额外尺度、gate、归一化或激活。`Segmentor(SegmentorConfig)` 按上述冻结顺序调用各模块，C 从骨干最深层宽度派生；phi bias 与粗头 bias 分别显式配置。`forward(image)` 仅返回原特征网格 coarse logits 与输入网格 final logits，不额外上采样粗头或执行最终 softmax。`forward_with_diagnostics(image)` 是独立的显式诊断入口，返回具名中间结果并保留梯度；普通前向不创建关系/回写诊断结果或模块缓存。配置见 `src/organ_relation/models/segmentor_config.py`；`configs/segmentor_micro.json` 只用于 CPU 合成测试，不冻结任何正式实验配置。损失独立于 Segmentor，训练入口仅调用已验收的模型与损失。
 
 `src/organ_relation/losses.py` 实现 `JointLoss(epsilon=..., lambda_c=..., align_corners=...)`，三项均无默认值。组合形式已冻结：每分支 CE 与 Dice 系数均为 1，最终分支系数为 1，粗分支系数为 lambda_c；当前 baseline 明确采用 lambda_c=0.5、epsilon=1e-6、粗分支插值 align_corners=False，不从微型配置或骨干插值设置推断。lambda_c 未来可通过实验调整，但本轮 GPU 可行性验证统一为 0.5。label 必须为与 final 网格同形的 `[B,D,H,W]` int64 类别索引 0–15。结果 total 为 batch 均值标量，per_case 为 `[B]`；每分支返回 ce/dice_loss/segmentation:[B] 与 dice_per_class:[B,15]，保留梯度但不返回完整概率体积。gather/scatter_add 等价计算真类概率、逐类交集和计数，不生成稠密 one-hot GT；无概率截断、标准 CE 替代或空类屏蔽。严格 log(S+epsilon) 在 S=1 时可产生负 CE，属于原公式结果，不另作截零。调用方须与模型共用 epsilon；当前仅验证 FP32/FP64 CPU，保留 finite/autocast 检查。
 
@@ -142,8 +142,8 @@ scripts/validate_full_scan.py 为单病例分阶段工程验证：预处理→�
 - 强度截断/归一化参数、空间增强及左右方向处理。仅训练集可以拟合统计参数。
 - 具体 U-Net 尺度、层宽、归一化、上下采样、卷积偏置；K、Cr、da、Cg；优化器与正式训练配置。
 - 后续 lambda_c 消融实验设置；第一版 baseline 的 lambda_c=0.5 已确定，不属于当前待决项。
-- 官方训练/验证 CT 的开发与独立评估用途，最终测试 CT 边界编号及无标签测试方式。
-- 评估主指标、checkpoint 选择、原空间概率/标签恢复顺序、空类 Dice/HD95 规则与汇总方式。此前建议不是用户确认。
+- 官方 validation 本地目录、病例数与来源的实际核实，以及 test 清单与官方导出格式核实。
+- 最终 checkpoint 选择、原空间概率/标签恢复顺序、官方 NSD 的严格定义/容差及指标对齐；内部 Dice 规则见下文，不冒充官方评价。
 - 小器官保真度没有预设合格阈值；先提交候选实际几何损失、图像质量风险和显存对照，再共同决定。
 
 工程可决定等价向量化、分块、配置组织、诊断开关、设备/路径处理。影响结果的配置必须单独记录并在正式实验前确认，不能因 8GB 辅助卡改变正式方法。
@@ -158,3 +158,14 @@ scripts/validate_full_scan.py 为单病例分阶段工程验证：预处理→�
 5. 重要集成节点做 NVIDIA CUDA 模块和缩小输入兼容测试，不替代 AMD 验收，不要求跨平台逐位一致；容差预先声明。
 
 AMD 测试代码/命令由开发端提供，用户 GitHub 同步后手动执行返回结果。当前不建立远程环境。
+
+## 训练系统 v1 与数据角色（不改变上述方法公式）
+
+- 200 official training CT 为 development pool；显式生成一次 160 train / 40 internal-dev 病例列表，保存 manifest、seed 与 SHA-256。架构、3/4-stage、容量、spacing、超参数和消融在此选择，不创建自定义 test。全部配置冻结后使用完整 200 例从头训练最终模型。
+- Linux 核实 official imagesVa/labelsVa 来源后，才可用于冻结模型的 held-out evaluation；不加入训练，不反复调参。official test 是 image-only，最终计划提交 AMOS CT Regular Evaluation (Test)，报告官方 overall 与逐器官 DSC/NSD。官方导出格式、NSD 实现与评估对齐后续验证；不按 leaderboard 反复调参。
+- configs/train_sanity.json 是系统验收配置：3S-P1、B、FP32、batch=1、workers=0、channels_last_3d。AdamW lr=3e-4、betas=[0.9,0.999]、eps=1e-8、weight_decay=0、foreach=false、fused=false，无 scheduler。不是正式容量、spacing 或最终训练参数。沿用当前 scaled_hu，不新增预处理。
+- scripts/train.py 统一用于 smoke→单病例 overfit→双病例 overfit→恢复验收→short pilot→后续正式训练；运行长度、病例、验证/诊断/checkpoint 频率显式配置。当前新增系统仅做 Windows CPU 合成验收；既有 AMD capacity backward 结果不等于 AdamW 稳态训练已通过。
+- checkpoint 在完成 optimizer step 并提交标量日志后原子替换，保存 model/optimizer、计数、实际病例顺序/游标、全部 RNG/generator、配置、来源和 split/subset 哈希、日志提交位置及 pending validation。普通 resume 严格匹配这些运行身份；失败半步不提交。诊断/保存频率可调，不强制正式训练每步扫描或保存。恢复算法不要求 AMD 非确定性算子逐位一致。
+- 内部 validation 在当前重采样网格计算逐病例、逐前景器官 hard Dice，与 JointLoss soft Dice 分开。GT/pred 任一非空正常计算；两者均空记 null 并排除均值；GT 空而预测非空为 0，另记 FP 体素。先病例内有效前景平均，再病例平均；另报逐器官均值和有效病例数。不实现近似 NSD/HD95，不代替官方原空间指标。
+- 训练 ETA 采用最近 20 个完整 step 的均值，少于 5 个显示 warming up；验证/推理使用独立计时器，resume 重新预热。训练 ETA 明确仅估算训练计算与取数，排除验证/checkpoint 写盘，不宣称是包含所有 I/O 的精确完成时刻。
+- CaseLedger 提供安全结果写入、身份/完整性核验与按病例恢复；内部验证已接入。official validation/test 角色可在 split 数据结构表达，但本版训练 CLI 不加载它们。无标签预处理入口、原空间 NIfTI 导出与完整 challenge pipeline 尚未实现。双向物理映射可支持后续恢复到原网格，不代表降采样信息可无损恢复。

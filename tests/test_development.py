@@ -50,7 +50,8 @@ class DevelopmentTests(unittest.TestCase):
 
     def trainer(self, path, resume=False, extend_to=None, epochs=20):
         seed_all(20260925)
-        cfg = config()
+        cfg = config('relation')  # Keep legacy epoch/extension acceptance in addition to v2 tests.
+        cfg['mode'] = 'monai_reference_unet'
         options = cfg['training']
         options.update(max_epochs=epochs, memory_format='contiguous')
         model = TinyReference()
@@ -66,7 +67,7 @@ class DevelopmentTests(unittest.TestCase):
             resume=path / 'last.ckpt' if resume else None, extend_to=extend_to, tensorboard=True)
 
     def test_configs_equal_comparison_budget_and_unchanged_backbone_loss(self):
-        a, c = config(), config('relation')
+        a, c = config(), config('relation_gated')
         for key in ('data', 'training', 'optimizer', 'runtime', 'model', 'loss', 'input_processing',
                     'split_artifact', 'expected_split_hash'):
             self.assertEqual(a[key], c[key], key)
@@ -75,15 +76,19 @@ class DevelopmentTests(unittest.TestCase):
         self.assertEqual(a['data']['candidate'], 'A')
         self.assertEqual(a['data']['role'], 'development_train')
         self.assertTrue(all(a['data'][k] is None for k in ('train_cases', 'train_limit', 'validation_cases', 'validation_limit')))
-        self.assertEqual(a['training']['max_epochs'], 300)
+        self.assertEqual(a['training']['max_epochs'], 500)
         self.assertIsNone(a['training']['max_steps'])
         self.assertIsNone(a['training']['scheduler'])
         self.assertEqual(a['training']['seed'], 20260925)
-        self.assertEqual(resolve_horizon(a['training'], 160, None, None, {'provenance': 'test'}, None)['total_steps'], 48000)
+        self.assertEqual(resolve_horizon(a['training'], 160, None, None, {'provenance': 'test'}, None)['total_steps'], 80000)
         for name, current in (('reference', a), ('relation', c)):
             previous = json.loads((ROOT / f'configs/train_monai_{name}_whole_volume_overfit.json').read_text())
             for key in ('model', 'loss', 'input_processing', 'optimizer', 'runtime', 'relation', 'coarse_supervision'):
-                self.assertEqual(current.get(key), previous.get(key))
+                value = copy.deepcopy(current.get(key))
+                if key == 'relation' and value:
+                    self.assertTrue(value.pop('learnable_relation_scale'))
+                    self.assertEqual(value.pop('relation_scale_init'), .1)
+                self.assertEqual(value, previous.get(key))
         baseline = json.loads((ROOT / 'configs/baseline.json').read_text())
         self.assertEqual(baseline['preprocessing']['spacing_candidates']['A'], [1.5, 1.5, 3.0])
 
@@ -112,13 +117,13 @@ class DevelopmentTests(unittest.TestCase):
     def test_cadence_exact_epochs_and_no_step25_monitor(self):
         opt = config()['training']
         vals, checkpoints = [], []
-        for step in range(1, 48001):
+        for step in range(1, 80001):
             epoch = (step - 1) // 160 + 1
             end = step % 160 == 0
             if cadence_due(opt, 'validation_every', step, epoch, end): vals.append(epoch)
             if cadence_due(opt, 'checkpoint_every', step, epoch, end): checkpoints.append(step)
-        self.assertEqual(vals, list(range(10, 301, 10)))
-        self.assertEqual(checkpoints, list(range(160, 48001, 160)))
+        self.assertEqual(vals, list(range(5, 501, 5)))
+        self.assertEqual(checkpoints, list(range(160, 80001, 160)))
 
     def test_epochs_resume_best_history_jsonl_and_board_whitelist(self):
         whole = self.trainer(self.root / 'whole')
@@ -268,7 +273,7 @@ class DevelopmentTests(unittest.TestCase):
         self.assertEqual([len(r['diagnostic_cases']) for r in vals], [40, 40, 40])
 
     def test_300_400_500_epoch_extension_budget(self):
-        opt = config()['training']
+        opt = config('relation')['training']  # Historical protocol remains resumable/extendable.
         identity = dict(provenance='synthetic', training=opt)
         ck = dict(identity=identity, origin_identity=identity, progress={'global_step': 48000})
         parent = self.root / 'synthetic_parent'; parent.write_bytes(b'synthetic test')

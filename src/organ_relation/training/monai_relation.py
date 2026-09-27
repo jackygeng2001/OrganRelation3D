@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from organ_relation.losses import JointLossResult
-from .monai_reference import MonaiReferenceLoss, reference_diagnostics
+from .monai_reference import MonaiReferenceLoss, OptimizationLoss, reference_diagnostics
 from organ_relation.metrics import hard_dice
 
 
@@ -33,6 +33,17 @@ class MonaiRelationLoss(nn.Module):
         coarse = self.branch(self.align_coarse(coarse_logits, label), label)
         total = final.total + self.lambda_c * coarse.total
         return JointLossResult(total, total.reshape(1), coarse.final, final.final)
+
+    def objective(self, coarse_logits, final_logits, label):
+        """Keep exactly both official objectives, with no diagnostic allocations.
+
+        Autograd retains what each official loss needs; deleting a Python name
+        cannot and must not discard those saved tensors. Coarse is interpolated
+        once here and never detached or reconstructed at a different resolution.
+        """
+        final = self.branch.objective(final_logits, label).total
+        coarse = self.branch.objective(self.align_coarse(coarse_logits, label), label).total
+        return OptimizationLoss(final + self.lambda_c * coarse, final, coarse)
 
 
 def relation_diagnostics(output, label, criterion, final_hard):

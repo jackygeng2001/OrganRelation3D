@@ -1,12 +1,19 @@
 """MONAI loss/monitor adapter and one-backward engineering preflight."""
 import json
 import time
+from typing import NamedTuple
 
 import torch
 from torch import nn
 
 from organ_relation.losses import BranchLoss, FinalLossResult
 from organ_relation.models.monai_reference import padding_geometry
+
+
+class OptimizationLoss(NamedTuple):
+    total: torch.Tensor
+    final: torch.Tensor
+    coarse: torch.Tensor | None = None
 
 
 class MonaiReferenceLoss(nn.Module):
@@ -21,7 +28,8 @@ class MonaiReferenceLoss(nn.Module):
         dice_args['reduction'] = 'none'
         self.dice_per_class = DiceLoss(**dice_args)
 
-    def forward(self, logits, label):
+    def objective(self, logits, label):
+        """Only the official differentiable scalar; no observer tensors."""
         if (logits.dtype != torch.float32 or label.dtype != torch.int64
                 or tuple(label.shape) != (logits.shape[0], *logits.shape[2:])
                 or logits.shape[0] != 1 or logits.shape[1] != 16
@@ -33,6 +41,12 @@ class MonaiReferenceLoss(nn.Module):
         total = self.loss(logits, target)
         if not torch.isfinite(total):
             raise ValueError('nonfinite MONAI loss')
+        return OptimizationLoss(total, total)
+
+    def forward(self, logits, label):
+        """Historical diagnostic API. Formal optimization calls objective only."""
+        total = self.objective(logits, label).total
+        target = label.unsqueeze(1)
         with torch.no_grad():
             # Official MONAI implementations, not the project's custom CE/Dice.
             per_class_loss = self.dice_per_class(logits, target).reshape(1, 15)
@@ -112,8 +126,8 @@ def preflight_backward(model, criterion, dataset, identity):
                 baseline_parameters=baseline, added_parameters=sum(counts.values())-baseline,
                 total_parameters=sum(counts.values()), groups=counts,
                 **branch_config, coarse_supervision=identity['coarse_supervision'])), flush=True)
-        loss = measure('loss', lambda: criterion(output.coarse_logits, output.final_logits, label)
-                       if joint else criterion(output.final_logits, label))
+        loss = measure('loss', lambda: criterion.objective(output.coarse_logits, output.final_logits, label)
+                       if joint else criterion.objective(output.final_logits, label))
         measure('backward', loss.total.backward)
         missing = [n for n, p in model.named_parameters() if p.grad is None]
         nonfinite = [n for n, p in model.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
@@ -122,17 +136,16 @@ def preflight_backward(model, criterion, dataset, identity):
             from .engine import gradient_diagnostics
             if not missing and not nonfinite:
                 print('coarse_aux_gradients' if coarse_only else 'relation_gradients', json.dumps(gradient_diagnostics(model)), flush=True)
-            print('coarse_loss', json.dumps(dict(total=loss.coarse.segmentation.item(),
-                ce=loss.coarse.ce.item(), dice=loss.coarse.dice_loss.item())), flush=True)
+            print('coarse_loss', json.dumps(dict(total=loss.coarse.item())), flush=True)
         print('preflight_result', json.dumps(dict(status='passed' if not missing and not nonfinite else 'failed',
-            final_loss=loss.final.segmentation.item(), coarse_loss=loss.coarse.segmentation.item() if joint else None,
+            final_loss=loss.final.item(), coarse_loss=loss.coarse.item() if joint else None,
             joint_loss=loss.total.item() if joint else None,
             gamma_grad=(model.bottleneck.fusion.relation_scale.grad.item()
                         if scaled and model.bottleneck.fusion.relation_scale.grad is not None else None),
             oom=False, finite_gradients=not missing and not nonfinite,
             peak_allocated_bytes=max((s['peak_allocated_bytes'] or 0 for s in stages.values())) if device.type == 'cuda' else None,
             peak_reserved_bytes=max((s['peak_reserved_bytes'] or 0 for s in stages.values())) if device.type == 'cuda' else None,
-            total_loss=loss.total.item(), ce_loss=loss.final.ce.item(), dice_loss=loss.final.dice_loss.item(),
+            total_loss=loss.total.item(),
             missing_gradients=missing, nonfinite_gradients=nonfinite, zero_gradient_tensors=zeros,
             forward_loss_backward_seconds=sum(stages[n]['seconds'] for n in ('forward', 'loss', 'backward')), optimizer_steps=0)), flush=True)
         if missing or nonfinite:

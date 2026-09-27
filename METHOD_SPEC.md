@@ -4,9 +4,9 @@
 
 ## 当前 full-development A/C 实验协议（2026-09-27 用户确认）
 
-本轮唯一新增模型机制（2026-09-27 用户授权）：当前正式 C-gated 使用 `F'=F+gamma*phi(G)`，单个全局可学习 scalar `gamma_init=0.1`，不限制符号，不使用 clamp/sigmoid/softplus/正则/warmup/schedule。必须先计算 phi(G)，再乘 gamma（包括缩放 phi bias）。新配置为 `train_monai_relation_gated_A_160_40.json`，其 relation 中显式设置 `learnable_relation_scale=true, relation_scale_init=0.1`；与此前正式 C 配置只差这两个字段。纯 A 不加 gamma。旧配置/default 为 learnable=false、effective gamma=1，保留 `F+phi(G)` 的原计算、参数键与初始化，不修改旧 A/B-spacing C 配置。以下历史无缩放公式仍对应 legacy 模式；本变体不改变 c/s/q、GRU、attention、K、loss/coarse weight 或其他结构。
+当前唯一新增模型机制（2026-09-27 用户授权）：正式 C-gated 使用 `F'=F+gamma*phi(G)`，单个全局可学习 scalar `gamma_init=0.1`，不限制符号，不使用 clamp/sigmoid/softplus/正则/warmup/schedule。必须先计算 phi(G)，再乘 gamma（包括缩放 phi bias）。配置为 `train_monai_relation_gated_A_160_40.json`，其 relation 中显式设置 `learnable_relation_scale=true, relation_scale_init=0.1`；模型配置与旧 C 只差这两个字段，训练协议更新见下文。纯 A 不加 gamma。旧配置/default 为 learnable=false、effective gamma=1，保留 `F+phi(G)` 的原计算、参数键与初始化，不修改旧 B-spacing C 配置。以下历史无缩放公式仍对应 legacy 模式；本变体不改变 c/s/q、GRU、attention、K、loss/coarse weight 或其他结构。
 
-Gated 观测：同次前向以整张 F、phi(G)、gamma*phi(G) 的全 tensor L2 norm 计算两个比值，分母为 `||F||_2+1e-6`，使用 detached FP64 norm reduction；不改变前向/梯度/RNG，不保留激活历史。每个训练 step JSONL 的 `relation_scale` 记录 gamma、`writeback_to_feature_norm`（未缩放）及 `scaled_writeback_to_feature_norm`（实际扰动），均来自该 step optimizer 更新前的同次前向；验证逐病例保存在 ledger 与 `relation_scale_cases`。TensorBoard 仅额外记录 `Relation/Gamma` 和 `Relation/WritebackToFeatureNorm`（实际扰动比），训练 step 级别；legacy/baseline 不生成这两条曲线。gamma 随 model/optimizer 原机制保存恢复，relation 配置纳入严格 identity，不允许 legacy checkpoint 静默迁移到 gated 模式。
+Gated 观测：同次前向以整张 F、phi(G)、gamma*phi(G) 的全 tensor L2 norm 计算两个比值，分母为 `||F||_2+1e-6`，使用 detached FP64 norm reduction；不改变前向/梯度/RNG，不保留激活历史。每个训练 step JSONL 的 `relation_scale` 记录更新前 gamma、`writeback_to_feature_norm`（未缩放）及 `scaled_writeback_to_feature_norm`（实际扰动），另记录更新后 `gamma_after_step`；验证逐病例保存在 ledger 与 `relation_scale_cases`。当前 TensorBoard 每 epoch 额外记录 `Relation/Gamma`（epoch 末更新后的值）和 `Relation/WritebackToFeatureNorm`（该 epoch 同次训练前向实际扰动比的病例均值）；baseline 不生成这两条曲线。gamma 随 model/optimizer 保存恢复，relation 配置纳入严格 identity，不允许 legacy checkpoint 静默迁移到 gated 模式。
 
 本节更新当前实验配置，保留下面的原始方法转录与历史 diagnostic 记录。A 为已有 MONAI reference；C 为同一个 MONAI backbone 加已有粗头、节点构建、动态关系/指定 GRU、节点回写与残差融合。骨干保持 channels=[8,16,32,64,128]、strides=[2,2,2,2]、num_res_units=2、InstanceNorm/PReLU；C 保持 Cr=8、K=2、da=4、Cg=6，不重新搜索关系参数。
 
@@ -14,11 +14,13 @@ Gated 观测：同次前向以整张 F、phi(G)、gamma*phi(G) 的全 tensor L2 
 - 当前 A-spacing 比较使用完整扫描、[1.5,1.5,3] mm、原 full-scan 几何/scaling；MONAI 输入层 clip HU [-1000,1000]、除以 1000 到 [-1,1]，按已验收实现对高端做最小 16 整除 padding，值 -1。一次整例前向；final logits 去除新增边界后，对原重采样网格 GT 计算 loss/metric。C 的节点域和 coarse logits 到 GT 网格的插值沿用既有 MONAI adapter；不修改几何、GT、不加有效域 mask。
 - A 与 C 的 final loss 使用同一个已实现 MONAI DiceCELoss：16 类标准 CE + 15 前景 Dice，smooth_nr=smooth_dr=1e-5、per-case、lambda_ce=lambda_dice=1。C coarse logits 先三线性插值到完整 GT 网格（align_corners=False），再用同一 MONAI loss，total=final+0.5*coarse。本比较不调用历史自定义概率 CE；原 JointLoss 及所有 diagnostic 配置保持原行为。
 - 统一 seed=20260925；model/Python/NumPy/PyTorch RNG 同种子，sampler 独立 generator 同种子，loader generator=seed+1。记录并恢复全部 RNG；不依据 seed 重建 split。A/C 骨干初始化保持已有逐 tensor 对齐行为。
-- FP32、batch=1、workers=0、ROCm/channels_last_3d；AdamW lr=3e-4、weight_decay=0，其他参数沿用已有配置。固定 LR，无 scheduler/AMP/activation checkpointing/gradient accumulation/early stopping。
-- 300 epochs×160 cases=48,000 optimizer steps。每 epoch 汇总训练同次 forward 的逐病例 loss、hard/soft Dice 并保存完整 last.ckpt；每 10 epochs 单次整例前向验证全部 40 例，无后处理。Hard Dice 使用已有 both-empty=null 的病例/器官协议，soft Dice 仍为既有 MONAI 定义；分别记录 final/coarse、均值及各器官结果。
-- best-dev 仅在 final mean-case foreground hard Dice 严格提高时更新，平局保留较早 checkpoint；它不触发停训。epoch 聚合进度、验证历史及 best 信息纳入完整恢复状态。验证病例 ledger、日志截断、TensorBoard purge/replay 机制继续保留。
-- 显式 `--extend-epochs 400` / `500` 仅改变 checkpoint horizon，不编辑 300-epoch 原配置或科学身份。是否延长由用户评估曲线后决定，A/C 必须同步延长。Checkpoint/source/config/split 不兼容继续拒绝。
-- 正式 TensorBoard 仅记录 epoch-level loss、hard/soft Dice 和 validation 逐类 hard Dice；逐类 soft Dice 与完整诊断保留 JSONL/ledger。新 profile 不改历史 diagnostic TensorBoard。No-update preflight 在最大例 amos_0097 测 forward/loss/backward，失败不自动改配置；不代表 optimizer 状态或长期训练显存已经通过。
+- FP32、batch=1、workers=0、ROCm/channels_last_3d；AdamW lr=3e-4、weight_decay=0，其他参数沿用已有配置。固定 LR，无 scheduler/AMP/activation checkpointing/gradient accumulation。
+- 当前 A/C-gated 均为 `development_160_40_v2`：max_epochs=500（最多 80,000 steps）、min_epochs=100。每 epoch 汇总同次训练前向 total/final/coarse loss 和 final hard Dice，保存完整 last.ckpt。每 5 epochs 单次整例前向验证全部 40 例，无后处理；记录 final/coarse loss、hard/soft Dice 及逐器官结果。Hard Dice 保留 both-empty=null 的病例/器官协议，soft Dice 保留 MONAI 定义。
+- Early stopping 只看完整 dev 的 final mean-case foreground hard Dice：本次 score 严格超过此前历史最高值 + 1e-4 才清零计数，否则加一；连续 5 次（25 epochs）未达到该阈值且 epoch>=100 时停止。100 之前累计计数但禁止停止，故最早可在 100 停止。小于阈值的新纪录仍更新历史最高值，但不清零计数；gamma 不参与判断。best-dev 在原始 score 严格提高时保存，平局保留较早 checkpoint。
+- checkpoint 包含 early-stopping best_metric/best_epoch/no_improvement_count/stopped、完整 validation history、epoch 聚合进度和原有全部恢复状态；resume 重放历史校验状态，已停止的 run 不会恢复后继续训练。v2 不允许用 controlled extension 绕过 500 上限或 early stop。旧 v1 的 300→400→500 延长机制仅保留供历史配置；跨协议/source/config/split 不兼容继续拒绝。
+- 正式训练 `loss_observation=monitor_only`：可微路径只调用官方 DiceCELoss 标量，coarse 只上采样一次；不计算额外 per-class DiceLoss、detached CE/softmax 或概率诊断。final hard Dice 在 backward 后用现有 logits.argmax 统计；train soft Dice/coarse hard Dice 不伪造或重复分配全尺寸概率，其完整统计留到 validation。旧 loss.forward 诊断 API 与历史 B 配置保留。
+- 正式 TensorBoard 每 epoch 记录 loss/final hard Dice/gamma/扰动比，每 5 epochs 记录完整 validation loss、hard/soft Dice 和逐类 hard Dice；逐类 soft Dice、CE 分解及概率诊断保留 validation JSONL/ledger。No-update preflight 在 amos_0097 测 forward/loss/backward，仍保留两分支必要 autograd，不使用 empty_cache 掩盖生命周期；实际显存须 AMD 复测，OOM 即停止。
+- 最大病例 preflight 通过后可用同一正式配置 `--stop-after 5 --run-dir runs/preflight_gated_A_5steps`：按冻结 160 train 的正常 seed/order 运行前 5 个病例，真实执行 optimizer 更新并清空梯度；独立于正式 run。报告 step 1、step 2–5 均值/中位数及各步 loss/gamma/扰动比/显存/ETA。同步计时包含读取、计算及轻量指标，不含随后日志/checkpoint 写盘；只是不同 shape 下的粗略 throughput，不是科研结果。
 
 ## 依据
 

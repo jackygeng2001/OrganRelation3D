@@ -41,6 +41,8 @@ def check_extension_identity(saved, current):
 
 def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume):
     """Pure validation/planning. No RNG use, checkpoint writes or config edits."""
+    if extend_to is not None and options.get('early_stopping'):
+        raise ValueError('early-stopped/max-epoch protocol cannot be bypassed by horizon extension')
     original = min(v for v in (options['max_steps'],
                    options['max_epochs'] * case_count if options['max_epochs'] else None) if v is not None)
     horizon = copy.deepcopy(checkpoint.get('horizon')) if checkpoint else None
@@ -52,7 +54,7 @@ def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume
         raise ValueError('invalid checkpoint horizon')
     total, previous_step = original, 0
     epoch_mode = options.get('cadence_unit') == 'epoch'
-    epoch_limit = options['max_epochs'] * case_count if options['max_epochs'] and not epoch_mode else None
+    epoch_limit = options['max_epochs'] * case_count if options['max_epochs'] and (not epoch_mode or options.get('early_stopping')) else None
     origin = checkpoint.get('origin_identity', checkpoint['identity']) if checkpoint else identity
     origin_science, execution_science = copy.deepcopy(origin), copy.deepcopy(identity)
     previous_provenance = origin_science.pop('provenance')

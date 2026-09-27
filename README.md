@@ -353,7 +353,8 @@ schedule. It scales the projected writeback including its bias. The previous
 `train_monai_relation_A_160_40.json` and B-spacing C configs remain legacy,
 effective scale 1 with no added parameter; A is unchanged.
 Seed=20260925, FP32, batch=1, channels_last_3d,
-AdamW lr=3e-4 / weight_decay=0 / no scheduler. Budget is 300 epochs = 48,000 steps.
+AdamW lr=3e-4 / weight_decay=0 / no scheduler. Both current configs use
+max_epochs=500 (at most 80,000 steps), min_epochs=100 and identical dev early stopping.
 
 The existing `runs/splits/development_160_40.json` must already be on Linux.
 Its **internal `split_hash`**, not the whole-file checksum, must equal
@@ -375,7 +376,24 @@ python -B scripts/train.py --config configs/train_monai_relation_gated_A_160_40.
   --data-root "$AMOS_ROOT" --cases amos_0097 --preflight-backward
 ```
 
-After both preflights are accepted, start fresh runs without `--cases`:
+After the maximum-case gated preflight passes, run five **optimizer steps**,
+not epochs, in a separate directory. This uses the frozen 160-case train split
+and the normal seeded first five shuffled cases, without changing formal config:
+
+```bash
+python -B scripts/train.py --config configs/train_monai_relation_gated_A_160_40.json \
+  --data-root "$AMOS_ROOT" --split runs/splits/development_160_40.json \
+  --run-dir runs/preflight_gated_A_5steps --stop-after 5
+```
+
+The short run reports per-step losses, pre-update gamma/norm ratios, updated
+gamma, synchronized step time, ETA and allocator peaks, then step 1 time and
+steps 2–5 mean/median. Timing includes data loading, optimization and lightweight
+metrics; log/checkpoint writes are excluded. Case shapes differ: this is only a
+rough throughput sanity check. It saves a resumable checkpoint after five steps.
+Only the user runs these GPU checks. Stop on OOM; no automatic fallback is used.
+
+After preflights and the short run are accepted, start fresh formal runs without `--cases`:
 
 ```bash
 python -B scripts/train.py --config configs/train_monai_reference_A_160_40.json \
@@ -385,35 +403,48 @@ python -B scripts/train.py --config configs/train_monai_relation_gated_A_160_40.
 ```
 
 Each epoch writes aggregate training metrics and atomic resumable `last.ckpt`.
-Epochs 10,20,...,300 evaluate all 40 dev cases and update `best-dev.ckpt` only on
-strict improvement in final mean case foreground hard Dice. There is no early
-stopping. Both checkpoints include optimizer/RNG/order/history/config/source
-state. Resume with the identical command plus `--resume <run-dir>/last.ckpt`;
+Epochs 5,10,...,500 evaluate all 40 dev cases and update `best-dev.ckpt` on
+strict improvement in final mean case foreground hard Dice. Early stopping counts
+a validation as improving only when it exceeds the **previous all-time best +
+1e-4**. Five consecutive non-improving validations (25 epochs) stop the run once
+epoch>=100. Counts accumulate before 100 but cannot stop early; a small new
+record still updates the raw best, without resetting patience. Gamma never resets
+this counter. Both checkpoints include optimizer/RNG/order/history/config/source
+and early-stopping state; resume verifies that state against validation history.
+A stopped run stays stopped. Resume with the identical command plus `--resume <run-dir>/last.ckpt`;
 do not edit the original config or source during a run. Incomplete validation
 resumes via its per-case ledger. Epoch partial aggregates are also checkpointed.
 
-Only after an explicit curve review, extend **both** runs using their original
-configs and `--resume .../last.ckpt --extend-epochs 400` (later 500).
-These mean 64,000 / 80,000 total optimizer steps. Config/split/source checks stay
-strict; the extension is recorded in checkpoint horizon. This CLI does not
-launch or coordinate the other experiment automatically.
+Current v2 runs cannot use controlled extension to bypass early stopping or the
+500-epoch cap. Historical v1 configs retain their original extension mechanism.
+Config/split/source checks remain strict; old checkpoints do not silently migrate.
 
-Formal TensorBoard uses only `Loss/Train_Total`, `Loss/{Train,Val}_{Final,Coarse}`,
-`Dice/{Train,Val}_{Final,Coarse}_{Hard,Soft}`, and
-`Dice_Per_Class_Val_{Final,Coarse}/Class_01..15` (hard Dice).
-Coarse tags exist only for C. Train points are epoch means from the actual
-training forwards, not a second evaluation pass. Both-empty hard Dice values
-remain null (no fabricated zero scalar); all per-class soft Dice and detailed
-diagnostics remain in JSONL/ledger. Resume purges uncommitted events and replays
-committed same-step summaries. Historical diagnostic tags remain unchanged.
+Formal training computes only the official differentiable DiceCELoss objective;
+coarse logits are upsampled once to the unpadded full GT grid. No extra full-size
+per-class soft Dice, detached CE decomposition or probability observers run on
+ordinary steps. Required autograd tensors remain; AMD memory must be remeasured.
+Historical diagnostic loss APIs and B-spacing behavior remain supported.
 
-C-gated additionally writes two per-training-step TensorBoard scalars:
+Formal TensorBoard records `Loss/Train_Total`, `Loss/Train_Final`, C-only
+`Loss/Train_Coarse` and `Dice/Train_Final_Hard` once per epoch. These are case means
+from actual training forwards, with final argmax metrics computed after backward.
+Train soft/coarse Dice tags are omitted rather than allocating duplicate full-size
+tensors. Every five epochs, full validation records `Loss/Val_{Final,Coarse}`,
+`Dice/Val_{Final,Coarse}_{Hard,Soft}` and
+`Dice_Per_Class_Val_{Final,Coarse}/Class_01..15` (hard Dice). Coarse tags only exist
+for C. Both-empty hard Dice stays null; per-class soft Dice, CE decomposition and
+probability diagnostics remain in validation JSONL/ledger. Resume purges
+uncommitted events and replays committed summaries. Historical tags are unchanged.
+
+C-gated additionally writes two per-epoch TensorBoard scalars:
 `Relation/Gamma` and `Relation/WritebackToFeatureNorm`. The latter is
 `||gamma*phi(G)||_2 / (||F||_2 + 1e-6)` over the whole feature tensor, using
 detached FP64 norm reduction. JSONL `relation_scale` also records the unscaled
 `writeback_to_feature_norm`; the actual scaled ratio is
-`scaled_writeback_to_feature_norm`. All values belong to the same pre-update
-forward as that step's loss. Validation records these per case in the ledger
+`scaled_writeback_to_feature_norm`. Per-step JSONL values belong to the same pre-update
+forward as that step's loss, with a separate `gamma_after_step`. The epoch gamma
+is its final updated value; the epoch norm ratio is the case mean of those forwards.
+Validation records these per case in the ledger
 and `relation_scale_cases`, without mixing validation points into the training
 gamma curve. Plain forward stores no diagnostics or activation cache.
 Legacy and baseline runs do not fabricate gamma curves.

@@ -1,5 +1,7 @@
 """Presentation of committed scalar rows; no model, RNG or ETA calculations."""
 from functools import wraps
+import json
+import statistics
 import shutil
 import sys
 
@@ -32,6 +34,14 @@ def columns(rows, title=None):
     lines.extend(cell(left) + '   ' + cell(right) for left, right in rows)
     lines.append(lines[0])
     return '\n'.join(lines)
+
+
+def short_run_summary(rows):
+    later = [r['step_seconds'] for r in rows[1:]]
+    return dict(optimizer_steps=len(rows), step_1_seconds=rows[0]['step_seconds'],
+                steps_2_to_5_mean_seconds=statistics.mean(later) if later else None,
+                steps_2_to_5_median_seconds=statistics.median(later) if later else None,
+                scope='short engineering run; variable case shapes; not a benchmark')
 
 
 def _presentation(method):
@@ -175,6 +185,38 @@ class TrainingConsole:
     @_presentation
     def validation_summary(self, row):
         self._summary(row['metrics'], row['phase'])
+
+    @_presentation
+    def epoch_summary(self, row):
+        s = row['epoch_metrics']
+        hard = s['final']['hard']['mean_case_dice']
+        pairs = [(('Epoch', f"{row['epoch']} / {self.epochs}"), ('Step', f"{row['global_step']} / {self.total}")),
+                 (('Train Total', f"{s['total_loss']:.4f}"), ('Final Loss', f"{s['final']['loss']:.4f}")),
+                 (('Train Dice', f'{hard:.4f}' if hard is not None else 'n/a'),
+                  ('Coarse Loss', f"{s['coarse']['loss']:.4f}") if 'coarse' in s else None)]
+        if row.get('relation_scale'):
+            r = row['relation_scale']
+            pairs.append((('Gamma', f"{r['gamma']:.6g}"), ('Writeback/F', f"{r['scaled_writeback_to_feature_norm']:.6g}")))
+        pairs.append((('Train ETA', duration(self.last['progress']['eta_seconds'])), ('LR', f"{self.last['lr']:.2e}")))
+        self._write(columns(pairs))
+        self.last_summary_step = row['global_step']
+
+    @_presentation
+    def early_stop(self, state):
+        self._write(f"[Early stop] epoch={state['last_validation_epoch']} best={state['best_metric']:.6f} "
+                    f"best_epoch={state['best_epoch']} non_improving_validations={state['no_improvement_count']}")
+
+    @_presentation
+    def short_step(self, row):
+        record = dict(step=row['global_step'], case_id=row['case_id'], total_loss=row['total_loss'],
+                      final_loss=row['final']['segmentation'], coarse_loss=row.get('coarse', {}).get('segmentation'),
+                      relation_scale=row.get('relation_scale'), gamma_after_step=row.get('gamma_after_step'),
+                      step_seconds=row['step_seconds'], memory=row['memory'], eta=row['progress'])
+        self._write('[Short step] ' + json.dumps(record))
+
+    @_presentation
+    def short_summary(self, row):
+        self._write('[Short run summary] ' + json.dumps(row))
 
     @_presentation
     def finish(self):

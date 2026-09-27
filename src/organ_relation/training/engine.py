@@ -21,11 +21,14 @@ from .extension import resolve_horizon
 from .state import (ScalarLog, atomic_json, capture_rng, digest, load_checkpoint,
                     restore_rng, save_checkpoint)
 from .tensorboard import TensorBoardObserver
-from .development import cadence_due, summarize_branches, validation_branches
+from .development import (cadence_due, summarize_branches, validation_branches,
+                          validate_early_stopping, new_early_state, advance_early_stopping)
 from .monai_relation import observed_forward
 
 
 def validate_options(options):
+    if options.get('loss_observation', 'legacy') not in ('legacy', 'monitor_only'):
+        raise ValueError('invalid loss_observation')
     if options.get('cadence_unit', 'step') not in ('step', 'epoch'):
         raise ValueError('invalid cadence_unit')
     for key in ('checkpoint_every', 'diagnostics_every', 'validation_every'):
@@ -45,6 +48,7 @@ def validate_options(options):
     if type(options['seed']) is not int or type(options['shuffle']) is not bool:
         raise ValueError('explicit seed and shuffle required')
     ProgressClock(options['eta_window'], options['eta_warmup'])
+    validate_early_stopping(options)
 
 
 def weights_hash(model):
@@ -208,6 +212,10 @@ class Trainer:
         self.validation_dataset, self.validation_case_ids = validation_dataset, list(validation_case_ids)
         self.device, self.options, self.identity = torch.device(device), options, identity
         self.epoch_mode = options.get('cadence_unit') == 'epoch'
+        self.scalar_only = options.get('loss_observation') == 'monitor_only'
+        self.observation_profile = 'development_v2' if self.scalar_only else 'development_v1'
+        if self.scalar_only and (not self.epoch_mode or self.mode not in ('monai_reference_unet', 'monai_relation_unet')):
+            raise ValueError('monitor-only optimization requires epoch MONAI A/C')
         if self.epoch_mode and self.mode not in ('monai_reference_unet', 'monai_relation_unet'):
             raise ValueError('epoch observation currently requires MONAI A/C')
         self.run_dir = Path(run_dir)
@@ -227,12 +235,23 @@ class Trainer:
         self.extension_pending = extend_to is not None
         self.origin_identity = checkpoint.get('origin_identity', checkpoint['identity']) if checkpoint else identity
         self.development_state = dict(epoch_cases=[], validation_history=[], best_dev=None)
+        self.early_state = new_early_state() if options.get('early_stopping') else None
+        if checkpoint and self.early_state is not None:
+            if 'early_stopping' not in checkpoint:
+                raise ValueError('missing early stopping state')
+            self.early_state = checkpoint['early_stopping']
         if checkpoint and self.epoch_mode:
             if 'development_state' not in checkpoint:
                 raise ValueError('missing development aggregate/checkpoint history')
             self.development_state = checkpoint['development_state']
             if len(self.development_state['epoch_cases']) != checkpoint['progress']['cursor']:
                 raise ValueError('epoch aggregate does not match committed case position')
+            if self.early_state is not None:
+                expected = new_early_state()
+                for event in self.development_state['validation_history']:
+                    expected = advance_early_stopping(expected, event['monitor_score'], event['epoch'], options)
+                if expected != self.early_state or expected['last_validation_epoch'] > checkpoint['progress']['epoch']:
+                    raise ValueError('early stopping state does not match validation history')
         if checkpoint:
             self._validate_progress(checkpoint)
             run = json.loads((self.run_dir / 'run.json').read_text(encoding='utf-8'))
@@ -304,6 +323,8 @@ class Trainer:
             log=self.log.position(self.state['global_step']))
         if self.epoch_mode:
             payload['development_state'] = self.development_state
+            if self.early_state is not None:
+                payload['early_stopping'] = self.early_state
             best = self.development_state['best_dev']
             # Best first, then last: a crash before last commits replays pending
             # validation from its ledger and idempotently writes this best again.
@@ -380,7 +401,7 @@ class Trainer:
             row['ce_diagnostic_cases'] = {case: record['ce_branches']
                                           for case, record in zip(self.validation_case_ids, records)}
         if self.epoch_mode:
-            row['observation_profile'] = 'development_v1'
+            row['observation_profile'] = self.observation_profile
             row['epoch_metrics'] = summarize_branches([validation_branches(r) for r in records])
             score = row['metrics']['mean_case_dice']
             best = self.development_state['best_dev']
@@ -390,11 +411,17 @@ class Trainer:
                 self.development_state['best_dev'] = dict(score=score, epoch=self.state['epoch'], global_step=step)
             self.development_state['validation_history'].append(dict(
                 epoch=self.state['epoch'], global_step=step, epoch_metrics=row['epoch_metrics'], improved=improved))
+            if self.early_state is not None:
+                self.development_state['validation_history'][-1]['monitor_score'] = score
+                self.early_state = advance_early_stopping(self.early_state, score, self.state['epoch'], self.options)
+                row['early_stopping'] = dict(self.early_state)
         self.log.append(row)
         self.board.record(row)
         self.state['pending_validation'] = False
         self.checkpoint()  # Same completed optimizer boundary, validation now committed.
         self.console.validation_summary(row)
+        if self.early_state and self.early_state['stopped']:
+            self.console.early_stop(self.early_state)
 
     def _start_observers(self):
         rng = capture_rng(self.device)
@@ -430,7 +457,20 @@ class Trainer:
                 self.checkpoint()
                 self.extension_pending = False
             self._start_observers()
+            start_step = self.state['global_step']
+            self.report_steps = self.scalar_only and stop_after == 5
             result = self._run(stop_after=stop_after)
+            if self.report_steps:
+                from .console import short_run_summary
+                with self.log.path.open(encoding='utf-8') as stream:
+                    rows = [row for line in stream if (row := json.loads(line))['phase'] == 'train'
+                            and row['global_step'] > start_step]
+                if rows:
+                    summary = dict(run_id=self.run_id, phase='short_run_summary', global_step=self.state['global_step'],
+                                   **short_run_summary(rows))
+                    self.log.append(summary)
+                    self.checkpoint()
+                    self.console.short_summary(summary)
             self.console.finish()
             return result
         finally:
@@ -444,7 +484,7 @@ class Trainer:
         start_step = self.state['global_step']
         if self.state['pending_validation']:
             self._validation()
-        while self.state['global_step'] < self.total:
+        while self.state['global_step'] < self.total and not (self.early_state and self.early_state['stopped']):
             if not self.state['order']:
                 self.state['order'] = (torch.randperm(len(self.dataset), generator=self.sampler_generator).tolist()
                                        if self.options['shuffle'] else list(range(len(self.dataset))))
@@ -459,8 +499,9 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             image, label = self._batch(self.dataset, index)
             output, relation_stats = observed_forward(self.model, image)  # No supervision enters forward.
-            loss = (self.criterion(output.coarse_logits, output.final_logits, label)
-                    if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux') else self.criterion(output.final_logits, label))
+            loss_function = self.criterion.objective if self.scalar_only else self.criterion
+            loss = (loss_function(output.coarse_logits, output.final_logits, label)
+                    if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux') else loss_function(output.final_logits, label))
             loss.total.backward()
             epoch_complete = self.state['cursor'] + 1 == len(self.dataset)
             check = cadence_due(self.options, 'diagnostics_every', step, epoch, epoch_complete)
@@ -480,11 +521,15 @@ class Trainer:
             row = dict(run_id=self.run_id, phase='train', epoch=epoch, total_epochs=self.epochs,
                        global_step=step, total_steps=self.total, case_id=case,
                        shape=list(image.shape[2:]), lr=lr, total_loss=loss.total.detach().item(),
-                       final={k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
-                       soft_dice_per_organ=loss.final.dice_per_class.detach().cpu()[0].tolist(),
+                       final=({'segmentation': loss.final.detach().item()} if self.scalar_only else
+                              {k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')}),
                        diagnostics=diagnostics)
+            if not self.scalar_only:
+                row['soft_dice_per_organ'] = loss.final.dice_per_class.detach().cpu()[0].tolist()
             if relation_stats:
                 row['relation_scale'] = relation_stats  # Same forward's gamma, before optimizer.step.
+                if self.scalar_only:
+                    row['gamma_after_step'] = self.model.bottleneck.fusion.relation_scale.detach().item()
             if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
                 from ..models.monai_reference import padding_geometry
                 row['geometry'] = padding_geometry(image.shape[2:])
@@ -493,25 +538,33 @@ class Trainer:
             row['foreground_ce_reduction'] = self.foreground_ce_reduction
             row.update(self.ce_weights)
             if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux'):
-                row['coarse'] = {k: getattr(loss.coarse, k).detach().item()
-                                 for k in ('ce', 'dice_loss', 'segmentation')}
+                row['coarse'] = ({'segmentation': loss.coarse.detach().item()} if self.scalar_only else
+                                {k: getattr(loss.coarse, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')})
             if self.epoch_mode:
                 # Observe this same forward, before freeing it; no extra model
                 # call or stochastic sampling. Store only case scalar records.
                 with torch.no_grad():
                     branches = dict(total_loss=row['total_loss'], final=dict(
-                        loss=row['final']['segmentation'], soft_per_organ=row['soft_dice_per_organ'],
+                        loss=row['final']['segmentation'],
                         hard=hard_dice(output.final_logits.argmax(1)[0], label[0])))
+                    if not self.scalar_only:
+                        branches['final']['soft_per_organ'] = row['soft_dice_per_organ']
                     if self.mode == 'monai_relation_unet':
-                        coarse = self.criterion.align_coarse(output.coarse_logits, label)
-                        branches['coarse'] = dict(loss=row['coarse']['segmentation'],
-                            soft_per_organ=loss.coarse.dice_per_class[0].detach().cpu().tolist(),
-                            hard=hard_dice(coarse.argmax(1)[0], label[0]))
-                        del coarse
+                        branches['coarse'] = dict(loss=row['coarse']['segmentation'])
+                        if not self.scalar_only:
+                            coarse = self.criterion.align_coarse(output.coarse_logits, label)
+                            branches['coarse'].update(soft_per_organ=loss.coarse.dice_per_class[0].detach().cpu().tolist(),
+                                hard=hard_dice(coarse.argmax(1)[0], label[0]))
+                            del coarse
+                    if self.scalar_only and relation_stats:
+                        branches['relation_scale'] = dict(relation_stats)
+                        branches['gamma_after_step'] = row['gamma_after_step']
                 row['branch_metrics'] = branches
-                row['observation_profile'] = 'development_v1'
+                row['observation_profile'] = self.observation_profile
                 self.development_state['epoch_cases'].append(branches)
             del image, label, output, loss, before
+            if self.scalar_only:
+                self.optimizer.zero_grad(set_to_none=True)
             self._sync()
             elapsed = time.perf_counter() - started
             row.update(step_seconds=elapsed, memory=self._memory())
@@ -527,12 +580,21 @@ class Trainer:
             self.log.append(row)
             self.board.record(row)
             self.console.train_step(row)
+            if self.report_steps:
+                self.console.short_step(row)
             if self.epoch_mode and epoch_complete:
                 summary = dict(run_id=self.run_id, phase='train_epoch', epoch=epoch, global_step=step,
-                    mode=self.mode, observation_profile='development_v1',
+                    mode=self.mode, observation_profile=self.observation_profile,
                     epoch_metrics=summarize_branches(self.development_state['epoch_cases']))
+                if self.scalar_only and relation_stats:
+                    cases = self.development_state['epoch_cases']
+                    summary['relation_scale'] = dict(gamma=row['gamma_after_step'],
+                        **{key: sum(c['relation_scale'][key] for c in cases)/len(cases) for key in
+                           ('writeback_to_feature_norm', 'scaled_writeback_to_feature_norm')})
                 self.log.append(summary)
                 self.board.record(summary)
+                if self.scalar_only:
+                    self.console.epoch_summary(summary)
                 self.development_state['epoch_cases'] = []
             due = cadence_due(self.options, 'validation_every', step, epoch, epoch_complete)
             self.state['pending_validation'] = due
@@ -542,7 +604,7 @@ class Trainer:
             if due:
                 self._validation()
             if self.state['cursor'] == 0 or not remaining:
-                self.console.epoch_end(monitored=due)
+                self.console.epoch_end(monitored=due or (self.scalar_only and epoch_complete))
             if invocation_done:
                 break
         return dict(self.state)

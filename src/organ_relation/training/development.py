@@ -1,5 +1,6 @@
 """Frozen development protocol checks and scalar-only epoch summaries."""
 import hashlib
+import math
 
 from ..metrics import summarize_dice
 
@@ -26,10 +27,12 @@ def summarize_branches(cases):
         if branch not in cases[0]:
             continue
         values = [case[branch] for case in cases]
-        soft = [sum(v['soft_per_organ'][i] for v in values) / len(values) for i in range(15)]
-        result[branch] = dict(loss=sum(v['loss'] for v in values) / len(values),
-                              hard=summarize_dice([v['hard'] for v in values]),
-                              soft_mean=sum(soft) / 15, soft_per_organ=soft)
+        result[branch] = dict(loss=sum(v['loss'] for v in values) / len(values))
+        if 'hard' in values[0]:
+            result[branch]['hard'] = summarize_dice([v['hard'] for v in values])
+        if 'soft_per_organ' in values[0]:
+            soft = [sum(v['soft_per_organ'][i] for v in values) / len(values) for i in range(15)]
+            result[branch].update(soft_mean=sum(soft) / 15, soft_per_organ=soft)
     result['total_loss'] = sum(c['total_loss'] for c in cases) / len(cases)
     return result
 
@@ -54,7 +57,7 @@ def cadence_due(options, name, step, epoch, epoch_complete):
 
 def development_scalars(row):
     """Strict formal TensorBoard whitelist; diagnostics remain in JSONL only."""
-    if row['phase'] == 'train' and row.get('relation_scale'):
+    if row['phase'] == 'train' and row.get('relation_scale') and row.get('observation_profile') != 'development_v2':
         return relation_scalars(row['relation_scale'])
     if row['phase'] not in ('train_epoch', 'internal_dev'):
         return {}
@@ -69,14 +72,62 @@ def development_scalars(row):
         values = summary[branch]
         title = branch.title()
         result[f'Loss/{split}_{title}'] = values['loss']
-        result[f'Dice/{split}_{title}_Hard'] = values['hard']['mean_case_dice']
-        result[f'Dice/{split}_{title}_Soft'] = values['soft_mean']
+        if 'hard' in values:
+            result[f'Dice/{split}_{title}_Hard'] = values['hard']['mean_case_dice']
+        if 'soft_mean' in values:
+            result[f'Dice/{split}_{title}_Soft'] = values['soft_mean']
         if split == 'Val':
             for organ in values['hard']['organs']:
                 result[f'Dice_Per_Class_Val_{title}/Class_{organ["label"]:02d}'] = organ['mean_dice']
+    if row['phase'] == 'train_epoch' and row.get('relation_scale'):
+        result.update(relation_scalars(row['relation_scale']))
     return {k: v for k, v in result.items() if v is not None}
 
 
 def relation_scalars(stats):
     return {'Relation/Gamma': stats['gamma'],
             'Relation/WritebackToFeatureNorm': stats['scaled_writeback_to_feature_norm']}
+
+
+def validate_early_stopping(options):
+    c = options.get('early_stopping')
+    if c is None:
+        return
+    if (set(c) != {'min_epochs', 'patience_epochs', 'min_delta', 'monitor'}
+            or options.get('cadence_unit') != 'epoch' or options['validation_role'] != 'internal_dev'
+            or options['validation_every'] < 1 or options['max_epochs'] is None
+            or c['monitor'] != 'dev_mean_foreground_hard_dice'
+            or type(c['min_epochs']) is not int or not 1 <= c['min_epochs'] <= options['max_epochs']
+            or type(c['patience_epochs']) is not int or c['patience_epochs'] < 1
+            or c['patience_epochs'] % options['validation_every']
+            or isinstance(c['min_delta'], bool) or not math.isfinite(c['min_delta']) or c['min_delta'] < 0):
+        raise ValueError('invalid early stopping protocol')
+
+
+def new_early_state():
+    return dict(best_metric=None, best_epoch=None, no_improvement_count=0,
+                last_validation_epoch=0, stopped=False)
+
+
+def advance_early_stopping(state, score, epoch, options):
+    """Compare against prior all-time best, not gamma or a moving training metric.
+
+    Count validations even before min_epochs, but forbid stopping until then.
+    A small new record updates best_metric, without resetting patience unless it
+    strictly exceeds the PREVIOUS all-time best by min_delta.
+    """
+    config = options['early_stopping']
+    interval = options['validation_every']
+    if score is None or not math.isfinite(score) or not 0 <= score <= 1:
+        raise ValueError('early stopping requires finite full-dev Dice')
+    if state['stopped'] or epoch != state['last_validation_epoch'] + interval:
+        raise ValueError('early stopping validation history is not consecutive')
+    best = state['best_metric']
+    significant = best is None or score > best + config['min_delta']
+    result = dict(state, last_validation_epoch=epoch,
+                  no_improvement_count=0 if significant else state['no_improvement_count'] + 1)
+    if best is None or score > best:
+        result.update(best_metric=score, best_epoch=epoch)
+    result['stopped'] = (epoch >= config['min_epochs'] and
+                        result['no_improvement_count'] * interval >= config['patience_epochs'])
+    return result

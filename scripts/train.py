@@ -62,7 +62,8 @@ def execute(args):
     from organ_relation.training.console import TrainingConsole
 
     config = read_json(args.config)
-    formal = config.get('protocol') == 'development_160_40_v1'
+    formal = config.get('protocol') in ('development_160_40_v1', 'development_160_40_v2')
+    updated_protocol = config.get('protocol') == 'development_160_40_v2'
     if args.extend_epochs is not None and (not formal or args.resume is None or args.extend_to is not None or args.extend_epochs < 1):
         raise ValueError('--extend-epochs requires a formal --resume, and cannot combine with --extend-to')
     if formal and (args.prepare_split or (args.cases and not args.preflight_backward)):
@@ -124,9 +125,13 @@ def execute(args):
                 or data['role'] != 'development_train' or data['candidate'] != 'A'
                 or any(data[k] is not None for k in ('train_cases', 'train_limit', 'validation_cases', 'validation_limit'))
                 or options.get('cadence_unit') != 'epoch' or options['validation_role'] != 'internal_dev'
-                or options['checkpoint_every'] != 1 or options['validation_every'] != 10
-                or options['max_epochs'] != 300 or options['max_steps'] is not None):
+                or options['checkpoint_every'] != 1 or options['validation_every'] != (5 if updated_protocol else 10)
+                or options['max_epochs'] != (500 if updated_protocol else 300) or options['max_steps'] is not None):
             raise ValueError('invalid full-development A/C protocol')
+        if updated_protocol and (options.get('loss_observation') != 'monitor_only'
+                or options.get('early_stopping') != dict(min_epochs=100, patience_epochs=25, min_delta=1e-4,
+                                                        monitor='dev_mean_foreground_hard_dice')):
+            raise ValueError('invalid monitor-only / early stopping protocol')
     if data['role'] not in ('development_train', 'final_train'):
         raise ValueError('validation/test roles cannot train')
     if formal and args.preflight_backward:
@@ -278,6 +283,8 @@ def execute(args):
                         randomness=dict(model_seed=options['seed'], sampler_seed=options['seed'],
                                         loader_seed=options['seed'] + 1, global_seed=options['seed']),
                         lr_policy='fixed_no_scheduler_no_early_stopping')
+        if updated_protocol:
+            identity.update(lr_policy='fixed_no_scheduler', early_stopping=options['early_stopping'])
     if mode == 'monai_relation_unet':
         identity.update(relation_enabled=True, relation=config['relation'], coarse_supervision=config['coarse_supervision'])
         identity['model']['bottleneck_path'] = BOTTLENECK_PATH

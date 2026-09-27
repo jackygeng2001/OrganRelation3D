@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Full-development MONAI reference A-spacing 160/40 comparison; 300 epochs.",
+  "purpose": "Full-development MONAI reference A-spacing fixed 160/40; max 500 epochs with dev early stopping.",
   "baseline_config": "baseline.json",
   "selection_config": "ct_stats.json",
   "split_artifact": "../runs/splits/development_160_40.json",
@@ -32,7 +32,7 @@
   },
   "training": {
     "max_steps": null,
-    "max_epochs": 300,
+    "max_epochs": 500,
     "batch_size": 1,
     "num_workers": 0,
     "seed": 20260925,
@@ -41,11 +41,18 @@
     "scheduler": null,
     "checkpoint_every": 1,
     "diagnostics_every": 1,
-    "validation_every": 10,
+    "validation_every": 5,
     "validation_role": "internal_dev",
     "eta_window": 20,
     "eta_warmup": 5,
-    "cadence_unit": "epoch"
+    "cadence_unit": "epoch",
+    "loss_observation": "monitor_only",
+    "early_stopping": {
+      "min_epochs": 100,
+      "patience_epochs": 25,
+      "min_delta": 0.0001,
+      "monitor": "dev_mean_foreground_hard_dice"
+    }
   },
   "mode": "monai_reference_unet",
   "model": {
@@ -104,6 +111,6 @@
     "lambda_ce": 1.0,
     "label_smoothing": 0.0
   },
-  "protocol": "development_160_40_v1",
+  "protocol": "development_160_40_v2",
   "expected_split_hash": "7d308eca4f7324f0e899c7416a45a03f8dfbec5e867e5ed6018353e96541468c"
 }

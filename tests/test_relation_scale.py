@@ -44,6 +44,12 @@ class RelationScaleTests(unittest.TestCase):
         old, new = config(False), config()
         self.assertTrue(new['relation'].pop('learnable_relation_scale'))
         self.assertEqual(new['relation'].pop('relation_scale_init'), .1)
+        # Current formal horizon/observation policy changed by explicit request;
+        # retain the old non-gated config as a historical protocol fixture.
+        baseline = json.loads((ROOT/'configs/train_monai_reference_A_160_40.json').read_text())
+        self.assertEqual(new['training'], baseline['training'])
+        for key in ('training', 'protocol', 'purpose'):
+            new[key] = old[key]
         self.assertEqual(old, new)
         self.assertNotIn('learnable_relation_scale', json.loads((ROOT / 'configs/train_monai_relation_whole_volume_overfit.json').read_text())['relation'])
 
@@ -157,7 +163,7 @@ class RelationScaleTests(unittest.TestCase):
 
     def test_resume_scalar_optimizer_trajectory_logs_and_tb_only_two_new_tags(self):
         fixture=relation_tests.MonaiRelationTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
-        cfg=config();cfg['training'].update(max_epochs=None,max_steps=2)
+        cfg=config();cfg['training'].update(max_epochs=None,max_steps=2,early_stopping=None)
         with patch.object(fixture,'proposed_config',return_value=cfg):
             whole=fixture.trainer(self.root/'whole');self.f.quiet_run(whole)
             first=fixture.trainer(self.root/'resume');self.f.quiet_run(first,stop_after=1)
@@ -173,13 +179,15 @@ class RelationScaleTests(unittest.TestCase):
         other=self.f.rows(whole.run_dir)
         for r,s in zip(rows,other): self.assertEqual(r.get('relation_scale'),s.get('relation_scale'))
         train=[r for r in rows if r['phase']=='train']
-        self.assertEqual(set(scalar_values(train[0])), {'Relation/Gamma','Relation/WritebackToFeatureNorm'})
+        self.assertEqual(scalar_values(train[0]), {})
+        epoch = next(r for r in rows if r['phase']=='train_epoch')
+        self.assertTrue({'Relation/Gamma','Relation/WritebackToFeatureNorm'} <= set(scalar_values(epoch)))
         self.assertIn('writeback_to_feature_norm',train[0]['relation_scale'])
         self.assertIn('diagnostics',train[0])
         self.assertTrue(any(r.get('relation_scale_cases') for r in rows))
         events=EventAccumulator(str(second.board.directory),size_guidance={'scalars':0}).Reload()
         for tag in ('Relation/Gamma','Relation/WritebackToFeatureNorm'):
-            self.assertEqual([e.step for e in events.Scalars(tag)],[1,2])
+            self.assertEqual([e.step for e in events.Scalars(tag)],[2])
         self.assertFalse(any(t.startswith(('GradNorm/','System/','Optimizer/')) for t in events.Tags()['scalars']))
         bad=copy.deepcopy(second.identity);bad['relation']['relation_scale_init']=.2
         with self.assertRaises(ValueError):load_checkpoint(second.run_dir/'last.ckpt',bad)

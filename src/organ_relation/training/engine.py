@@ -55,7 +55,8 @@ def weights_hash(model):
 
 def diagnostic_parameter_groups(model):
     from ..models.monai_relation import MonaiRelationUNet
-    if isinstance(model, MonaiRelationUNet):
+    from ..models.monai_coarse_aux import MonaiCoarseAuxUNet
+    if isinstance(model, (MonaiRelationUNet, MonaiCoarseAuxUNet)):
         return model.diagnostic_parameter_groups()
     return {name: [(f'{name}.{n}', p) for n, p in module.named_parameters()]
             for name, module in model.named_children()}
@@ -149,10 +150,10 @@ class Trainer:
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
         self.mode = identity.get('mode', 'organ_relation_joint')
-        if self.mode in ('monai_reference_unet', 'monai_relation_unet'):
+        if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
             from .monai_reference import MonaiReferenceLoss
             from .monai_relation import MonaiRelationLoss
-            expected = MonaiRelationLoss if self.mode == 'monai_relation_unet' else MonaiReferenceLoss
+            expected = MonaiReferenceLoss if self.mode == 'monai_reference_unet' else MonaiRelationLoss
             if not isinstance(criterion, expected) or criterion.constructor != identity.get('loss'):
                 raise ValueError('MONAI criterion must match reference identity')
             if any(k in identity for k in ('ce_reduction_mode', 'foreground_ce_reduction',
@@ -165,6 +166,13 @@ class Trainer:
                         or identity.get('relation_enabled') is not True
                         or identity.get('coarse_supervision') != dict(lambda_c=criterion.lambda_c, align_corners=criterion.align_corners)):
                     raise ValueError('MONAI relation model/loss must match identity')
+            if self.mode == 'monai_coarse_aux':
+                from ..models.monai_coarse_aux import MonaiCoarseAuxUNet
+                if (not isinstance(model, MonaiCoarseAuxUNet)
+                        or model.coarse_config != identity.get('coarse_head')
+                        or any(key in identity for key in ('relation', 'relation_enabled'))
+                        or identity.get('coarse_supervision') != dict(lambda_c=criterion.lambda_c, align_corners=criterion.align_corners)):
+                    raise ValueError('MONAI coarse-only model/loss must match identity')
             self.ce_reduction_mode = 'monai_cross_entropy'
             self.foreground_ce_reduction = 'voxel_mean'
             self.ce_weights = {}
@@ -308,9 +316,9 @@ class Trainer:
                         image, label = self._batch(self.validation_dataset, index, validation=True)
                         output = self.model(image)
                         record = hard_dice(output.final_logits.argmax(1)[0], label[0])
-                        if self.mode in ('monai_reference_unet', 'monai_relation_unet'):
+                        if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
                             from .monai_reference import reference_diagnostics
-                            if self.mode == 'monai_relation_unet':
+                            if self.mode in ('monai_relation_unet', 'monai_coarse_aux'):
                                 from .monai_relation import relation_diagnostics
                                 record['diagnostic'] = relation_diagnostics(output, label, self.criterion, record)
                             else:
@@ -338,7 +346,7 @@ class Trainer:
         row['ce_reduction_mode'] = self.ce_reduction_mode
         row['foreground_ce_reduction'] = self.foreground_ce_reduction
         row.update(self.ce_weights)
-        if self.mode in ('backbone_only_final', 'monai_reference_unet', 'monai_relation_unet'):
+        if self.mode in ('backbone_only_final', 'monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
             row['diagnostic_cases'] = {case: record['diagnostic']
                                        for case, record in zip(self.validation_case_ids, records)}
         elif self.ce_reduction_mode == 'foreground_background_balanced':
@@ -414,7 +422,7 @@ class Trainer:
             image, label = self._batch(self.dataset, index)
             output = self.model(image)  # Supervision never enters model.forward.
             loss = (self.criterion(output.coarse_logits, output.final_logits, label)
-                    if self.mode in ('organ_relation_joint', 'monai_relation_unet') else self.criterion(output.final_logits, label))
+                    if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux') else self.criterion(output.final_logits, label))
             loss.total.backward()
             check = bool(self.options['diagnostics_every'] and step % self.options['diagnostics_every'] == 0)
             diagnostics = gradient_diagnostics(self.model) if check else None
@@ -436,14 +444,14 @@ class Trainer:
                        final={k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
                        soft_dice_per_organ=loss.final.dice_per_class.detach().cpu()[0].tolist(),
                        diagnostics=diagnostics)
-            if self.mode in ('monai_reference_unet', 'monai_relation_unet'):
+            if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
                 from ..models.monai_reference import padding_geometry
                 row['geometry'] = padding_geometry(image.shape[2:])
             row['mode'] = self.mode
             row['ce_reduction_mode'] = self.ce_reduction_mode
             row['foreground_ce_reduction'] = self.foreground_ce_reduction
             row.update(self.ce_weights)
-            if self.mode in ('organ_relation_joint', 'monai_relation_unet'):
+            if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux'):
                 row['coarse'] = {k: getattr(loss.coarse, k).detach().item()
                                  for k in ('ce', 'dice_loss', 'segmentation')}
             del image, label, output, loss, before

@@ -24,7 +24,7 @@ def scalar_values(row):
         if 'coarse' in row:
             values.update({'Train/Coarse_CE': row['coarse']['ce'],
                            'Train/Coarse_DiceLoss': row['coarse']['dice_loss']})
-        if row.get('mode') in ('monai_reference_unet', 'monai_relation_unet'):
+        if row.get('mode') in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
             for name, value in zip(ORGAN_NAMES, row['soft_dice_per_organ']):
                 values['TrainSoftDice/' + name] = value
         for name in ('allocated', 'reserved'):
@@ -42,7 +42,7 @@ def scalar_values(row):
         if row.get('diagnostic_cases'):
             cases = row['diagnostic_cases'].values()
             values[f'{prefix}/FinalSoftDice_Mean'] = sum(c['final_soft_dice'] for c in cases) / len(cases)
-        if row.get('mode') in ('monai_reference_unet', 'monai_relation_unet') and row.get('diagnostic_cases'):
+        if row.get('mode') in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux') and row.get('diagnostic_cases'):
             cases = list(row['diagnostic_cases'].values())
             for key in ('total_loss', 'ce_loss', 'dice_loss', 'predicted_foreground_voxels',
                         'foreground_true_positive_voxels', 'gt_foreground_voxels',
@@ -52,13 +52,20 @@ def scalar_values(row):
                     values[f'{prefix}/' + key] = sum(present) / len(present)
             for i, name in enumerate(ORGAN_NAMES):
                 values[f'{prefix}SoftDice/' + name] = sum(c['soft_dice_per_organ'][i] for c in cases) / len(cases)
-        if row.get('mode') == 'monai_relation_unet' and row.get('diagnostic_cases'):
+        if row.get('mode') in ('monai_relation_unet', 'monai_coarse_aux') and row.get('diagnostic_cases'):
             coarse = [c['coarse'] for c in row['diagnostic_cases'].values()]
             for key in ('total_loss', 'ce_loss', 'dice_loss', 'final_soft_dice'):
                 values[f'{prefix}Coarse/' + key] = sum(c[key] for c in coarse) / len(coarse)
             present = [c['hard_metrics']['mean_dice'] for c in coarse if c['hard_metrics']['mean_dice'] is not None]
             if present:
                 values[f'{prefix}Coarse/HardDice_Mean'] = sum(present) / len(present)
+            if row.get('mode') == 'monai_coarse_aux':
+                for i, name in enumerate(ORGAN_NAMES):
+                    values[f'{prefix}CoarseSoftDice/' + name] = sum(c['soft_dice_per_organ'][i] for c in coarse) / len(coarse)
+                    present = [c['hard_metrics']['organs'][i]['dice'] for c in coarse
+                               if c['hard_metrics']['organs'][i]['dice'] is not None]
+                    if present:
+                        values[f'{prefix}CoarseDice/' + name] = sum(present) / len(present)
         for organ in metrics['organs']:
             values[f'{prefix}Dice/{ORGAN_NAMES[organ["label"]-1]}'] = organ['mean_dice']
         return {k: v for k, v in values.items() if v is not None}

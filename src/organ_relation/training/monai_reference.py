@@ -91,16 +91,18 @@ def preflight_backward(model, criterion, dataset, identity):
             model=identity['model'], loss=identity['loss'], preprocessing=identity['preprocessing'],
             environment=identity['environment'], provenance=identity['provenance']['git'])), flush=True)
         output = measure('forward', lambda: model(image))
-        joint = identity['mode'] == 'monai_relation_unet'
+        joint = identity['mode'] in ('monai_relation_unet', 'monai_coarse_aux')
         if joint:
             groups = model.diagnostic_parameter_groups()
             counts = {name: sum(p.numel() for _, p in params) for name, params in groups.items()}
             baseline = counts['encoder'] + counts['decoder']
-            print('relation_geometry', json.dumps(dict(
+            coarse_only = identity['mode'] == 'monai_coarse_aux'
+            branch_config = {'coarse_head': identity['coarse_head']} if coarse_only else {'relation': identity['relation']}
+            print('coarse_aux_geometry' if coarse_only else 'relation_geometry', json.dumps(dict(
                 bottleneck_shape=[image.shape[0], model.bottleneck.channels, *output.coarse_logits.shape[2:]],
                 baseline_parameters=baseline, added_parameters=sum(counts.values())-baseline,
                 total_parameters=sum(counts.values()), groups=counts,
-                relation=identity['relation'], coarse_supervision=identity['coarse_supervision'])), flush=True)
+                **branch_config, coarse_supervision=identity['coarse_supervision'])), flush=True)
         loss = measure('loss', lambda: criterion(output.coarse_logits, output.final_logits, label)
                        if joint else criterion(output.final_logits, label))
         measure('backward', loss.total.backward)
@@ -109,7 +111,7 @@ def preflight_backward(model, criterion, dataset, identity):
         zeros = [n for n, p in model.named_parameters() if p.grad is not None and not p.grad.any()]
         if joint:
             from .engine import gradient_diagnostics
-            print('relation_gradients', json.dumps(gradient_diagnostics(model)), flush=True)
+            print('coarse_aux_gradients' if coarse_only else 'relation_gradients', json.dumps(gradient_diagnostics(model)), flush=True)
             print('coarse_loss', json.dumps(dict(total=loss.coarse.segmentation.item(),
                 ce=loss.coarse.ce.item(), dice=loss.coarse.dice_loss.item())), flush=True)
         print('preflight_result', json.dumps(dict(status='passed' if not missing and not nonfinite else 'failed',

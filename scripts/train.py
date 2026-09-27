@@ -64,9 +64,9 @@ def execute(args):
     if config.get('schema_version') != 1:
         raise ValueError('unsupported training config schema')
     mode = config.get('mode', 'organ_relation_joint')
-    if mode not in ('organ_relation_joint', 'backbone_only_final', 'monai_reference_unet', 'monai_relation_unet'):
+    if mode not in ('organ_relation_joint', 'backbone_only_final', 'monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
         raise ValueError('unsupported model/loss mode')
-    reference = mode in ('monai_reference_unet', 'monai_relation_unet')
+    reference = mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux')
     if args.preflight_backward and (not reference or args.resume or args.extend_to or args.stop_after or args.run_dir or args.prepare_split):
         raise ValueError('reference preflight requires no run-dir/resume/extension/stop-after/split preparation')
     if reference and any(k in config for k in ('ce_reduction_mode', 'ce_background_weight', 'ce_foreground_weight', 'foreground_ce_reduction')):
@@ -190,6 +190,14 @@ def execute(args):
             model = MonaiRelationUNet(model_config, config['input_processing'],
                                       relation_enabled=True, relation_config=config['relation'])
             criterion = MonaiRelationLoss(loss_config, **config['coarse_supervision'])
+        elif mode == 'monai_coarse_aux':
+            from organ_relation.models.monai_coarse_aux import MonaiCoarseAuxUNet
+            from organ_relation.models.monai_relation import BOTTLENECK_PATH
+            from organ_relation.training.monai_relation import MonaiRelationLoss
+            if any(key in config for key in ('relation', 'relation_enabled')):
+                raise ValueError('coarse-only mode must not contain relation configuration')
+            model = MonaiCoarseAuxUNet(model_config, config['input_processing'], coarse_head=config['coarse_head'])
+            criterion = MonaiRelationLoss(loss_config, **config['coarse_supervision'])
         else:
             model = MonaiReferenceUNet(model_config, config['input_processing'])
             criterion = MonaiReferenceLoss(loss_config)
@@ -238,6 +246,9 @@ def execute(args):
         identity['environment']['packages']['monai'] = monai.__version__
     if mode == 'monai_relation_unet':
         identity.update(relation_enabled=True, relation=config['relation'], coarse_supervision=config['coarse_supervision'])
+        identity['model']['bottleneck_path'] = BOTTLENECK_PATH
+    if mode == 'monai_coarse_aux':
+        identity.update(coarse_head=config['coarse_head'], coarse_supervision=config['coarse_supervision'])
         identity['model']['bottleneck_path'] = BOTTLENECK_PATH
     # Normalize tuples to JSON lists so saved manifest and checkpoint identities agree.
     identity = json.loads(json.dumps(identity))

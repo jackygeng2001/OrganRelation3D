@@ -407,3 +407,33 @@ modules. JSONL and checkpoints retain strict resume identity including relation
 configuration and coarse supervision; TensorBoard is an observer. CPU acceptance
 is included in `--suite monai` and `--suite all`. A successful preflight alone does
 not establish learning quality or a benefit over the MONAI reference.
+
+## Coarse-only MONAI ablation
+
+`configs/train_monai_coarse_aux_whole_volume_overfit.json` selects the independent
+`monai_coarse_aux` mode. The official MONAI backbone is initialized first with the
+same seed as reference, then only a 128→16 CoarseHead is added (2,064 parameters;
+1,217,737 total). Its bottleneck adapter returns the **same F tensor object** to
+the original MONAI skip concatenation/decoder. It creates no nodes, relation,
+GRU, write-back or fusion. Existing `relation_enabled=False` remains the full
+bypass without coarse supervision; its semantics are unchanged.
+
+The two-output loss and alignment are reused unchanged from the MONAI relation
+experiment: coarse logits interpolate directly from the bottleneck grid to the
+original unpadded GT shape, then enter official DiceCELoss. Final logits remove
+only the existing boundary padding. `L = L_final + 0.5 * L_coarse`; all other
+reference model, preprocessing, optimizer, seed and 200-step settings are retained.
+This experiment starts from initialization, not an A/C checkpoint.
+
+Use `scripts/train.py` with this config, `--cases amos_0109`, the existing data
+root/split, and `--preflight-backward` for one forward/loss/backward without an
+optimizer step or run writes. After acceptance, replace `--preflight-backward`
+with `--run-dir runs/monai_coarse_aux_amos0109_B_200`. Keep the same ROCm process
+backend environment as reference. Resume only this run's own `last.ckpt`.
+
+Every 25 steps, both branches record DiceCE/CE/DiceLoss, mean and per-class
+hard/soft Dice; final foreground counts, class-correct foreground TP and
+probability diagnostics are retained. Parameter diagnostics contain only encoder,
+decoder and coarse head. CPU tests cover exact initial backbone states, logits,
+final-only input/parameter gradients, the added coarse encoder gradient, unchanged
+F, official joint loss, checkpoint/RNG/order continuity and nonduplicated logs.

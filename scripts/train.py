@@ -29,6 +29,7 @@ def parser():
     p.add_argument('--split', type=Path, help='Existing fixed split artifact; never regenerated while training')
     p.add_argument('--resume', type=Path, help='Trusted checkpoint in the original run directory')
     p.add_argument('--extend-to', type=int, help='Explicitly increase the resumed run total; keep the original config unchanged')
+    p.add_argument('--extend-epochs', type=int, help='Epoch-cadence runs only: explicitly extend total epochs, keep config unchanged')
     p.add_argument('--prepare-split', type=Path, help='Only write a NEW 160/40 artifact, then exit; no voxels loaded')
     p.add_argument('--split-seed', type=int, default=20260925)
     p.add_argument('--cases', nargs='+', help='Explicit subset of the configured training role')
@@ -61,6 +62,11 @@ def execute(args):
     from organ_relation.training.console import TrainingConsole
 
     config = read_json(args.config)
+    formal = config.get('protocol') == 'development_160_40_v1'
+    if args.extend_epochs is not None and (not formal or args.resume is None or args.extend_to is not None or args.extend_epochs < 1):
+        raise ValueError('--extend-epochs requires a formal --resume, and cannot combine with --extend-to')
+    if formal and (args.prepare_split or (args.cases and not args.preflight_backward)):
+        raise ValueError('formal development cannot regenerate split or select a training subset')
     if config.get('schema_version') != 1:
         raise ValueError('unsupported training config schema')
     mode = config.get('mode', 'organ_relation_joint')
@@ -100,16 +106,39 @@ def execute(args):
     if split_path is None:
         raise ValueError('provide an existing --split; first use --prepare-split once')
     artifact = load_split(split_path)
+    frozen_split = None
+    if formal:
+        from organ_relation.training.development import verify_frozen_split
+        expected_path = (base / config['split_artifact']).resolve()
+        if split_path.resolve() != expected_path:
+            raise ValueError('formal run must use the configured frozen split path')
+        frozen_split = verify_frozen_split(split_path, artifact, config['expected_split_hash'])
     if artifact['manifest'] != manifest:
         raise ValueError('live official training manifest differs from frozen artifact')
     if not args.cpu_synthetic and (len(artifact['development']['train']), len(artifact['development']['internal_dev'])) != (160, 40):
         raise ValueError('real development split must be 160/40')
     data, runtime, options = config['data'], config['runtime'], config['training']
     validate_options(options)
+    if formal:
+        if (mode not in ('monai_reference_unet', 'monai_relation_unet')
+                or data['role'] != 'development_train' or data['candidate'] != 'A'
+                or any(data[k] is not None for k in ('train_cases', 'train_limit', 'validation_cases', 'validation_limit'))
+                or options.get('cadence_unit') != 'epoch' or options['validation_role'] != 'internal_dev'
+                or options['checkpoint_every'] != 1 or options['validation_every'] != 10
+                or options['max_epochs'] != 300 or options['max_steps'] is not None):
+            raise ValueError('invalid full-development A/C protocol')
     if data['role'] not in ('development_train', 'final_train'):
         raise ValueError('validation/test roles cannot train')
-    chosen = select_cases(artifact, data['role'], args.cases if args.cases else data['train_cases'],
-                          None if args.cases else data['train_limit'])
+    if formal and args.preflight_backward:
+        if args.cases != ['amos_0097']:
+            raise ValueError('formal preflight requires --cases amos_0097')
+        # Resource probe may use the known maximum from either development role.
+        chosen = [r for r in manifest['records'] if r['case_id'] == 'amos_0097']
+        if len(chosen) != 1:
+            raise ValueError('preflight case missing from official training pool')
+    else:
+        chosen = select_cases(artifact, data['role'], args.cases if args.cases else data['train_cases'],
+                              None if args.cases else data['train_limit'])
     val_records = []
     if options['validation_every']:
         if options['validation_role'] == 'train_monitor':
@@ -140,7 +169,7 @@ def execute(args):
         from organ_relation.training.monai_reference import MonaiReferenceLoss, preflight_backward
         model_config = config['model']
         model_identity = dict(constructor='monai.networks.nets.UNet', **model_config)
-        if len(chosen) != 1 or (not args.cpu_synthetic and chosen[0]['case_id'] != 'amos_0109'):
+        if not formal and (len(chosen) != 1 or (not args.cpu_synthetic and chosen[0]['case_id'] != 'amos_0109')):
             raise ValueError('reference diagnostic requires exactly amos_0109 supplied by --cases')
     else:
         model_config = SegmentorConfig(**read_json(base / config['model_config'])['model'])
@@ -244,6 +273,11 @@ def execute(args):
                         geometry=reference_geometry)
         identity['preprocessing']['reference_after_hu'] = config['input_processing']
         identity['environment']['packages']['monai'] = monai.__version__
+    if formal:
+        identity.update(protocol=config['protocol'], frozen_split=frozen_split,
+                        randomness=dict(model_seed=options['seed'], sampler_seed=options['seed'],
+                                        loader_seed=options['seed'] + 1, global_seed=options['seed']),
+                        lr_policy='fixed_no_scheduler_no_early_stopping')
     if mode == 'monai_relation_unet':
         identity.update(relation_enabled=True, relation=config['relation'], coarse_supervision=config['coarse_supervision'])
         identity['model']['bottleneck_path'] = BOTTLENECK_PATH
@@ -262,7 +296,8 @@ def execute(args):
                       device=runtime['device'], options=options, identity=identity, run_dir=args.run_dir,
                       validation_dataset=val_data, validation_case_ids=[r['case_id'] for r in val_records],
                       resume=args.resume, console=TrainingConsole(enabled=not args.quiet_console),
-                      tensorboard=not args.no_tensorboard, extend_to=args.extend_to)
+                      tensorboard=not args.no_tensorboard,
+                      extend_to=args.extend_epochs * len(chosen) if args.extend_epochs is not None else args.extend_to)
     trainer.run(stop_after=args.stop_after)
 
 

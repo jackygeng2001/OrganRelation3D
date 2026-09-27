@@ -82,11 +82,13 @@ def preflight_backward(model, criterion, dataset, identity):
         print(name, json.dumps(stages[name]), flush=True)
         return value
     try:
-        sample = dataset[0]
-        image, label = sample.image.unsqueeze(0).to(device), sample.label.unsqueeze(0).to(device)
+        sample = measure('preprocess', lambda: dataset[0])
+        image, label = measure('transfer', lambda: (sample.image.unsqueeze(0).to(device), sample.label.unsqueeze(0).to(device)))
         if identity['training']['memory_format'] == 'channels_last_3d':
             image = image.contiguous(memory_format=torch.channels_last_3d)
         print('reference_preflight', json.dumps(dict(mode=identity['mode'],
+            case_ids=[r['case_id'] for r in identity.get('data', {}).get('actual_train', [])],
+            resampled_shape=list(image.shape[2:]), padded_shape=padding_geometry(image.shape[2:])['padded_shape'],
             geometry=padding_geometry(image.shape[2:]), parameter_count=identity['parameter_count'],
             model=identity['model'], loss=identity['loss'], preprocessing=identity['preprocessing'],
             environment=identity['environment'], provenance=identity['provenance']['git'])), flush=True)
@@ -115,11 +117,18 @@ def preflight_backward(model, criterion, dataset, identity):
             print('coarse_loss', json.dumps(dict(total=loss.coarse.segmentation.item(),
                 ce=loss.coarse.ce.item(), dice=loss.coarse.dice_loss.item())), flush=True)
         print('preflight_result', json.dumps(dict(status='passed' if not missing and not nonfinite else 'failed',
+            oom=False, finite_gradients=not missing and not nonfinite,
+            peak_allocated_bytes=max((s['peak_allocated_bytes'] or 0 for s in stages.values())) if device.type == 'cuda' else None,
+            peak_reserved_bytes=max((s['peak_reserved_bytes'] or 0 for s in stages.values())) if device.type == 'cuda' else None,
             total_loss=loss.total.item(), ce_loss=loss.final.ce.item(), dice_loss=loss.final.dice_loss.item(),
             missing_gradients=missing, nonfinite_gradients=nonfinite, zero_gradient_tensors=zeros,
-            forward_loss_backward_seconds=sum(s['seconds'] for s in stages.values()), optimizer_steps=0)), flush=True)
+            forward_loss_backward_seconds=sum(stages[n]['seconds'] for n in ('forward', 'loss', 'backward')), optimizer_steps=0)), flush=True)
         if missing or nonfinite:
             raise ValueError('invalid gradients in MONAI reference preflight')
     except (RuntimeError, ValueError) as exc:
-        print('preflight_failed', json.dumps(dict(stage=active, error=str(exc), stages=stages)), flush=True)
+        print('preflight_failed', json.dumps(dict(stage=active, error=str(exc), stages=stages,
+            oom=isinstance(exc, torch.OutOfMemoryError) or 'out of memory' in str(exc).lower(),
+            peak_allocated_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else None,
+            peak_reserved_bytes=torch.cuda.max_memory_reserved(device) if device.type == 'cuda' else None,
+            optimizer_steps=0)), flush=True)
         raise

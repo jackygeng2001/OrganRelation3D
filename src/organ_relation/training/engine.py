@@ -21,9 +21,12 @@ from .extension import resolve_horizon
 from .state import (ScalarLog, atomic_json, capture_rng, digest, load_checkpoint,
                     restore_rng, save_checkpoint)
 from .tensorboard import TensorBoardObserver
+from .development import cadence_due, summarize_branches, validation_branches
 
 
 def validate_options(options):
+    if options.get('cadence_unit', 'step') not in ('step', 'epoch'):
+        raise ValueError('invalid cadence_unit')
     for key in ('checkpoint_every', 'diagnostics_every', 'validation_every'):
         if type(options[key]) is not int or options[key] < (1 if key == 'checkpoint_every' else 0):
             raise ValueError(f'invalid {key}')
@@ -203,6 +206,9 @@ class Trainer:
         self.dataset, self.case_ids = dataset, list(case_ids)
         self.validation_dataset, self.validation_case_ids = validation_dataset, list(validation_case_ids)
         self.device, self.options, self.identity = torch.device(device), options, identity
+        self.epoch_mode = options.get('cadence_unit') == 'epoch'
+        if self.epoch_mode and self.mode not in ('monai_reference_unet', 'monai_relation_unet'):
+            raise ValueError('epoch observation currently requires MONAI A/C')
         self.run_dir = Path(run_dir)
         self.console = console if console is not None else TrainingConsole(enabled=False)
         self.board = TensorBoardObserver(self.run_dir, enabled=tensorboard)
@@ -219,6 +225,13 @@ class Trainer:
         self.epochs = math.ceil(self.total / len(dataset))
         self.extension_pending = extend_to is not None
         self.origin_identity = checkpoint.get('origin_identity', checkpoint['identity']) if checkpoint else identity
+        self.development_state = dict(epoch_cases=[], validation_history=[], best_dev=None)
+        if checkpoint and self.epoch_mode:
+            if 'development_state' not in checkpoint:
+                raise ValueError('missing development aggregate/checkpoint history')
+            self.development_state = checkpoint['development_state']
+            if len(self.development_state['epoch_cases']) != checkpoint['progress']['cursor']:
+                raise ValueError('epoch aggregate does not match committed case position')
         if checkpoint:
             self._validate_progress(checkpoint)
             run = json.loads((self.run_dir / 'run.json').read_text(encoding='utf-8'))
@@ -280,14 +293,22 @@ class Trainer:
     def checkpoint(self):
         if not self.state['global_step']:
             return  # No completed optimizer step yet.
-        save_checkpoint(self.run_dir / 'last.ckpt', dict(
+        payload = dict(
             schema_version=1, run_id=self.run_id, identity=self.identity,
             origin_identity=self.origin_identity, horizon=self.horizon,
             model=self.model.state_dict(), optimizer=self.optimizer.state_dict(), scheduler=None,
             progress=self.state, rng=capture_rng(self.device),
             sampler_generator=self.sampler_generator.get_state(),
             loader_generator=self.loader_generator.get_state(),
-            log=self.log.position(self.state['global_step'])))
+            log=self.log.position(self.state['global_step']))
+        if self.epoch_mode:
+            payload['development_state'] = self.development_state
+            best = self.development_state['best_dev']
+            # Best first, then last: a crash before last commits replays pending
+            # validation from its ledger and idempotently writes this best again.
+            if best and best['global_step'] == self.state['global_step'] and not self.state['pending_validation']:
+                save_checkpoint(self.run_dir / 'best-dev.ckpt', payload)
+        save_checkpoint(self.run_dir / 'last.ckpt', payload)
         self.board.flush()  # Observer failure never invalidates a saved checkpoint.
 
     def _validation(self):
@@ -352,6 +373,17 @@ class Trainer:
         elif self.ce_reduction_mode == 'foreground_background_balanced':
             row['ce_diagnostic_cases'] = {case: record['ce_branches']
                                           for case, record in zip(self.validation_case_ids, records)}
+        if self.epoch_mode:
+            row['observation_profile'] = 'development_v1'
+            row['epoch_metrics'] = summarize_branches([validation_branches(r) for r in records])
+            score = row['metrics']['mean_case_dice']
+            best = self.development_state['best_dev']
+            improved = score is not None and (best is None or score > best['score'])
+            row['best_dev_improved'] = improved
+            if improved:
+                self.development_state['best_dev'] = dict(score=score, epoch=self.state['epoch'], global_step=step)
+            self.development_state['validation_history'].append(dict(
+                epoch=self.state['epoch'], global_step=step, epoch_metrics=row['epoch_metrics'], improved=improved))
         self.log.append(row)
         self.board.record(row)
         self.state['pending_validation'] = False
@@ -424,7 +456,8 @@ class Trainer:
             loss = (self.criterion(output.coarse_logits, output.final_logits, label)
                     if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux') else self.criterion(output.final_logits, label))
             loss.total.backward()
-            check = bool(self.options['diagnostics_every'] and step % self.options['diagnostics_every'] == 0)
+            epoch_complete = self.state['cursor'] + 1 == len(self.dataset)
+            check = cadence_due(self.options, 'diagnostics_every', step, epoch, epoch_complete)
             diagnostics = gradient_diagnostics(self.model) if check else None
             before = {n: p.detach().clone() for n, p in self.model.named_parameters()} if check else None
             lr = self.optimizer.param_groups[0]['lr']
@@ -454,6 +487,22 @@ class Trainer:
             if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux'):
                 row['coarse'] = {k: getattr(loss.coarse, k).detach().item()
                                  for k in ('ce', 'dice_loss', 'segmentation')}
+            if self.epoch_mode:
+                # Observe this same forward, before freeing it; no extra model
+                # call or stochastic sampling. Store only case scalar records.
+                with torch.no_grad():
+                    branches = dict(total_loss=row['total_loss'], final=dict(
+                        loss=row['final']['segmentation'], soft_per_organ=row['soft_dice_per_organ'],
+                        hard=hard_dice(output.final_logits.argmax(1)[0], label[0])))
+                    if self.mode == 'monai_relation_unet':
+                        coarse = self.criterion.align_coarse(output.coarse_logits, label)
+                        branches['coarse'] = dict(loss=row['coarse']['segmentation'],
+                            soft_per_organ=loss.coarse.dice_per_class[0].detach().cpu().tolist(),
+                            hard=hard_dice(coarse.argmax(1)[0], label[0]))
+                        del coarse
+                row['branch_metrics'] = branches
+                row['observation_profile'] = 'development_v1'
+                self.development_state['epoch_cases'].append(branches)
             del image, label, output, loss, before
             self._sync()
             elapsed = time.perf_counter() - started
@@ -470,10 +519,17 @@ class Trainer:
             self.log.append(row)
             self.board.record(row)
             self.console.train_step(row)
-            due = bool(self.options['validation_every'] and step % self.options['validation_every'] == 0)
+            if self.epoch_mode and epoch_complete:
+                summary = dict(run_id=self.run_id, phase='train_epoch', epoch=epoch, global_step=step,
+                    mode=self.mode, observation_profile='development_v1',
+                    epoch_metrics=summarize_branches(self.development_state['epoch_cases']))
+                self.log.append(summary)
+                self.board.record(summary)
+                self.development_state['epoch_cases'] = []
+            due = cadence_due(self.options, 'validation_every', step, epoch, epoch_complete)
             self.state['pending_validation'] = due
             invocation_done = stop_after is not None and step-start_step >= stop_after
-            if step % self.options['checkpoint_every'] == 0 or due or not remaining or invocation_done:
+            if cadence_due(self.options, 'checkpoint_every', step, epoch, epoch_complete) or due or not remaining or invocation_done:
                 self.checkpoint()
             if due:
                 self._validation()

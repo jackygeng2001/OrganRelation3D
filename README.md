@@ -341,7 +341,68 @@ monitor 新增 `foreground_ce_reduction`、`present_foreground_class_count`、`p
 
 foreground reduction 纳入 run/checkpoint 身份；历史字段缺失只等价于 voxel_mean，不重写旧 origin 或 run.json。不同 reduction 禁止 resume/受控延长，Git/source provenance 仍严格校验，不提供跨版本绕过。macro 新 run 自身可正常断点续训。
 
-## External MONAI whole-volume reference
+## Full-development A/C training (current phase)
+
+Use `configs/train_monai_reference_A_160_40.json` (A) and
+`configs/train_monai_relation_A_160_40.json` (C). Both retain the existing MONAI
+8/16/32/64/128 backbone and final DiceCELoss, but use A spacing and the same
+160 training / 40 internal-dev cases. C retains the existing relation modules
+and 0.5 coarse auxiliary loss. Seed=20260925, FP32, batch=1, channels_last_3d,
+AdamW lr=3e-4 / weight_decay=0 / no scheduler. Budget is 300 epochs = 48,000 steps.
+
+The existing `runs/splits/development_160_40.json` must already be on Linux.
+Its **internal `split_hash`**, not the whole-file checksum, must equal
+`7d308eca4f7324f0e899c7416a45a03f8dfbec5e867e5ed6018353e96541468c`.
+The CLI verifies partition hashes, counts, roles and actual dataset manifest.
+It refuses subset training, split generation and a different configured split
+path. No split file is included or recreated by these configs.
+
+From the repository root, first set `AMOS_ROOT` to your existing dataset root.
+Run each maximum-case preflight separately, reviewing both results before any
+training (no run writes, no optimizer step, no automatic OOM fallback):
+
+```bash
+export PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0
+unset MIOPEN_DEBUG_CONV_GEMM MIOPEN_LOG_LEVEL MIOPEN_ENABLE_LOGGING_CMD
+python -B scripts/train.py --config configs/train_monai_reference_A_160_40.json \
+  --data-root "$AMOS_ROOT" --cases amos_0097 --preflight-backward
+python -B scripts/train.py --config configs/train_monai_relation_A_160_40.json \
+  --data-root "$AMOS_ROOT" --cases amos_0097 --preflight-backward
+```
+
+After both preflights are accepted, start fresh runs without `--cases`:
+
+```bash
+python -B scripts/train.py --config configs/train_monai_reference_A_160_40.json \
+  --data-root "$AMOS_ROOT" --run-dir runs/monai_reference_A_160_40
+python -B scripts/train.py --config configs/train_monai_relation_A_160_40.json \
+  --data-root "$AMOS_ROOT" --run-dir runs/monai_relation_A_160_40
+```
+
+Each epoch writes aggregate training metrics and atomic resumable `last.ckpt`.
+Epochs 10,20,...,300 evaluate all 40 dev cases and update `best-dev.ckpt` only on
+strict improvement in final mean case foreground hard Dice. There is no early
+stopping. Both checkpoints include optimizer/RNG/order/history/config/source
+state. Resume with the identical command plus `--resume <run-dir>/last.ckpt`;
+do not edit the original config or source during a run. Incomplete validation
+resumes via its per-case ledger. Epoch partial aggregates are also checkpointed.
+
+Only after an explicit curve review, extend **both** runs using their original
+configs and `--resume .../last.ckpt --extend-epochs 400` (later 500).
+These mean 64,000 / 80,000 total optimizer steps. Config/split/source checks stay
+strict; the extension is recorded in checkpoint horizon. This CLI does not
+launch or coordinate the other experiment automatically.
+
+Formal TensorBoard uses only `Loss/Train_Total`, `Loss/{Train,Val}_{Final,Coarse}`,
+`Dice/{Train,Val}_{Final,Coarse}_{Hard,Soft}`, and
+`Dice_Per_Class_Val_{Final,Coarse}/Class_01..15` (hard Dice).
+Coarse tags exist only for C. Train points are epoch means from the actual
+training forwards, not a second evaluation pass. Both-empty hard Dice values
+remain null (no fabricated zero scalar); all per-class soft Dice and detailed
+diagnostics remain in JSONL/ledger. Resume purges uncommitted events and replays
+committed same-step summaries. Historical diagnostic tags remain unchanged.
+
+## External MONAI whole-volume reference (historical single-case diagnostic)
 
 `configs/train_monai_reference_whole_volume_overfit.json` / `mode=monai_reference_unet` is an independent sanity reference, **not** the proposed model or a fair backbone ablation. It uses the installed official MONAI `UNet` (3D, 1→16, channels 8/16/32/64/128, four stride-2 levels, two residual units, InstanceNorm, PReLU, no dropout) and `DiceCELoss`. MONAI is optional for all existing modes; install the pinned reference dependency with `python -m pip install --no-deps -r environments/requirements-monai-reference.txt` in an already compatible backend environment. It does not select or replace PyTorch.
 

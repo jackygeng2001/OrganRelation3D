@@ -47,6 +47,8 @@
 
 ## 验收和交付
 
+- 当前 full-development A/C 协议以 `train_monai_reference_A_160_40.json` / `train_monai_relation_A_160_40.json` 为准：固定已有 160/40 split，严格校验 JSON 内 split_hash `7d308eca4f7324f0e899c7416a45a03f8dfbec5e867e5ed6018353e96541468c`，不得重新生成或用文件 checksum 替代。MONAI A/C 使用同 seed=20260925、A spacing、相同骨干/最终 MONAI DiceCELoss/AdamW 固定 LR；300 epochs。每 epoch 保存 last，每 10 epochs 全量 40-case dev，final mean case hard Dice 严格改善时保存 best-dev，无 early stopping。延长必须 A/C 同预算；保留原配置，用 `--resume ... --extend-epochs 400`（后续 500）。历史 single-case 配置和原自定义 JointLoss 不替换。
+
 - CPU 公式与梯度测试先行；阶段同步后在 AMD 验证 GPU、显存、梯度与真实数据。
 - 重要集成节点做 NVIDIA CUDA 兼容性测试，不要求每次修改三机全测。
 - 核心模块、完整集成和 AMD 短程运行通过后，才启动正式实验。

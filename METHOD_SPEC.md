@@ -2,6 +2,20 @@
 
 状态：算法公式与全局上下文已确认；实验配置待确认。2026-09-22 建立。
 
+## 当前 full-development A/C 实验协议（2026-09-27 用户确认）
+
+本节更新当前实验配置，保留下面的原始方法转录与历史 diagnostic 记录。A 为已有 MONAI reference；C 为同一个 MONAI backbone 加已有粗头、节点构建、动态关系/指定 GRU、节点回写与残差融合。骨干保持 channels=[8,16,32,64,128]、strides=[2,2,2,2]、num_res_units=2、InstanceNorm/PReLU；C 保持 Cr=8、K=2、da=4、Cg=6，不重新搜索关系参数。
+
+- 使用已有 `runs/splits/development_160_40.json`，其 JSON 内 `split_hash=7d308eca4f7324f0e899c7416a45a03f8dfbec5e867e5ed6018353e96541468c`。启动同时验证内部 manifest/partition 哈希、train=160、internal-dev=40、与实际 official training manifest 一致；不生成新 split，不从 validation 抽样。文件 SHA256 单独记录，不能代替 split_hash。
+- 当前 A-spacing 比较使用完整扫描、[1.5,1.5,3] mm、原 full-scan 几何/scaling；MONAI 输入层 clip HU [-1000,1000]、除以 1000 到 [-1,1]，按已验收实现对高端做最小 16 整除 padding，值 -1。一次整例前向；final logits 去除新增边界后，对原重采样网格 GT 计算 loss/metric。C 的节点域和 coarse logits 到 GT 网格的插值沿用既有 MONAI adapter；不修改几何、GT、不加有效域 mask。
+- A 与 C 的 final loss 使用同一个已实现 MONAI DiceCELoss：16 类标准 CE + 15 前景 Dice，smooth_nr=smooth_dr=1e-5、per-case、lambda_ce=lambda_dice=1。C coarse logits 先三线性插值到完整 GT 网格（align_corners=False），再用同一 MONAI loss，total=final+0.5*coarse。本比较不调用历史自定义概率 CE；原 JointLoss 及所有 diagnostic 配置保持原行为。
+- 统一 seed=20260925；model/Python/NumPy/PyTorch RNG 同种子，sampler 独立 generator 同种子，loader generator=seed+1。记录并恢复全部 RNG；不依据 seed 重建 split。A/C 骨干初始化保持已有逐 tensor 对齐行为。
+- FP32、batch=1、workers=0、ROCm/channels_last_3d；AdamW lr=3e-4、weight_decay=0，其他参数沿用已有配置。固定 LR，无 scheduler/AMP/activation checkpointing/gradient accumulation/early stopping。
+- 300 epochs×160 cases=48,000 optimizer steps。每 epoch 汇总训练同次 forward 的逐病例 loss、hard/soft Dice 并保存完整 last.ckpt；每 10 epochs 单次整例前向验证全部 40 例，无后处理。Hard Dice 使用已有 both-empty=null 的病例/器官协议，soft Dice 仍为既有 MONAI 定义；分别记录 final/coarse、均值及各器官结果。
+- best-dev 仅在 final mean-case foreground hard Dice 严格提高时更新，平局保留较早 checkpoint；它不触发停训。epoch 聚合进度、验证历史及 best 信息纳入完整恢复状态。验证病例 ledger、日志截断、TensorBoard purge/replay 机制继续保留。
+- 显式 `--extend-epochs 400` / `500` 仅改变 checkpoint horizon，不编辑 300-epoch 原配置或科学身份。是否延长由用户评估曲线后决定，A/C 必须同步延长。Checkpoint/source/config/split 不兼容继续拒绝。
+- 正式 TensorBoard 仅记录 epoch-level loss、hard/soft Dice 和 validation 逐类 hard Dice；逐类 soft Dice 与完整诊断保留 JSONL/ledger。新 profile 不改历史 diagnostic TensorBoard。No-update preflight 在最大例 amos_0097 测 forward/loss/backward，失败不自动改配置；不代表 optimizer 状态或长期训练显存已经通过。
+
 ## 依据
 
 主文档为项目原始资料《腹部多器官分割_方法章节.docx》第 3.1–3.5 节、式 (1)–(23)；《细化方法.docx》补充 GRU 展开公式。此处是工程转录，原文件不随项目重命名而改变。原 AGNN 的二维帧节点、5 轮更新、BCE+L1、空间两两注意力不是本方法定义。

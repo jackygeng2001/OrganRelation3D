@@ -51,7 +51,8 @@ def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume
             or type(horizon['total_steps']) is not int or not isinstance(horizon['extensions'], list)):
         raise ValueError('invalid checkpoint horizon')
     total, previous_step = original, 0
-    epoch_limit = options['max_epochs'] * case_count if options['max_epochs'] else None
+    epoch_mode = options.get('cadence_unit') == 'epoch'
+    epoch_limit = options['max_epochs'] * case_count if options['max_epochs'] and not epoch_mode else None
     origin = checkpoint.get('origin_identity', checkpoint['identity']) if checkpoint else identity
     origin_science, execution_science = copy.deepcopy(origin), copy.deepcopy(identity)
     previous_provenance = origin_science.pop('provenance')
@@ -62,7 +63,8 @@ def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume
         at, target = event['at_global_step'], event['total_steps']
         if (type(at) is not int or not previous_step <= at <= total or at < 1
                 or type(target) is not int or target <= total
-                or options['max_steps'] is None or target <= options['max_steps']
+                or (not epoch_mode and (options['max_steps'] is None or target <= options['max_steps']))
+                or (epoch_mode and target % case_count != 0)
                 or (epoch_limit is not None and target > epoch_limit)
                 or event['previous_total_steps'] != total
                 or event['max_epochs'] != options['max_epochs']
@@ -82,8 +84,9 @@ def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume
         if checkpoint is None or resume is None:
             raise ValueError('--extend-to requires --resume')
         step = checkpoint['progress']['global_step']
-        if (type(extend_to) is not int or options['max_steps'] is None
-                or extend_to <= max(total, options['max_steps'], step)):
+        if (type(extend_to) is not int or (not epoch_mode and options['max_steps'] is None)
+                or extend_to <= max(total, options['max_steps'] or original, step)
+                or (epoch_mode and extend_to % case_count != 0)):
             raise ValueError('--extend-to must strictly increase planned max_steps and exceed completed global_step')
         if epoch_limit is not None and extend_to > epoch_limit:
             raise ValueError('--extend-to exceeds unchanged max_epochs limit')

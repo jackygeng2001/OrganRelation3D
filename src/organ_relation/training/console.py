@@ -91,6 +91,7 @@ class TrainingConsole:
         optimizer = optimizer if isinstance(optimizer, dict) else {}
         env = identity.get('environment', {})
         runtime = identity.get('runtime', {})
+        cadence = 'epochs' if options.get('cadence_unit') == 'epoch' else 'steps'
         self._write(columns([
             (('Model', f'{len(channels)}-stage {channels}' if channels else 'configured model'),
              ('Device', env.get('gpu_name') or runtime.get('device', 'CPU'))),
@@ -99,9 +100,9 @@ class TrainingConsole:
             (('Train Cases', len(cases)), ('Optimizer', optimizer.get('name', 'configured'))),
             (('LR', f"{optimizer['lr']:.2e}" if 'lr' in optimizer else '?'), ('Batch Size', options['batch_size'])),
             (('Max Steps', total), ('Resume', 'Checkpoint' if resume else 'Fresh run')),
-            (('Checkpoint', f"every {options['checkpoint_every']} steps"),
+            (('Checkpoint', f"every {options['checkpoint_every']} {cadence}"),
              ('Monitor' if options['validation_role'] == 'train_monitor' else 'Validation',
-              f"every {options['validation_every']} steps" if options['validation_every'] else 'off')),
+              f"every {options['validation_every']} {cadence}" if options['validation_every'] else 'off')),
         ], 'External MONAI reference' if identity.get('mode') == 'monai_reference_unet' else 'OrganRelation3D'))
         if resume:
             self._write('[RESUME]\n' + f' Checkpoint : {resume}\n'

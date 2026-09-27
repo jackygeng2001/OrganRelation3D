@@ -15,6 +15,9 @@ MODULE_NAMES = dict(encoder='Encoder', coarse_head='CoarseHead', relation='Relat
 
 def scalar_values(row):
     """Translate scalar log rows only; never touch live model tensors."""
+    if row.get('observation_profile') == 'development_v1':
+        from .development import development_scalars
+        return development_scalars(row)
     if row['phase'] == 'train':
         values = {'Train/Total_Loss': row['total_loss'],
                   'Train/Final_CE': row['final']['ce'],

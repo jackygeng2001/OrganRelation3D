@@ -23,6 +23,7 @@ from organ_relation.training.state import digest, seed_all
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', type=Path, required=True)
+    p.add_argument('--preflight-backward', action='store_true', help='MONAI reference only: one full-volume forward/loss/backward, no run writes or optimizer step')
     p.add_argument('--data-root', type=Path, required=True)
     p.add_argument('--run-dir', type=Path)
     p.add_argument('--split', type=Path, help='Existing fixed split artifact; never regenerated while training')
@@ -63,8 +64,13 @@ def execute(args):
     if config.get('schema_version') != 1:
         raise ValueError('unsupported training config schema')
     mode = config.get('mode', 'organ_relation_joint')
-    if mode not in ('organ_relation_joint', 'backbone_only_final'):
+    if mode not in ('organ_relation_joint', 'backbone_only_final', 'monai_reference_unet'):
         raise ValueError('unsupported model/loss mode')
+    reference = mode == 'monai_reference_unet'
+    if args.preflight_backward and (not reference or args.resume or args.extend_to or args.stop_after or args.run_dir or args.prepare_split):
+        raise ValueError('reference preflight requires no run-dir/resume/extension/stop-after/split preparation')
+    if reference and any(k in config for k in ('ce_reduction_mode', 'ce_background_weight', 'ce_foreground_weight', 'foreground_ce_reduction')):
+        raise ValueError('MONAI reference does not use project-specific CE options')
     ce_reduction_mode = config.get('ce_reduction_mode', 'voxel_mean')
     if ce_reduction_mode not in CE_REDUCTION_MODES:
         raise ValueError('unsupported ce_reduction_mode')
@@ -86,9 +92,10 @@ def execute(args):
         write_split(args.prepare_split, artifact)
         print(f'Created fixed 160/40 split: {args.prepare_split}; hash={artifact["split_hash"]}', flush=True)
         return
-    if args.run_dir is None:
+    if args.run_dir is None and not args.preflight_backward:
         raise ValueError('--run-dir is required for training')
-    outside_data(args.run_dir, args.data_root)
+    if args.run_dir is not None:
+        outside_data(args.run_dir, args.data_root)
     split_path = args.split or (base / config['split_artifact'] if config.get('split_artifact') else None)
     if split_path is None:
         raise ValueError('provide an existing --split; first use --prepare-split once')
@@ -127,11 +134,21 @@ def execute(args):
     else:
         raise ValueError('training v1 supports CPU synthetic / ROCm only')
     baseline = read_json(base / config['baseline_config'])
-    model_config = SegmentorConfig(**read_json(base / config['model_config'])['model'])
-    if model_config.epsilon != baseline['epsilon']:
-        raise ValueError('model/loss epsilon mismatch')
-    if args.cpu_synthetic and max(model_config.backbone.channels) > 64:
-        raise ValueError('CPU synthetic channel limit exceeded')
+    if reference:
+        import monai  # Import the optional dependency before seeding the training trajectory.
+        from organ_relation.models.monai_reference import MonaiReferenceUNet, padding_geometry
+        from organ_relation.training.monai_reference import MonaiReferenceLoss, preflight_backward
+        model_config = config['model']
+        model_identity = dict(constructor='monai.networks.nets.UNet', **model_config)
+        if len(chosen) != 1 or (not args.cpu_synthetic and chosen[0]['case_id'] != 'amos_0109'):
+            raise ValueError('reference diagnostic requires exactly amos_0109 supplied by --cases')
+    else:
+        model_config = SegmentorConfig(**read_json(base / config['model_config'])['model'])
+        model_identity = model_config.to_dict()
+        if model_config.epsilon != baseline['epsilon']:
+            raise ValueError('model/loss epsilon mismatch')
+        if args.cpu_synthetic and max(model_config.backbone.channels) > 64:
+            raise ValueError('CPU synthetic channel limit exceeded')
     processor = FullScanPreprocessor(baseline['preprocessing'], data['candidate'],
                                     max_voxels=262144 if args.cpu_synthetic else None)
 
@@ -142,10 +159,13 @@ def execute(args):
     train_data = dataset(chosen)
     val_data = dataset(val_records) if val_records else None
     case_identity = {}
+    reference_geometry = {}
     for ds in (train_data, val_data):
         if ds is not None:
             for pair in ds.pairs:
                 meta = processor.inspect(pair)
+                if reference:
+                    reference_geometry[pair.case_id] = padding_geometry(meta['shape_dhw'])
                 case_identity[pair.case_id] = {role: {key: meta[role][key] for key in
                     ('header_sha256', 'file_size_bytes', 'mtime_ns')} for role in ('image', 'label')}
     optimizer_config = config['optimizer']
@@ -160,24 +180,29 @@ def execute(args):
         raise ValueError('invalid AdamW betas')
     torch.set_num_threads(runtime['cpu_threads'])
     seed_all(options['seed'])
-    model_type = Segmentor if mode == 'organ_relation_joint' else BackboneOnly
-    model = model_type(model_config).to(device=runtime['device'], dtype=torch.float32)
+    if reference:
+        model = MonaiReferenceUNet(model_config, config['input_processing'])
+        loss_config = dict(config['loss'])
+        criterion = MonaiReferenceLoss(loss_config)
+    else:
+        model_type = Segmentor if mode == 'organ_relation_joint' else BackboneOnly
+        model = model_type(model_config)
+        loss_config = dict(epsilon=baseline['epsilon'])
+        if mode == 'organ_relation_joint':
+            loss_config.update(baseline['loss'])
+            criterion = JointLoss(**loss_config, ce_reduction_mode=ce_reduction_mode,
+                                  foreground_ce_reduction=foreground_ce_reduction, **ce_weights)
+        else:
+            criterion = SegmentationLoss(**loss_config, ce_reduction_mode=ce_reduction_mode,
+                                  foreground_ce_reduction=foreground_ce_reduction, **ce_weights)
+    model.to(device=runtime['device'], dtype=torch.float32)
     if options['memory_format'] == 'channels_last_3d':
         model.to(memory_format=torch.channels_last_3d)
-    optimizer = torch.optim.AdamW(model.parameters(), **{k: v for k, v in optimizer_config.items() if k != 'name'})
-    loss_config = dict(epsilon=baseline['epsilon'])
-    if mode == 'organ_relation_joint':
-        loss_config.update(baseline['loss'])
-        criterion = JointLoss(**loss_config, ce_reduction_mode=ce_reduction_mode,
-                              foreground_ce_reduction=foreground_ce_reduction, **ce_weights)
-    else:
-        criterion = SegmentationLoss(**loss_config, ce_reduction_mode=ce_reduction_mode,
-                              foreground_ce_reduction=foreground_ce_reduction, **ce_weights)
     data_identity = dict(manifest=manifest, manifest_hash=digest(manifest), split=artifact['development'],
                          split_hash=artifact['split_hash'], role=data['role'], actual_train=chosen,
                          actual_validation=val_records, subset_hash=digest([chosen, val_records]),
                          case_identity=case_identity)
-    identity = dict(model=model_config.to_dict(), loss=loss_config, ce_reduction_mode=ce_reduction_mode,
+    identity = dict(model=model_identity, loss=loss_config, ce_reduction_mode=ce_reduction_mode,
                     foreground_ce_reduction=foreground_ce_reduction, **ce_weights,
                     preprocessing=dict(candidate=data['candidate'], **baseline['preprocessing']),
                     optimizer=optimizer_config, runtime=runtime, training=options, data=data_identity,
@@ -195,10 +220,21 @@ def execute(args):
     # payload; CE reduction above is explicit for both modes in new run identities.
     if mode == 'backbone_only_final':
         identity.update(mode=mode, initialization='retain_encoder_decoder_from_seeded_full_segmentor')
+    if reference:
+        for key in ('ce_reduction_mode', 'foreground_ce_reduction', *ce_weights):
+            identity.pop(key)
+        identity.update(mode=mode, parameter_count=sum(p.numel() for p in model.parameters()),
+                        geometry=reference_geometry)
+        identity['preprocessing']['reference_after_hu'] = config['input_processing']
+        identity['environment']['packages']['monai'] = monai.__version__
     # Normalize tuples to JSON lists so saved manifest and checkpoint identities agree.
     identity = json.loads(json.dumps(identity))
     if identity['provenance']['git'].get('commit') is None:
         raise ValueError('training requires readable Git/source provenance; use a Git clone')
+    if args.preflight_backward:
+        preflight_backward(model, criterion, train_data, identity)
+        return
+    optimizer = torch.optim.AdamW(model.parameters(), **{k: v for k, v in optimizer_config.items() if k != 'name'})
     trainer = Trainer(model, criterion, optimizer, train_data, [r['case_id'] for r in chosen],
                       device=runtime['device'], options=options, identity=identity, run_dir=args.run_dir,
                       validation_dataset=val_data, validation_case_ids=[r['case_id'] for r in val_records],

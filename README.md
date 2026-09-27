@@ -340,3 +340,28 @@ macro 模式按病例分别求每个实际存在的前景器官 CE 均值，再�
 monitor 新增 `foreground_ce_reduction`、`present_foreground_class_count`、`per_class_ce_mean`（固定 15 项，索引0对应标签1，缺失类为 null）、`CE_fg_macro`。原 `CE_fg_mean` 始终表示前景 voxel mean，原 `balanced_ce` 始终表示 voxel 50:50 对照值；`weighted_ce` 使用当前选择的 foreground reduction。backbone 字段位于 `diagnostic_cases[case_id]`，完整模型位于 `ce_diagnostic_cases[case_id].coarse/final`，病例 ledger 同步保存。只记标量/小列表，不增加 console 输出。
 
 foreground reduction 纳入 run/checkpoint 身份；历史字段缺失只等价于 voxel_mean，不重写旧 origin 或 run.json。不同 reduction 禁止 resume/受控延长，Git/source provenance 仍严格校验，不提供跨版本绕过。macro 新 run 自身可正常断点续训。
+
+## External MONAI whole-volume reference
+
+`configs/train_monai_reference_whole_volume_overfit.json` / `mode=monai_reference_unet` is an independent sanity reference, **not** the proposed model or a fair backbone ablation. It uses the installed official MONAI `UNet` (3D, 1→16, channels 8/16/32/64/128, four stride-2 levels, two residual units, InstanceNorm, PReLU, no dropout) and `DiceCELoss`. MONAI is optional for all existing modes; install the pinned reference dependency with `python -m pip install --no-deps -r environments/requirements-monai-reference.txt` in an already compatible backend environment. It does not select or replace PyTorch.
+
+The existing full-scan B-spacing loader first produces physical HU. Only this reference clips HU to [-1000,1000] and divides by 1000. Minimal high-end constant padding (value -1 after scaling) brings each dimension to a multiple of 16. For amos_0109, [150,239,239] becomes [160,240,240], padding D/H/W = [0,10]/[0,1]/[0,1]. One forward processes the entire padded scan; output logits are sliced back to the **entire original B grid** before loss and metrics. GT is never padded or spatially cropped. There is no patch, ROI, sliding window, augmentation, AMP or activation checkpointing.
+
+The exact official loss constructor is recorded in the independent config: softmax multiclass, one-hot target conversion inside MONAI, Dice excludes background, standard unweighted CE includes all 16 classes, lambda_dice=lambda_ce=1, smooth_nr=smooth_dr=1e-5, squared_pred=false, jaccard=false, batch=false, reduction=mean, label_smoothing=0. It does not call the project's custom CE/Dice implementation. Detached per-class soft Dice and CE observations use MONAI implementations too.
+
+First run the one-forward/loss/backward preflight, with **no run directory**. It performs no optimizer step or checkpoint/log write, reports actual padding, finite gradients, timings and allocator peaks to stdout, and stops on OOM without retries or configuration changes:
+
+```bash
+PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+python -B scripts/train.py \
+  --config configs/train_monai_reference_whole_volume_overfit.json \
+  --data-root "$HOME/datasets/AMOS22/amos22" \
+  --split runs/splits/development_160_40.json --cases amos_0109 \
+  --preflight-backward
+```
+
+Only after reviewing a successful preflight, use the same command **without** `--preflight-backward`, adding `--run-dir runs/monai_reference_amos0109_B_200` to start 200 steps. AdamW lr=3e-4, weight_decay=0, FP32/batch=1/seed=20260925. To resume, retain the exact config/source/environment and append `--resume runs/monai_reference_amos0109_B_200/last.ckpt`. Do not resume a proposed-model/backbone checkpoint into this mode.
+
+This shares the serial resumable engine, atomic checkpoint, RNG/case order, ETA, JSONL and TensorBoard observers. Every 25 steps, monitor records post-update total/CE/Dice losses, all 15 hard/soft Dice values, predicted/GT foreground counts, class-correct foreground TP and GT-foreground probability means. These are scalar JSONL/ledger/TensorBoard observations; no volumes are saved. Training-row losses remain pre-update. Run/checkpoint identity includes MONAI version, exact constructor/loss/input processing, geometry/padding, parameter count, existing data/split fingerprints and source/environment provenance. Existing model/loss/config defaults are unchanged.
+
+CPU acceptance: `python scripts/run_tests.py --suite monai` (requires the optional MONAI dependency). `--suite all` includes this suite and fails if any dependency/test is missing or skipped. Tiny CPU tests exercise the actual five-level network; they are not GPU capacity evidence. A successful backward preflight is not a 200-step overfit result or an AdamW steady-state memory benchmark.

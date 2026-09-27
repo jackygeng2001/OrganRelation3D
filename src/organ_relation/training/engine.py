@@ -141,20 +141,31 @@ class Trainer:
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
         self.mode = identity.get('mode', 'organ_relation_joint')
-        expected_loss = {'organ_relation_joint': JointLoss, 'backbone_only_final': SegmentationLoss}.get(self.mode)
-        if expected_loss is None or not isinstance(criterion, expected_loss):
-            raise ValueError('unsupported or mismatched model/loss mode')
-        self.ce_reduction_mode = getattr(criterion, 'ce_reduction_mode', 'voxel_mean')
-        if identity.get('ce_reduction_mode', 'voxel_mean') != self.ce_reduction_mode:
-            raise ValueError('criterion ce_reduction_mode must match checkpoint/run identity')
-        self.foreground_ce_reduction = criterion.foreground_ce_reduction
-        if identity.get('foreground_ce_reduction', 'voxel_mean') != self.foreground_ce_reduction:
-            raise ValueError('criterion foreground_ce_reduction must match checkpoint/run identity')
-        bg, fg = resolve_ce_weights(identity.get('ce_background_weight', 0.5),
-                                    identity.get('ce_foreground_weight', 0.5))
-        self.ce_weights = dict(ce_background_weight=bg, ce_foreground_weight=fg)
-        if (criterion.ce_background_weight, criterion.ce_foreground_weight) != (bg, fg):
-            raise ValueError('criterion CE weights must match checkpoint/run identity')
+        if self.mode == 'monai_reference_unet':
+            from .monai_reference import MonaiReferenceLoss
+            if not isinstance(criterion, MonaiReferenceLoss) or criterion.constructor != identity.get('loss'):
+                raise ValueError('MONAI criterion must match reference identity')
+            if any(k in identity for k in ('ce_reduction_mode', 'foreground_ce_reduction',
+                                           'ce_background_weight', 'ce_foreground_weight')):
+                raise ValueError('MONAI reference cannot use custom CE options')
+            self.ce_reduction_mode = 'monai_cross_entropy'
+            self.foreground_ce_reduction = 'voxel_mean'
+            self.ce_weights = {}
+        else:
+            expected_loss = {'organ_relation_joint': JointLoss, 'backbone_only_final': SegmentationLoss}.get(self.mode)
+            if expected_loss is None or not isinstance(criterion, expected_loss):
+                raise ValueError('unsupported or mismatched model/loss mode')
+            self.ce_reduction_mode = getattr(criterion, 'ce_reduction_mode', 'voxel_mean')
+            if identity.get('ce_reduction_mode', 'voxel_mean') != self.ce_reduction_mode:
+                raise ValueError('criterion ce_reduction_mode must match checkpoint/run identity')
+            self.foreground_ce_reduction = criterion.foreground_ce_reduction
+            if identity.get('foreground_ce_reduction', 'voxel_mean') != self.foreground_ce_reduction:
+                raise ValueError('criterion foreground_ce_reduction must match checkpoint/run identity')
+            bg, fg = resolve_ce_weights(identity.get('ce_background_weight', 0.5),
+                                        identity.get('ce_foreground_weight', 0.5))
+            self.ce_weights = dict(ce_background_weight=bg, ce_foreground_weight=fg)
+            if (criterion.ce_background_weight, criterion.ce_foreground_weight) != (bg, fg):
+                raise ValueError('criterion CE weights must match checkpoint/run identity')
         if extend_to is not None and (resume is None or type(extend_to) is not int or extend_to < 1):
             raise ValueError('--extend-to requires --resume and a positive integer total')
         if not case_ids or len(dataset) != len(case_ids) or len(set(case_ids)) != len(case_ids):
@@ -280,7 +291,11 @@ class Trainer:
                         image, label = self._batch(self.validation_dataset, index, validation=True)
                         output = self.model(image)
                         record = hard_dice(output.final_logits.argmax(1)[0], label[0])
-                        if self.mode == 'backbone_only_final':
+                        if self.mode == 'monai_reference_unet':
+                            from .monai_reference import reference_diagnostics
+                            record['diagnostic'] = reference_diagnostics(
+                                output.final_logits, label, self.criterion, record)
+                        elif self.mode == 'backbone_only_final':
                             record['diagnostic'] = final_diagnostic_metrics(
                                 output.final_logits, label, self.criterion, record)
                         elif self.ce_reduction_mode == 'foreground_background_balanced':
@@ -302,7 +317,7 @@ class Trainer:
         row['ce_reduction_mode'] = self.ce_reduction_mode
         row['foreground_ce_reduction'] = self.foreground_ce_reduction
         row.update(self.ce_weights)
-        if self.mode == 'backbone_only_final':
+        if self.mode in ('backbone_only_final', 'monai_reference_unet'):
             row['diagnostic_cases'] = {case: record['diagnostic']
                                        for case, record in zip(self.validation_case_ids, records)}
         elif self.ce_reduction_mode == 'foreground_background_balanced':
@@ -401,6 +416,9 @@ class Trainer:
                        final={k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
                        soft_dice_per_organ=loss.final.dice_per_class.detach().cpu()[0].tolist(),
                        diagnostics=diagnostics)
+            if self.mode == 'monai_reference_unet':
+                from ..models.monai_reference import padding_geometry
+                row['geometry'] = padding_geometry(image.shape[2:])
             row['mode'] = self.mode
             row['ce_reduction_mode'] = self.ce_reduction_mode
             row['foreground_ce_reduction'] = self.foreground_ce_reduction

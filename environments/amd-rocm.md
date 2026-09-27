@@ -71,3 +71,14 @@ env -u MIOPEN_DEBUG_CONV_GEMM -u MIOPEN_LOG_LEVEL -u MIOPEN_ENABLE_LOGGING_CMD \
 JSON 的 `memory_format` 是请求的入口布局；`memory_layout` 记录实际 image / label stride 和各 Conv3d weight stride，不宣称所有中间张量保持该布局。`environment.backend_environment` 记录 `MIOPEN_*`、`PYTORCH_MIOPEN_*` 和 PyTorch allocator 配置变量，缺失的 `PYTORCH_MIOPEN_SUGGEST_NHWC` 记录为 null；同时记录可用的 MIOpen immediate 状态和既有 benchmark / deterministic 状态。仅记录这些设置，不自动修改。
 
 正常阶段计时和 allocated / reserved 峰值仍保留在 `stages`；`--through backward` 自动包含 loss 和梯度检查。该运行减少了逐算子观察开销，但仍是含原 finite 检查的单次冷启动验证，不等同于稳态训练吞吐。需要再次定位时，可另外显式增加 `--profile-forward-memory`。
+
+## Optional external MONAI reference
+
+The independent whole-volume reference uses `monai==1.6.0` (Python>=3.10, torch>=2.8, numpy>=1.24,<3). Install only this package into the existing environment:
+
+```bash
+python -m pip install --no-deps -r environments/requirements-monai-reference.txt
+python -c "import monai, torch, numpy; print(monai.__version__, torch.__version__, numpy.__version__)"
+```
+
+During reference setup on the current AMD host, only MONAI 1.6.0 was added; all previously installed package versions were unchanged (including torch 2.11.0+rocm7.2, ROCm 7.2.26015 and numpy 2.3.5). No optional CUDA extensions or backend packages were installed. Use the explicit `PYTORCH_MIOPEN_SUGGEST_NHWC=1` / channels_last_3d runtime from the independent config. See README for preflight and manual training; no guarantee that all MONAI intermediate tensors/solvers retain NDHWC is implied.

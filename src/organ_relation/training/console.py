@@ -83,7 +83,7 @@ class TrainingConsole:
         model, prep = identity.get('model', {}), identity.get('preprocessing', {})
         model = model if isinstance(model, dict) else {}
         prep = prep if isinstance(prep, dict) else {}
-        channels = model.get('backbone', {}).get('channels', [])
+        channels = model.get('backbone', {}).get('channels', model.get('channels', []))
         candidate = prep.get('candidate', '?')
         spacing = prep.get('spacing_candidates', {}).get(candidate)
         spacing_text = ' x '.join(f'{v:g}' for v in spacing) + ' mm' if spacing else '?'
@@ -102,7 +102,7 @@ class TrainingConsole:
             (('Checkpoint', f"every {options['checkpoint_every']} steps"),
              ('Monitor' if options['validation_role'] == 'train_monitor' else 'Validation',
               f"every {options['validation_every']} steps" if options['validation_every'] else 'off')),
-        ], 'OrganRelation3D'))
+        ], 'External MONAI reference' if identity.get('mode') == 'monai_reference_unet' else 'OrganRelation3D'))
         if resume:
             self._write('[RESUME]\n' + f' Checkpoint : {resume}\n'
                         f' Epoch      : {min(state["epoch"]+1, epochs)} / {epochs}\n'

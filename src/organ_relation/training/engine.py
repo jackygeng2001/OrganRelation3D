@@ -53,10 +53,18 @@ def weights_hash(model):
     return result.hexdigest()
 
 
+def diagnostic_parameter_groups(model):
+    from ..models.monai_relation import MonaiRelationUNet
+    if isinstance(model, MonaiRelationUNet):
+        return model.diagnostic_parameter_groups()
+    return {name: [(f'{name}.{n}', p) for n, p in module.named_parameters()]
+            for name, module in model.named_children()}
+
+
 def gradient_diagnostics(model):
     result = {}
-    for name, module in model.named_children():
-        parameters = [p for p in module.parameters() if p.requires_grad]
+    for name, named in diagnostic_parameter_groups(model).items():
+        parameters = [p for _, p in named if p.requires_grad]
         if not parameters:  # e.g. SpaceToNode has no learnable parameters.
             continue
         if any(p.grad is None for p in parameters):
@@ -141,13 +149,22 @@ class Trainer:
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
         self.mode = identity.get('mode', 'organ_relation_joint')
-        if self.mode == 'monai_reference_unet':
+        if self.mode in ('monai_reference_unet', 'monai_relation_unet'):
             from .monai_reference import MonaiReferenceLoss
-            if not isinstance(criterion, MonaiReferenceLoss) or criterion.constructor != identity.get('loss'):
+            from .monai_relation import MonaiRelationLoss
+            expected = MonaiRelationLoss if self.mode == 'monai_relation_unet' else MonaiReferenceLoss
+            if not isinstance(criterion, expected) or criterion.constructor != identity.get('loss'):
                 raise ValueError('MONAI criterion must match reference identity')
             if any(k in identity for k in ('ce_reduction_mode', 'foreground_ce_reduction',
                                            'ce_background_weight', 'ce_foreground_weight')):
                 raise ValueError('MONAI reference cannot use custom CE options')
+            if self.mode == 'monai_relation_unet':
+                from ..models.monai_relation import MonaiRelationUNet
+                if (not isinstance(model, MonaiRelationUNet) or not model.relation_enabled
+                        or model.relation_config != identity.get('relation')
+                        or identity.get('relation_enabled') is not True
+                        or identity.get('coarse_supervision') != dict(lambda_c=criterion.lambda_c, align_corners=criterion.align_corners)):
+                    raise ValueError('MONAI relation model/loss must match identity')
             self.ce_reduction_mode = 'monai_cross_entropy'
             self.foreground_ce_reduction = 'voxel_mean'
             self.ce_weights = {}
@@ -291,10 +308,14 @@ class Trainer:
                         image, label = self._batch(self.validation_dataset, index, validation=True)
                         output = self.model(image)
                         record = hard_dice(output.final_logits.argmax(1)[0], label[0])
-                        if self.mode == 'monai_reference_unet':
+                        if self.mode in ('monai_reference_unet', 'monai_relation_unet'):
                             from .monai_reference import reference_diagnostics
-                            record['diagnostic'] = reference_diagnostics(
-                                output.final_logits, label, self.criterion, record)
+                            if self.mode == 'monai_relation_unet':
+                                from .monai_relation import relation_diagnostics
+                                record['diagnostic'] = relation_diagnostics(output, label, self.criterion, record)
+                            else:
+                                record['diagnostic'] = reference_diagnostics(
+                                    output.final_logits, label, self.criterion, record)
                         elif self.mode == 'backbone_only_final':
                             record['diagnostic'] = final_diagnostic_metrics(
                                 output.final_logits, label, self.criterion, record)
@@ -317,7 +338,7 @@ class Trainer:
         row['ce_reduction_mode'] = self.ce_reduction_mode
         row['foreground_ce_reduction'] = self.foreground_ce_reduction
         row.update(self.ce_weights)
-        if self.mode in ('backbone_only_final', 'monai_reference_unet'):
+        if self.mode in ('backbone_only_final', 'monai_reference_unet', 'monai_relation_unet'):
             row['diagnostic_cases'] = {case: record['diagnostic']
                                        for case, record in zip(self.validation_case_ids, records)}
         elif self.ce_reduction_mode == 'foreground_background_balanced':
@@ -393,7 +414,7 @@ class Trainer:
             image, label = self._batch(self.dataset, index)
             output = self.model(image)  # Supervision never enters model.forward.
             loss = (self.criterion(output.coarse_logits, output.final_logits, label)
-                    if self.mode == 'organ_relation_joint' else self.criterion(output.final_logits, label))
+                    if self.mode in ('organ_relation_joint', 'monai_relation_unet') else self.criterion(output.final_logits, label))
             loss.total.backward()
             check = bool(self.options['diagnostics_every'] and step % self.options['diagnostics_every'] == 0)
             diagnostics = gradient_diagnostics(self.model) if check else None
@@ -401,13 +422,12 @@ class Trainer:
             lr = self.optimizer.param_groups[0]['lr']
             self.optimizer.step()
             if check:
-                for name, module in self.model.named_children():
-                    parameters = list(module.named_parameters())
+                for name, parameters in diagnostic_parameter_groups(self.model).items():
                     if not parameters:
                         continue
                     if any(not torch.isfinite(p).all() for _, p in parameters):
                         raise ValueError(f'nonfinite updated parameters in {name}; failed step not committed')
-                    change = sum((p.detach().double() - before[f'{name}.{n}'].double()).square().sum()
+                    change = sum((p.detach().double() - before[n].double()).square().sum()
                                  for n, p in parameters).sqrt()
                     diagnostics[name]['update_norm'] = change.item()
             row = dict(run_id=self.run_id, phase='train', epoch=epoch, total_epochs=self.epochs,
@@ -416,14 +436,14 @@ class Trainer:
                        final={k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
                        soft_dice_per_organ=loss.final.dice_per_class.detach().cpu()[0].tolist(),
                        diagnostics=diagnostics)
-            if self.mode == 'monai_reference_unet':
+            if self.mode in ('monai_reference_unet', 'monai_relation_unet'):
                 from ..models.monai_reference import padding_geometry
                 row['geometry'] = padding_geometry(image.shape[2:])
             row['mode'] = self.mode
             row['ce_reduction_mode'] = self.ce_reduction_mode
             row['foreground_ce_reduction'] = self.foreground_ce_reduction
             row.update(self.ce_weights)
-            if self.mode == 'organ_relation_joint':
+            if self.mode in ('organ_relation_joint', 'monai_relation_unet'):
                 row['coarse'] = {k: getattr(loss.coarse, k).detach().item()
                                  for k in ('ce', 'dice_loss', 'segmentation')}
             del image, label, output, loss, before

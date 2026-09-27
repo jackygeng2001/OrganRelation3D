@@ -171,7 +171,7 @@ class MonaiReferenceTests(unittest.TestCase):
             self.assertEqual(cli.main(argv+['--run-dir',str(run),'--stop-after','1']),0)
             self.assertEqual(cli.main(argv+['--run-dir',str(run),'--resume',str(run/'last.ckpt')]),0)
         identity=json.loads((run/'run.json').read_text())['identity']
-        self.assertEqual(identity['mode'],'monai_reference_unet')
+        self.assertEqual(identity['mode'],self.cfg['mode'])
         self.assertEqual(identity['environment']['packages']['monai'],'1.6.0')
         self.assertIn('reference_after_hu',identity['preprocessing']);self.assertIn('geometry',identity)
         self.assertNotIn('ce_background_weight',identity)

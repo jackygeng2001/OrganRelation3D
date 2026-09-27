@@ -345,7 +345,7 @@ foreground reduction 纳入 run/checkpoint 身份；历史字段缺失只等价�
 
 `configs/train_monai_reference_whole_volume_overfit.json` / `mode=monai_reference_unet` is an independent sanity reference, **not** the proposed model or a fair backbone ablation. It uses the installed official MONAI `UNet` (3D, 1→16, channels 8/16/32/64/128, four stride-2 levels, two residual units, InstanceNorm, PReLU, no dropout) and `DiceCELoss`. MONAI is optional for all existing modes; install the pinned reference dependency with `python -m pip install --no-deps -r environments/requirements-monai-reference.txt` in an already compatible backend environment. It does not select or replace PyTorch.
 
-The existing full-scan B-spacing loader first produces physical HU. Only this reference clips HU to [-1000,1000] and divides by 1000. Minimal high-end constant padding (value -1 after scaling) brings each dimension to a multiple of 16. For amos_0109, [150,239,239] becomes [160,240,240], padding D/H/W = [0,10]/[0,1]/[0,1]. One forward processes the entire padded scan; output logits are sliced back to the **entire original B grid** before loss and metrics. GT is never padded or spatially cropped. There is no patch, ROI, sliding window, augmentation, AMP or activation checkpointing.
+The existing full-scan B-spacing loader first produces physical HU. This MONAI reference clips HU to [-1000,1000] and divides by 1000. Minimal high-end constant padding (value -1 after scaling) brings each dimension to a multiple of 16. For amos_0109, [150,239,239] becomes [160,240,240], padding D/H/W = [0,10]/[0,1]/[0,1]. One forward processes the entire padded scan; output logits are sliced back to the **entire original B grid** before loss and metrics. GT is never padded or spatially cropped. There is no patch, ROI, sliding window, augmentation, AMP or activation checkpointing.
 
 The exact official loss constructor is recorded in the independent config: softmax multiclass, one-hot target conversion inside MONAI, Dice excludes background, standard unweighted CE includes all 16 classes, lambda_dice=lambda_ce=1, smooth_nr=smooth_dr=1e-5, squared_pred=false, jaccard=false, batch=false, reduction=mean, label_smoothing=0. It does not call the project's custom CE/Dice implementation. Detached per-class soft Dice and CE observations use MONAI implementations too.
 
@@ -365,3 +365,45 @@ Only after reviewing a successful preflight, use the same command **without** `-
 This shares the serial resumable engine, atomic checkpoint, RNG/case order, ETA, JSONL and TensorBoard observers. Every 25 steps, monitor records post-update total/CE/Dice losses, all 15 hard/soft Dice values, predicted/GT foreground counts, class-correct foreground TP and GT-foreground probability means. These are scalar JSONL/ledger/TensorBoard observations; no volumes are saved. Training-row losses remain pre-update. Run/checkpoint identity includes MONAI version, exact constructor/loss/input processing, geometry/padding, parameter count, existing data/split fingerprints and source/environment provenance. Existing model/loss/config defaults are unchanged.
 
 CPU acceptance: `python scripts/run_tests.py --suite monai` (requires the optional MONAI dependency). `--suite all` includes this suite and fails if any dependency/test is missing or skipped. Tiny CPU tests exercise the actual five-level network; they are not GPU capacity evidence. A successful backward preflight is not a 200-step overfit result or an AdamW steady-state memory benchmark.
+
+
+## MONAI backbone with organ relation
+
+`configs/train_monai_relation_whole_volume_overfit.json` / `mode=monai_relation_unet`
+adds the existing method to the same official MONAI UNet. The successful reference
+config and runs remain separate. This diagnostic starts with the same seeded
+backbone initialization, not the reference step-200 weights.
+
+In inspected MONAI 1.6.0, the deepest `ResidualUnit` is at
+`model.1.submodule.1.submodule.1.submodule.1.submodule`. For [160,240,240], its
+output is [1,128,10,15,15]. A module adapter retains that block and transforms
+its output before the original skip concatenation and decoder. No MONAI source
+is copied and no production hooks are installed. The wrapper's constructor
+supports `relation_enabled=False` for exact output/input/backbone-gradient
+identity checks; the joint training mode requires `True`. Coarse logits are
+returned through a call-scoped collector cleared in `finally`, including on
+failure; overlapping forwards on the same instance are explicitly rejected.
+
+Existing CoarseHead, SpaceToNode, DynamicRelation, NodeToSpace and ResidualFusion
+implementations are reused. C=128 is checked against the inspected block;
+Cr=8, K=2, da=4, Cg=6 come from the previous probe settings. Native-grid coarse
+probabilities construct the 15-node graph. For supervision, coarse **logits**
+are interpolated directly to the original unpadded GT shape with trilinear,
+`align_corners=False`; GT is not resized. Final logits are cropped back as in
+reference. Both branches use the same official MONAI DiceCELoss constructor:
+`L = L_final + 0.5 * L_coarse`. All other reference settings are retained.
+
+For a single no-update preflight, use the reference command above with
+`--config configs/train_monai_relation_whole_volume_overfit.json`. It additionally
+prints actual bottleneck geometry, baseline/added/total parameters and disjoint
+encoder, decoder, coarse, relation, write-back and fusion gradient diagnostics.
+After acceptance, remove `--preflight-backward` and add
+`--run-dir runs/monai_relation_amos0109_B_200` for the 200-step experiment.
+Resume only this run's own checkpoint with unchanged configuration and identity.
+
+Monitoring retains reference final statistics and adds coarse DiceCE and hard/soft
+Dice on the original GT grid. Gradient/update diagnostics distinguish all added
+modules. JSONL and checkpoints retain strict resume identity including relation
+configuration and coarse supervision; TensorBoard is an observer. CPU acceptance
+is included in `--suite monai` and `--suite all`. A successful preflight alone does
+not establish learning quality or a benefit over the MONAI reference.

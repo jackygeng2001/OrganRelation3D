@@ -23,7 +23,7 @@ from organ_relation.training.state import digest, seed_all
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', type=Path, required=True)
-    p.add_argument('--preflight-backward', action='store_true', help='MONAI reference only: one full-volume forward/loss/backward, no run writes or optimizer step')
+    p.add_argument('--preflight-backward', action='store_true', help='MONAI modes only: one full-volume forward/loss/backward, no run writes or optimizer step')
     p.add_argument('--data-root', type=Path, required=True)
     p.add_argument('--run-dir', type=Path)
     p.add_argument('--split', type=Path, help='Existing fixed split artifact; never regenerated while training')
@@ -64,9 +64,9 @@ def execute(args):
     if config.get('schema_version') != 1:
         raise ValueError('unsupported training config schema')
     mode = config.get('mode', 'organ_relation_joint')
-    if mode not in ('organ_relation_joint', 'backbone_only_final', 'monai_reference_unet'):
+    if mode not in ('organ_relation_joint', 'backbone_only_final', 'monai_reference_unet', 'monai_relation_unet'):
         raise ValueError('unsupported model/loss mode')
-    reference = mode == 'monai_reference_unet'
+    reference = mode in ('monai_reference_unet', 'monai_relation_unet')
     if args.preflight_backward and (not reference or args.resume or args.extend_to or args.stop_after or args.run_dir or args.prepare_split):
         raise ValueError('reference preflight requires no run-dir/resume/extension/stop-after/split preparation')
     if reference and any(k in config for k in ('ce_reduction_mode', 'ce_background_weight', 'ce_foreground_weight', 'foreground_ce_reduction')):
@@ -181,9 +181,18 @@ def execute(args):
     torch.set_num_threads(runtime['cpu_threads'])
     seed_all(options['seed'])
     if reference:
-        model = MonaiReferenceUNet(model_config, config['input_processing'])
         loss_config = dict(config['loss'])
-        criterion = MonaiReferenceLoss(loss_config)
+        if mode == 'monai_relation_unet':
+            from organ_relation.models.monai_relation import MonaiRelationUNet, BOTTLENECK_PATH
+            from organ_relation.training.monai_relation import MonaiRelationLoss
+            if config.get('relation_enabled') is not True:
+                raise ValueError('joint training requires relation_enabled=true; bypass is an identity check only')
+            model = MonaiRelationUNet(model_config, config['input_processing'],
+                                      relation_enabled=True, relation_config=config['relation'])
+            criterion = MonaiRelationLoss(loss_config, **config['coarse_supervision'])
+        else:
+            model = MonaiReferenceUNet(model_config, config['input_processing'])
+            criterion = MonaiReferenceLoss(loss_config)
     else:
         model_type = Segmentor if mode == 'organ_relation_joint' else BackboneOnly
         model = model_type(model_config)
@@ -227,6 +236,9 @@ def execute(args):
                         geometry=reference_geometry)
         identity['preprocessing']['reference_after_hu'] = config['input_processing']
         identity['environment']['packages']['monai'] = monai.__version__
+    if mode == 'monai_relation_unet':
+        identity.update(relation_enabled=True, relation=config['relation'], coarse_supervision=config['coarse_supervision'])
+        identity['model']['bottleneck_path'] = BOTTLENECK_PATH
     # Normalize tuples to JSON lists so saved manifest and checkpoint identities agree.
     identity = json.loads(json.dumps(identity))
     if identity['provenance']['git'].get('commit') is None:

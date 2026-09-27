@@ -105,16 +105,16 @@ def validate_early_stopping(options):
 
 
 def new_early_state():
-    return dict(best_metric=None, best_epoch=None, no_improvement_count=0,
+    return dict(best_metric=None, best_epoch=None, patience_reference_metric=None, no_improvement_count=0,
                 last_validation_epoch=0, stopped=False)
 
 
 def advance_early_stopping(state, score, epoch, options):
-    """Compare against prior all-time best, not gamma or a moving training metric.
+    """Track raw best separately from the significant-improvement reference.
 
     Count validations even before min_epochs, but forbid stopping until then.
-    A small new record updates best_metric, without resetting patience unless it
-    strictly exceeds the PREVIOUS all-time best by min_delta.
+    Small records update raw best, but leave the reference unchanged so their
+    cumulative improvement can reach min_delta. Equality meets the threshold.
     """
     config = options['early_stopping']
     interval = options['validation_every']
@@ -123,9 +123,12 @@ def advance_early_stopping(state, score, epoch, options):
     if state['stopped'] or epoch != state['last_validation_epoch'] + interval:
         raise ValueError('early stopping validation history is not consecutive')
     best = state['best_metric']
-    significant = best is None or score > best + config['min_delta']
+    reference = state['patience_reference_metric']
+    significant = reference is None or score >= reference + config['min_delta']
     result = dict(state, last_validation_epoch=epoch,
                   no_improvement_count=0 if significant else state['no_improvement_count'] + 1)
+    if significant:
+        result['patience_reference_metric'] = score
     if best is None or score > best:
         result.update(best_metric=score, best_epoch=epoch)
     result['stopped'] = (epoch >= config['min_epochs'] and

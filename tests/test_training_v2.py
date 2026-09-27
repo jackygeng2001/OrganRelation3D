@@ -99,7 +99,7 @@ class TrainingV2Tests(unittest.TestCase):
             loss=criterion.objective(x,label);loss.total.backward()
         self.assertEqual(ce.call_count,1);self.assertEqual(dice.call_count,1)
 
-    def test_early_stop_minimum_patience_and_strict_delta(self):
+    def test_early_stop_minimum_patience_and_inclusive_delta(self):
         options=config()['training'];validate_early_stopping(options)
         state=new_early_state()
         for epoch in range(5,101,5):
@@ -116,12 +116,35 @@ class TrainingV2Tests(unittest.TestCase):
         state=new_early_state()
         state=advance_early_stopping(state,.5,5,options)
         state=advance_early_stopping(state,.5001,10,options)
-        self.assertEqual(state['no_improvement_count'],1)
-        self.assertEqual(state['best_epoch'],10)  # Raw best advances, patience does not reset.
+        self.assertEqual(state['no_improvement_count'],0)
+        self.assertEqual(state['patience_reference_metric'],.5001)
+        self.assertEqual(state['best_epoch'],10)
         state=advance_early_stopping(state,.501,15,options)
         self.assertEqual(state['no_improvement_count'],0)
         with self.assertRaises(ValueError):advance_early_stopping(state,None,20,options)
         with self.assertRaises(ValueError):advance_early_stopping(state,.5,25,options)
+
+    def test_cumulative_small_improvement_keeps_reference_until_threshold(self):
+        options=config()['training']
+        state=advance_early_stopping(new_early_state(),.5,5,options)
+        for epoch,score,count in ((10,.50003,1),(15,.50006,2),(20,.50009,3)):
+            state=advance_early_stopping(state,score,epoch,options)
+            self.assertEqual(state['best_metric'],score)
+            self.assertEqual(state['best_epoch'],epoch)
+            self.assertEqual(state['patience_reference_metric'],.5)
+            self.assertEqual(state['no_improvement_count'],count)
+        state=advance_early_stopping(state,.5001,25,options)  # Exactly reference + min_delta.
+        self.assertEqual(state['patience_reference_metric'],.5001)
+        self.assertEqual(state['no_improvement_count'],0)
+        state=advance_early_stopping(state,.50014,30,options)
+        self.assertEqual(state['best_metric'],.50014)
+        self.assertEqual(state['patience_reference_metric'],.5001)
+        self.assertEqual(state['no_improvement_count'],1)
+        state=advance_early_stopping(state,.49,35,options)
+        self.assertEqual(state['best_metric'],.50014)
+        self.assertEqual(state['best_epoch'],30)
+        self.assertEqual(state['patience_reference_metric'],.5001)
+        self.assertEqual(state['no_improvement_count'],2)
 
     def tiny_trainer(self,path,resume=False):
         seed_all(20260925); cfg=config(); opt=cfg['training']
@@ -161,6 +184,29 @@ class TrainingV2Tests(unittest.TestCase):
         bad=copy.deepcopy(b);bad['early_stopping']['no_improvement_count']=0
         save_checkpoint(first.run_dir/'last.ckpt',bad)
         with self.assertRaisesRegex(ValueError,'validation history'):self.tiny_trainer(first.run_dir,True)
+
+    def test_resume_preserves_distinct_raw_best_and_patience_reference(self):
+        from organ_relation.metrics import summarize_dice
+        scores=iter((.5,.50006,.5001))
+        def controlled(records):
+            self.assertEqual(len(records),40)
+            summary=summarize_dice(records);summary['mean_case_dice']=next(scores)
+            return summary
+        with patch('organ_relation.training.engine.summarize_dice',side_effect=controlled):
+            first=self.tiny_trainer(self.root/'distinct');self.f.quiet_run(first,stop_after=30)
+            ck=load_checkpoint(first.run_dir/'last.ckpt',first.identity)
+            self.assertEqual(ck['early_stopping']['best_metric'],.50006)
+            self.assertEqual(ck['early_stopping']['patience_reference_metric'],.5)
+            self.assertEqual(ck['early_stopping']['no_improvement_count'],1)
+            best=load_checkpoint(first.run_dir/'best-dev.ckpt',first.identity)
+            self.assertEqual(best['development_state']['best_dev']['epoch'],10)
+            resumed=self.tiny_trainer(first.run_dir,True)
+            self.f.assert_nested_equal(resumed.early_state,ck['early_stopping'])
+            self.f.quiet_run(resumed,stop_after=15)
+        ck=load_checkpoint(first.run_dir/'last.ckpt',first.identity)
+        self.assertEqual(ck['early_stopping']['best_metric'],.5001)
+        self.assertEqual(ck['early_stopping']['patience_reference_metric'],.5001)
+        self.assertEqual(ck['early_stopping']['no_improvement_count'],0)
 
     def test_scalar_train_no_observers_epoch_board_and_validation_still_has_soft(self):
         trainer=self.tiny_trainer(self.root/'scalars')

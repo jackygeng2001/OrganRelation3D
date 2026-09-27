@@ -404,13 +404,15 @@ python -B scripts/train.py --config configs/train_monai_relation_gated_A_160_40.
 
 Each epoch writes aggregate training metrics and atomic resumable `last.ckpt`.
 Epochs 5,10,...,500 evaluate all 40 dev cases and update `best-dev.ckpt` on
-strict improvement in final mean case foreground hard Dice. Early stopping counts
-a validation as improving only when it exceeds the **previous all-time best +
-1e-4**. Five consecutive non-improving validations (25 epochs) stop the run once
-epoch>=100. Counts accumulate before 100 but cannot stop early; a small new
-record still updates the raw best, without resetting patience. Gamma never resets
-this counter. Both checkpoints include optimizer/RNG/order/history/config/source
-and early-stopping state; resume verifies that state against validation history.
+strict improvement in final mean case foreground hard Dice (raw best). Early stopping
+uses a separate **patience reference**: after the first validation initializes it,
+only `current >= reference + 1e-4` updates that reference and resets patience.
+Smaller records update raw best without moving the reference, allowing cumulative
+small improvements to meet the threshold. Five consecutive non-improving validations
+(25 epochs) stop the run once epoch>=100. Counts accumulate before 100 but cannot
+stop early. Gamma never resets this counter. Both checkpoints include
+optimizer/RNG/order/history/config/source and early-stopping state, including both
+raw best and patience reference; resume verifies that state against validation history.
 A stopped run stays stopped. Resume with the identical command plus `--resume <run-dir>/last.ckpt`;
 do not edit the original config or source during a run. Incomplete validation
 resumes via its per-case ledger. Epoch partial aggregates are also checkpointed.

@@ -22,6 +22,7 @@ from .state import (ScalarLog, atomic_json, capture_rng, digest, load_checkpoint
                     restore_rng, save_checkpoint)
 from .tensorboard import TensorBoardObserver
 from .development import cadence_due, summarize_branches, validation_branches
+from .monai_relation import observed_forward
 
 
 def validate_options(options):
@@ -335,8 +336,10 @@ class Trainer:
                     started = time.perf_counter()
                     with torch.no_grad():
                         image, label = self._batch(self.validation_dataset, index, validation=True)
-                        output = self.model(image)
+                        output, relation_stats = observed_forward(self.model, image)
                         record = hard_dice(output.final_logits.argmax(1)[0], label[0])
+                        if relation_stats:
+                            record['relation_scale'] = relation_stats
                         if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
                             from .monai_reference import reference_diagnostics
                             if self.mode in ('monai_relation_unet', 'monai_coarse_aux'):
@@ -367,6 +370,9 @@ class Trainer:
         row['ce_reduction_mode'] = self.ce_reduction_mode
         row['foreground_ce_reduction'] = self.foreground_ce_reduction
         row.update(self.ce_weights)
+        if any('relation_scale' in record for record in records):
+            row['relation_scale_cases'] = {case: record['relation_scale']
+                for case, record in zip(self.validation_case_ids, records)}
         if self.mode in ('backbone_only_final', 'monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
             row['diagnostic_cases'] = {case: record['diagnostic']
                                        for case, record in zip(self.validation_case_ids, records)}
@@ -452,7 +458,7 @@ class Trainer:
             started = time.perf_counter()
             self.optimizer.zero_grad(set_to_none=True)
             image, label = self._batch(self.dataset, index)
-            output = self.model(image)  # Supervision never enters model.forward.
+            output, relation_stats = observed_forward(self.model, image)  # No supervision enters forward.
             loss = (self.criterion(output.coarse_logits, output.final_logits, label)
                     if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux') else self.criterion(output.final_logits, label))
             loss.total.backward()
@@ -477,6 +483,8 @@ class Trainer:
                        final={k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
                        soft_dice_per_organ=loss.final.dice_per_class.detach().cpu()[0].tolist(),
                        diagnostics=diagnostics)
+            if relation_stats:
+                row['relation_scale'] = relation_stats  # Same forward's gamma, before optimizer.step.
             if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
                 from ..models.monai_reference import padding_geometry
                 row['geometry'] = padding_geometry(image.shape[2:])

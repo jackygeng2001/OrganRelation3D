@@ -4,6 +4,10 @@
 
 ## 当前 full-development A/C 实验协议（2026-09-27 用户确认）
 
+本轮唯一新增模型机制（2026-09-27 用户授权）：当前正式 C-gated 使用 `F'=F+gamma*phi(G)`，单个全局可学习 scalar `gamma_init=0.1`，不限制符号，不使用 clamp/sigmoid/softplus/正则/warmup/schedule。必须先计算 phi(G)，再乘 gamma（包括缩放 phi bias）。新配置为 `train_monai_relation_gated_A_160_40.json`，其 relation 中显式设置 `learnable_relation_scale=true, relation_scale_init=0.1`；与此前正式 C 配置只差这两个字段。纯 A 不加 gamma。旧配置/default 为 learnable=false、effective gamma=1，保留 `F+phi(G)` 的原计算、参数键与初始化，不修改旧 A/B-spacing C 配置。以下历史无缩放公式仍对应 legacy 模式；本变体不改变 c/s/q、GRU、attention、K、loss/coarse weight 或其他结构。
+
+Gated 观测：同次前向以整张 F、phi(G)、gamma*phi(G) 的全 tensor L2 norm 计算两个比值，分母为 `||F||_2+1e-6`，使用 detached FP64 norm reduction；不改变前向/梯度/RNG，不保留激活历史。每个训练 step JSONL 的 `relation_scale` 记录 gamma、`writeback_to_feature_norm`（未缩放）及 `scaled_writeback_to_feature_norm`（实际扰动），均来自该 step optimizer 更新前的同次前向；验证逐病例保存在 ledger 与 `relation_scale_cases`。TensorBoard 仅额外记录 `Relation/Gamma` 和 `Relation/WritebackToFeatureNorm`（实际扰动比），训练 step 级别；legacy/baseline 不生成这两条曲线。gamma 随 model/optimizer 原机制保存恢复，relation 配置纳入严格 identity，不允许 legacy checkpoint 静默迁移到 gated 模式。
+
 本节更新当前实验配置，保留下面的原始方法转录与历史 diagnostic 记录。A 为已有 MONAI reference；C 为同一个 MONAI backbone 加已有粗头、节点构建、动态关系/指定 GRU、节点回写与残差融合。骨干保持 channels=[8,16,32,64,128]、strides=[2,2,2,2]、num_res_units=2、InstanceNorm/PReLU；C 保持 Cr=8、K=2、da=4、Cg=6，不重新搜索关系参数。
 
 - 使用已有 `runs/splits/development_160_40.json`，其 JSON 内 `split_hash=7d308eca4f7324f0e899c7416a45a03f8dfbec5e867e5ed6018353e96541468c`。启动同时验证内部 manifest/partition 哈希、train=160、internal-dev=40、与实际 official training manifest 一致；不生成新 split，不从 validation 抽样。文件 SHA256 单独记录，不能代替 split_hash。

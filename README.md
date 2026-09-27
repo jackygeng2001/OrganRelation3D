@@ -344,10 +344,15 @@ foreground reduction 纳入 run/checkpoint 身份；历史字段缺失只等价�
 ## Full-development A/C training (current phase)
 
 Use `configs/train_monai_reference_A_160_40.json` (A) and
-`configs/train_monai_relation_A_160_40.json` (C). Both retain the existing MONAI
+`configs/train_monai_relation_gated_A_160_40.json` (C-gated). Both retain the existing MONAI
 8/16/32/64/128 backbone and final DiceCELoss, but use A spacing and the same
 160 training / 40 internal-dev cases. C retains the existing relation modules
-and 0.5 coarse auxiliary loss. Seed=20260925, FP32, batch=1, channels_last_3d,
+and 0.5 coarse auxiliary loss. C-gated adds exactly one learnable global scalar,
+`F_out = F + gamma * phi(G)`, initialized at 0.1, unconstrained and without a
+schedule. It scales the projected writeback including its bias. The previous
+`train_monai_relation_A_160_40.json` and B-spacing C configs remain legacy,
+effective scale 1 with no added parameter; A is unchanged.
+Seed=20260925, FP32, batch=1, channels_last_3d,
 AdamW lr=3e-4 / weight_decay=0 / no scheduler. Budget is 300 epochs = 48,000 steps.
 
 The existing `runs/splits/development_160_40.json` must already be on Linux.
@@ -366,7 +371,7 @@ export PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0
 unset MIOPEN_DEBUG_CONV_GEMM MIOPEN_LOG_LEVEL MIOPEN_ENABLE_LOGGING_CMD
 python -B scripts/train.py --config configs/train_monai_reference_A_160_40.json \
   --data-root "$AMOS_ROOT" --cases amos_0097 --preflight-backward
-python -B scripts/train.py --config configs/train_monai_relation_A_160_40.json \
+python -B scripts/train.py --config configs/train_monai_relation_gated_A_160_40.json \
   --data-root "$AMOS_ROOT" --cases amos_0097 --preflight-backward
 ```
 
@@ -375,8 +380,8 @@ After both preflights are accepted, start fresh runs without `--cases`:
 ```bash
 python -B scripts/train.py --config configs/train_monai_reference_A_160_40.json \
   --data-root "$AMOS_ROOT" --run-dir runs/monai_reference_A_160_40
-python -B scripts/train.py --config configs/train_monai_relation_A_160_40.json \
-  --data-root "$AMOS_ROOT" --run-dir runs/monai_relation_A_160_40
+python -B scripts/train.py --config configs/train_monai_relation_gated_A_160_40.json \
+  --data-root "$AMOS_ROOT" --run-dir runs/monai_relation_gated_A_160_40
 ```
 
 Each epoch writes aggregate training metrics and atomic resumable `last.ckpt`.
@@ -401,6 +406,23 @@ training forwards, not a second evaluation pass. Both-empty hard Dice values
 remain null (no fabricated zero scalar); all per-class soft Dice and detailed
 diagnostics remain in JSONL/ledger. Resume purges uncommitted events and replays
 committed same-step summaries. Historical diagnostic tags remain unchanged.
+
+C-gated additionally writes two per-training-step TensorBoard scalars:
+`Relation/Gamma` and `Relation/WritebackToFeatureNorm`. The latter is
+`||gamma*phi(G)||_2 / (||F||_2 + 1e-6)` over the whole feature tensor, using
+detached FP64 norm reduction. JSONL `relation_scale` also records the unscaled
+`writeback_to_feature_norm`; the actual scaled ratio is
+`scaled_writeback_to_feature_norm`. All values belong to the same pre-update
+forward as that step's loss. Validation records these per case in the ledger
+and `relation_scale_cases`, without mixing validation points into the training
+gamma curve. Plain forward stores no diagnostics or activation cache.
+Legacy and baseline runs do not fabricate gamma curves.
+
+The gated preflight also reports original NIfTI IJK shape, resampled/padded DHW
+shape, bottleneck shape, initial gamma, both norm ratios, final/coarse/joint loss,
+timings and allocator peaks, gamma gradient and all missing/nonfinite/zero
+gradient tensor names. It performs exactly one forward/backward and zero
+optimizer steps. Do not start long training before reviewing the AMD result.
 
 ## External MONAI whole-volume reference (historical single-case diagnostic)
 

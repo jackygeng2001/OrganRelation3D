@@ -11,7 +11,7 @@ SUITES = {
                'segmentor', 'joint_loss'),
     'data': ('metadata', 'candidate_estimates', 'fidelity'),
     'fullscan': ('full_scan', 'full_scan_probe'),
-    'monai': ('monai_reference', 'monai_relation', 'monai_coarse_aux', 'development'),
+    'monai': ('monai_reference', 'monai_relation', 'monai_coarse_aux', 'development', 'relation_scale'),
     'training': ('training', 'monitoring', 'backbone_only', 'balanced_ce', 'foreground_macro_ce'),
 }
 

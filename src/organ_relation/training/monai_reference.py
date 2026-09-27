@@ -88,11 +88,18 @@ def preflight_backward(model, criterion, dataset, identity):
             image = image.contiguous(memory_format=torch.channels_last_3d)
         print('reference_preflight', json.dumps(dict(mode=identity['mode'],
             case_ids=[r['case_id'] for r in identity.get('data', {}).get('actual_train', [])],
+            original_shape_ijk=sample.metadata.get('image', {}).get('original_shape_ijk'),
             resampled_shape=list(image.shape[2:]), padded_shape=padding_geometry(image.shape[2:])['padded_shape'],
             geometry=padding_geometry(image.shape[2:]), parameter_count=identity['parameter_count'],
             model=identity['model'], loss=identity['loss'], preprocessing=identity['preprocessing'],
             environment=identity['environment'], provenance=identity['provenance']['git'])), flush=True)
-        output = measure('forward', lambda: model(image))
+        from .monai_relation import observed_forward
+        scaled = getattr(model, 'relation_scale_enabled', False)
+        if scaled:
+            print('gamma_initial', model.bottleneck.fusion.relation_scale.detach().item(), flush=True)
+        output, relation_stats = measure('forward', lambda: observed_forward(model, image))
+        if relation_stats:
+            print('relation_scale', json.dumps(relation_stats), flush=True)
         joint = identity['mode'] in ('monai_relation_unet', 'monai_coarse_aux')
         if joint:
             groups = model.diagnostic_parameter_groups()
@@ -113,10 +120,15 @@ def preflight_backward(model, criterion, dataset, identity):
         zeros = [n for n, p in model.named_parameters() if p.grad is not None and not p.grad.any()]
         if joint:
             from .engine import gradient_diagnostics
-            print('coarse_aux_gradients' if coarse_only else 'relation_gradients', json.dumps(gradient_diagnostics(model)), flush=True)
+            if not missing and not nonfinite:
+                print('coarse_aux_gradients' if coarse_only else 'relation_gradients', json.dumps(gradient_diagnostics(model)), flush=True)
             print('coarse_loss', json.dumps(dict(total=loss.coarse.segmentation.item(),
                 ce=loss.coarse.ce.item(), dice=loss.coarse.dice_loss.item())), flush=True)
         print('preflight_result', json.dumps(dict(status='passed' if not missing and not nonfinite else 'failed',
+            final_loss=loss.final.segmentation.item(), coarse_loss=loss.coarse.segmentation.item() if joint else None,
+            joint_loss=loss.total.item() if joint else None,
+            gamma_grad=(model.bottleneck.fusion.relation_scale.grad.item()
+                        if scaled and model.bottleneck.fusion.relation_scale.grad is not None else None),
             oom=False, finite_gradients=not missing and not nonfinite,
             peak_allocated_bytes=max((s['peak_allocated_bytes'] or 0 for s in stages.values())) if device.type == 'cuda' else None,
             peak_reserved_bytes=max((s['peak_reserved_bytes'] or 0 for s in stages.values())) if device.type == 'cuda' else None,

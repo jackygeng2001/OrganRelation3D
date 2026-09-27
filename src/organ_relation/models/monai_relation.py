@@ -23,6 +23,7 @@ class BottleneckAdapter(nn.Module):
         # A call-scoped output collector, always cleared by the outer finally.
         # No hooks or activation cache survives forward (including failures).
         self._coarse_sink = None
+        self._relation_diagnostics_sink = None
         if enabled:
             c = relation_config
             self.coarse_head = CoarseHead(channels, bias=c['coarse_bias'])
@@ -30,7 +31,10 @@ class BottleneckAdapter(nn.Module):
             self.relation = DynamicRelation(channels, relation_channels=c['relation_channels'], rounds=c['rounds'])
             self.node_to_space = NodeToSpace(channels, attention_channels=c['attention_channels'],
                                              content_channels=c['content_channels'], beta_init=c['beta_init'])
-            self.fusion = ResidualFusion(channels, content_channels=c['content_channels'], bias=c['fusion_bias'])
+            self.fusion = ResidualFusion(channels, content_channels=c['content_channels'], bias=c['fusion_bias'],
+                learnable_relation_scale=c.get('learnable_relation_scale', False),
+                relation_scale_init=c.get('relation_scale_init', 1.0))
+            self.diagnostics_epsilon = c['epsilon']
 
     def forward(self, image):
         features = self.block(image)
@@ -44,7 +48,11 @@ class BottleneckAdapter(nn.Module):
         nodes = self.space_to_node(features, coarse.probabilities)
         zK = self.relation(nodes.z0, nodes.centroid, nodes.size, nodes.confidence)
         content = self.node_to_space(features, zK)
-        fused = self.fusion(features, content)
+        if self._relation_diagnostics_sink is None:
+            fused = self.fusion(features, content)
+        else:
+            fused, stats = self.fusion.forward_with_diagnostics(features, content, epsilon=self.diagnostics_epsilon)
+            self._relation_diagnostics_sink.update(stats)
         self._coarse_sink.append(coarse.logits)
         return fused
 
@@ -76,20 +84,34 @@ class MonaiRelationUNet(MonaiReferenceUNet):
         return self.network.get_submodule(BOTTLENECK_PATH)
 
     def forward(self, image):
+        return self._forward(image)[0]
+
+    @property
+    def relation_scale_enabled(self):
+        return self.relation_enabled and self.bottleneck.fusion.learnable_relation_scale
+
+    def forward_with_relation_diagnostics(self, image):
+        """Return (normal output, scalar diagnostics); no activation cache survives."""
+        return self._forward(image, collect=True)
+
+    def _forward(self, image, *, collect=False):
         if not self.relation_enabled:
-            return super().forward(image)
+            return super().forward(image), {}
         adapter = self.bottleneck
         if adapter._coarse_sink is not None:
             raise RuntimeError('concurrent/reentrant forwards on one adapter are unsupported')
         coarse = []
+        stats = {}
         adapter._coarse_sink = coarse
+        adapter._relation_diagnostics_sink = stats if collect and self.relation_scale_enabled else None
         try:
             final = super().forward(image).final_logits
             if len(coarse) != 1:
                 raise RuntimeError('expected exactly one whole-volume bottleneck evaluation')
-            return SegmentorOutput(coarse[0], final)
+            return SegmentorOutput(coarse[0], final), stats
         finally:
             adapter._coarse_sink = None
+            adapter._relation_diagnostics_sink = None
             coarse.clear()
 
     def diagnostic_parameter_groups(self):

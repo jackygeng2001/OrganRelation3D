@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "purpose": "Full-development MONAI relation A-spacing 160/40 comparison; 300 epochs.",
+  "baseline_config": "baseline.json",
+  "selection_config": "ct_stats.json",
+  "split_artifact": "../runs/splits/development_160_40.json",
+  "data": {
+    "role": "development_train",
+    "candidate": "A",
+    "train_cases": null,
+    "train_limit": null,
+    "validation_cases": null,
+    "validation_limit": null
+  },
+  "optimizer": {
+    "name": "AdamW",
+    "lr": 0.0003,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "weight_decay": 0,
+    "foreach": false,
+    "fused": false
+  },
+  "runtime": {
+    "backend": "rocm",
+    "device": "cuda:0",
+    "dtype": "float32",
+    "cpu_threads": 2
+  },
+  "training": {
+    "max_steps": null,
+    "max_epochs": 300,
+    "batch_size": 1,
+    "num_workers": 0,
+    "seed": 20260925,
+    "shuffle": true,
+    "memory_format": "channels_last_3d",
+    "scheduler": null,
+    "checkpoint_every": 1,
+    "diagnostics_every": 1,
+    "validation_every": 10,
+    "validation_role": "internal_dev",
+    "eta_window": 20,
+    "eta_warmup": 5,
+    "cadence_unit": "epoch"
+  },
+  "mode": "monai_relation_unet",
+  "model": {
+    "spatial_dims": 3,
+    "in_channels": 1,
+    "out_channels": 16,
+    "channels": [
+      8,
+      16,
+      32,
+      64,
+      128
+    ],
+    "strides": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "num_res_units": 2,
+    "norm": "INSTANCE",
+    "act": "PRELU",
+    "dropout": 0.0,
+    "kernel_size": 3,
+    "up_kernel_size": 3,
+    "bias": true,
+    "adn_ordering": "NDA"
+  },
+  "input_processing": {
+    "clip_hu": [
+      -1000,
+      1000
+    ],
+    "scale_to": [
+      -1,
+      1
+    ],
+    "padding_multiple": 16,
+    "padding_side": "high",
+    "padding_value": -1
+  },
+  "loss": {
+    "include_background": false,
+    "to_onehot_y": true,
+    "softmax": true,
+    "sigmoid": false,
+    "other_act": null,
+    "squared_pred": false,
+    "jaccard": false,
+    "reduction": "mean",
+    "smooth_nr": 1e-05,
+    "smooth_dr": 1e-05,
+    "batch": false,
+    "weight": null,
+    "lambda_dice": 1.0,
+    "lambda_ce": 1.0,
+    "label_smoothing": 0.0
+  },
+  "relation_enabled": true,
+  "relation": {
+    "coarse_bias": true,
+    "fusion_bias": true,
+    "epsilon": 1e-06,
+    "relation_channels": 8,
+    "rounds": 2,
+    "attention_channels": 4,
+    "content_channels": 6,
+    "beta_init": 0.0,
+    "feature_channels": 128,
+    "learnable_relation_scale": true,
+    "relation_scale_init": 0.1
+  },
+  "coarse_supervision": {
+    "lambda_c": 0.5,
+    "align_corners": false
+  },
+  "protocol": "development_160_40_v1",
+  "expected_split_hash": "7d308eca4f7324f0e899c7416a45a03f8dfbec5e867e5ed6018353e96541468c"
+}

@@ -47,6 +47,8 @@
 
 ## 验收和交付
 
+- 用户唯一授权的当前模型变体：正式 C-gated 显式启用单个可学习 relation residual scale，gamma_init=0.1，`F + gamma * phi(G)`；不得写成 `phi(gamma*G)`。旧配置无缩放路径和 B-spacing C 保留，A 无 gamma；当前正式配置用 `train_monai_relation_gated_A_160_40.json`。不限制 gamma 符号、不增加 schedule/正则。其他关系、固定属性、loss、K 和训练协议不变。诊断仅观察同次前向，JSONL 保留完整 scalar，TensorBoard 额外仅 Gamma 与实际扰动范数比。AMD 最大病例 preflight 由用户执行，通过后才由用户启动长训练。
+
 - 当前 full-development A/C 协议以 `train_monai_reference_A_160_40.json` / `train_monai_relation_A_160_40.json` 为准：固定已有 160/40 split，严格校验 JSON 内 split_hash `7d308eca4f7324f0e899c7416a45a03f8dfbec5e867e5ed6018353e96541468c`，不得重新生成或用文件 checksum 替代。MONAI A/C 使用同 seed=20260925、A spacing、相同骨干/最终 MONAI DiceCELoss/AdamW 固定 LR；300 epochs。每 epoch 保存 last，每 10 epochs 全量 40-case dev，final mean case hard Dice 严格改善时保存 best-dev，无 early stopping。延长必须 A/C 同预算；保留原配置，用 `--resume ... --extend-epochs 400`（后续 500）。历史 single-case 配置和原自定义 JointLoss 不替换。
 
 - CPU 公式与梯度测试先行；阶段同步后在 AMD 验证 GPU、显存、梯度与真实数据。

@@ -7,6 +7,13 @@ from .monai_reference import MonaiReferenceLoss, reference_diagnostics
 from organ_relation.metrics import hard_dice
 
 
+def observed_forward(model, image):
+    """Opt-in scalar observation of the same forward, never a second model call."""
+    if getattr(model, 'relation_scale_enabled', False):
+        return model.forward_with_relation_diagnostics(image)
+    return model(image), {}
+
+
 class MonaiRelationLoss(nn.Module):
     def __init__(self, constructor, *, lambda_c, align_corners):
         super().__init__()

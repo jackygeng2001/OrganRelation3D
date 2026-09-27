@@ -37,6 +37,9 @@ def scalar_values(row):
         for name, stats in (row['diagnostics'] or {}).items():
             if name in MODULE_NAMES:
                 values['GradNorm/' + MODULE_NAMES[name]] = stats['gradient_norm']
+        if row.get('relation_scale'):
+            from .development import relation_scalars
+            values.update(relation_scalars(row['relation_scale']))
         return values
     if row['phase'] in ('train_monitor', 'internal_dev'):
         prefix = 'Monitor' if row['phase'] == 'train_monitor' else 'Val'

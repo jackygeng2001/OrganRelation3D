@@ -54,6 +54,8 @@ def cadence_due(options, name, step, epoch, epoch_complete):
 
 def development_scalars(row):
     """Strict formal TensorBoard whitelist; diagnostics remain in JSONL only."""
+    if row['phase'] == 'train' and row.get('relation_scale'):
+        return relation_scalars(row['relation_scale'])
     if row['phase'] not in ('train_epoch', 'internal_dev'):
         return {}
     split = 'Train' if row['phase'] == 'train_epoch' else 'Val'
@@ -73,3 +75,8 @@ def development_scalars(row):
             for organ in values['hard']['organs']:
                 result[f'Dice_Per_Class_Val_{title}/Class_{organ["label"]:02d}'] = organ['mean_dice']
     return {k: v for k, v in result.items() if v is not None}
+
+
+def relation_scalars(stats):
+    return {'Relation/Gamma': stats['gamma'],
+            'Relation/WritebackToFeatureNorm': stats['scaled_writeback_to_feature_norm']}

@@ -11,7 +11,7 @@ SUITES = {
                'segmentor', 'joint_loss'),
     'data': ('metadata', 'candidate_estimates', 'fidelity'),
     'fullscan': ('full_scan', 'full_scan_probe'),
-    'training': ('training', 'monitoring', 'backbone_only', 'balanced_ce'),
+    'training': ('training', 'monitoring', 'backbone_only', 'balanced_ce', 'foreground_macro_ce'),
 }
 
 

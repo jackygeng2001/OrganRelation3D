@@ -331,3 +331,12 @@ backbone-only 70:30 单变量对照使用 `configs/train_backbone_only_overfit_b
 两个组权重均须为有限正数且和为 1，不自动归一化；未指定仍为 0.5/0.5。新 run.json/checkpoint identity 和每条训练/monitor 日志显式记录 resolved 权重。monitor 保留 `CE_bg_mean`、`CE_fg_mean` 与历史 `balanced_ce`（始终指 50:50 对照值），新增 `weighted_ce` 表示当前组权重下的 CE；训练行的 `final.ce` / `coarse.ce` 仍表示实际损失。空组规则、Dice、console 和 TensorBoard 已有含义不变。
 
 旧身份缺失权重时仅在比较中解释为 0.5/0.5，旧 run.json、origin identity 及其哈希不重写。权重改变仍拒绝普通 resume 和受控延长；新 70:30 run 自身可以完整续训。此兼容规则不绕过 Git/source provenance；不自动授权从旧源码版本跨版本恢复，既有来源校验继续生效。
+
+
+前景类别 macro CE 诊断使用 `configs/train_backbone_only_overfit_fg_class_macro.json`，与 50:50 backbone balanced 配置仅差 `foreground_ce_reduction=class_macro_mean`。沿用同一个 `scripts/train.py`、`--cases amos_0109`、B/3S-P1/FP32/AdamW/200 steps；新目录建议 `runs/backbone_only_amos0109_3sp1_B_fg_class_macro_200`，首次不传 `--resume`。缺省仍为 foreground `voxel_mean`，未修改任何历史配置。
+
+macro 模式按病例分别求每个实际存在的前景器官 CE 均值，再对这些器官等权平均；体素数不同仍每类一票，缺失器官不补零参与 CE。背景保持 voxel mean，组权重默认 0.5/0.5。Dice 仍对全部 15 类平均；该规则不进入模型前向，也不屏蔽节点。SegmentationLoss 与 JointLoss 共享同一实现，JointLoss 粗分支不下采样 GT。
+
+monitor 新增 `foreground_ce_reduction`、`present_foreground_class_count`、`per_class_ce_mean`（固定 15 项，索引0对应标签1，缺失类为 null）、`CE_fg_macro`。原 `CE_fg_mean` 始终表示前景 voxel mean，原 `balanced_ce` 始终表示 voxel 50:50 对照值；`weighted_ce` 使用当前选择的 foreground reduction。backbone 字段位于 `diagnostic_cases[case_id]`，完整模型位于 `ce_diagnostic_cases[case_id].coarse/final`，病例 ledger 同步保存。只记标量/小列表，不增加 console 输出。
+
+foreground reduction 纳入 run/checkpoint 身份；历史字段缺失只等价于 voxel_mean，不重写旧 origin 或 run.json。不同 reduction 禁止 resume/受控延长，Git/source provenance 仍严格校验，不提供跨版本绕过。macro 新 run 自身可正常断点续训。

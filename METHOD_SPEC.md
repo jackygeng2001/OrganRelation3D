@@ -98,6 +98,8 @@ Loss = mean_b [SegLoss(Pf_b,T_b) + lambda_c SegLoss(Pc_up_b,T_b)]
 
 用户授权的组权重对照：两种 loss 的 `foreground_background_balanced` 模式可配置 `ce_background_weight=w_bg` 与 `ce_foreground_weight=w_fg`，使用 `w_bg*CE_bg_mean+w_fg*CE_fg_mean`；两者有限且严格大于 0、和为 1（仅浮点求和校验容差 1e-12，不自动归一化）。两项缺省均为 0.5，保持历史 50:50 的计算顺序与结果；voxel_mean 不使用组权重。70:30 backbone-only 对照仅显式设置 0.7/0.3，不改 Dice、初始化、lambda_c 或其他训练条件。新 run identity 保存 resolved 权重；旧身份缺失字段只在比较时按 0.5/0.5 解释，不修改原 run.json/origin identity/哈希，不放宽来源或其他配置校验。
 
+用户授权的 hierarchical foreground CE 诊断：`foreground_ce_reduction` 缺省为 `voxel_mean`；显式 `class_macro_mean` 仅与 `ce_reduction_mode=foreground_background_balanced` 配合。每病例先计算实际存在的前景类各自的 `CE_c=mean(l|y=c)`，再等权平均得到 `CE_fg_macro`，CE 为 `w_bg*CE_bg+w_fg*CE_fg_macro`。缺失类不进入 CE macro，不补零；GT 仅在 loss/metrics 使用，不改变图节点或模型前向。Dice 仍为全部 15 类逐病例均值。JointLoss 两分支使用相同 foreground reduction，coarse 仍先插值 logits 到完整 GT 网格。整例无前景或无背景时沿用明确拒绝规则。首个配置 `train_backbone_only_overfit_fg_class_macro.json` 只比原 50:50 backbone balanced 配置增加 foreground reduction，使用默认 0.5/0.5，从新 run 的 step 0 开始。旧身份缺失该字段仅在比较时解释为 voxel_mean；原身份/哈希与严格来源校验保留。
+
 真实标签只用于监督与评估，不输入模型、节点或关系，也不用于存在性判断及裁剪采样。最终损失必须经回写、图、语义和属性路径反传至粗头和编码器；固定属性不表示 detach。推理保留同一核心前向，不计算损失。
 
 ## 接口契约

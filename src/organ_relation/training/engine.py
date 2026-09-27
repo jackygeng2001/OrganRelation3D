@@ -13,7 +13,8 @@ from torch.utils.data import DataLoader
 
 from ..evaluation.progress import CaseLedger
 from ..metrics import METRIC_PROTOCOL, hard_dice, summarize_dice
-from ..losses import JointLoss, SegmentationLoss, foreground_background_ce_means, resolve_ce_weights
+from ..losses import (JointLoss, SegmentationLoss, foreground_background_ce_means,
+                      foreground_class_ce_means, resolve_ce_weights)
 from .console import TrainingConsole
 from .progress import ProgressClock
 from .extension import resolve_horizon
@@ -67,6 +68,16 @@ def gradient_diagnostics(model):
     return result
 
 
+def foreground_ce_diagnostics(voxel_loss, indices, criterion):
+    """Single-case monitor statistics; never retain tensors in logs."""
+    means, macro, count = foreground_class_ce_means(voxel_loss, indices)
+    values = means[0].detach().cpu().tolist()
+    return dict(foreground_ce_reduction=criterion.foreground_ce_reduction,
+                present_foreground_class_count=count[0].item(),
+                per_class_ce_mean=[v if math.isfinite(v) else None for v in values],
+                CE_fg_macro=macro[0].item() if torch.isfinite(macro[0]) else None), macro
+
+
 def final_diagnostic_metrics(logits, label, criterion, hard_metrics):
     """Single-case monitor only. TP requires the correct foreground CLASS.
 
@@ -78,17 +89,20 @@ def final_diagnostic_metrics(logits, label, criterion, hard_metrics):
     foreground = label > 0
     count = foreground.sum().item()
     true_probability = probabilities.gather(1, label.unsqueeze(1)).squeeze(1)
+    voxel_loss = -torch.log(true_probability.flatten(1) + criterion.epsilon)
     bg, fg = foreground_background_ce_means(
-        -torch.log(true_probability.flatten(1) + criterion.epsilon), foreground.flatten(1))
+        voxel_loss, foreground.flatten(1))
+    fg_stats, macro = foreground_ce_diagnostics(voxel_loss, label.flatten(1), criterion)
+    selected_fg = macro if criterion.foreground_ce_reduction == 'class_macro_mean' else fg
     bg_mean = bg[0].item() if torch.isfinite(bg[0]) else None
     fg_mean = fg[0].item() if torch.isfinite(fg[0]) else None
-    return dict(final_soft_dice=soft_dice,
+    return dict(**fg_stats, final_soft_dice=soft_dice,
                 ce_reduction_mode=criterion.ce_reduction_mode,
                 ce_background_weight=criterion.ce_background_weight,
                 ce_foreground_weight=criterion.ce_foreground_weight,
                 CE_bg_mean=bg_mean, CE_fg_mean=fg_mean,
                 balanced_ce=(0.5 * bg[0] + 0.5 * fg[0]).item() if bg_mean is not None and fg_mean is not None else None,
-                weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * fg[0]).item()
+                weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * selected_fg[0]).item()
                 if bg_mean is not None and fg_mean is not None else None,
                 predicted_foreground_voxels=sum(o['predicted_voxels'] for o in hard_metrics['organs']),
                 foreground_true_positive_voxels=sum(o['true_positive'] for o in hard_metrics['organs']),
@@ -101,12 +115,15 @@ def joint_ce_diagnostic_metrics(output, label, criterion):
     """Single-case scalar monitor; process branches sequentially to bound memory."""
     def branch(logits):
         matched = logits.softmax(1).gather(1, label.unsqueeze(1)).squeeze(1)
+        voxel_loss = -torch.log(matched.flatten(1) + criterion.epsilon)
         bg, fg = foreground_background_ce_means(
-            -torch.log(matched.flatten(1) + criterion.epsilon), label.flatten(1) > 0)
-        return dict(CE_bg_mean=bg[0].item(), CE_fg_mean=fg[0].item(),
+            voxel_loss, label.flatten(1) > 0)
+        fg_stats, macro = foreground_ce_diagnostics(voxel_loss, label.flatten(1), criterion)
+        selected_fg = macro if criterion.foreground_ce_reduction == 'class_macro_mean' else fg
+        return dict(**fg_stats, CE_bg_mean=bg[0].item(), CE_fg_mean=fg[0].item(),
                     ce_background_weight=criterion.ce_background_weight,
                     ce_foreground_weight=criterion.ce_foreground_weight,
-                    weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * fg[0]).item(),
+                    weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * selected_fg[0]).item(),
                     balanced_ce=(0.5 * bg[0] + 0.5 * fg[0]).item())
 
     coarse = branch(torch.nn.functional.interpolate(
@@ -130,6 +147,9 @@ class Trainer:
         self.ce_reduction_mode = getattr(criterion, 'ce_reduction_mode', 'voxel_mean')
         if identity.get('ce_reduction_mode', 'voxel_mean') != self.ce_reduction_mode:
             raise ValueError('criterion ce_reduction_mode must match checkpoint/run identity')
+        self.foreground_ce_reduction = criterion.foreground_ce_reduction
+        if identity.get('foreground_ce_reduction', 'voxel_mean') != self.foreground_ce_reduction:
+            raise ValueError('criterion foreground_ce_reduction must match checkpoint/run identity')
         bg, fg = resolve_ce_weights(identity.get('ce_background_weight', 0.5),
                                     identity.get('ce_foreground_weight', 0.5))
         self.ce_weights = dict(ce_background_weight=bg, ce_foreground_weight=fg)
@@ -280,6 +300,7 @@ class Trainer:
                    global_step=step, epoch=self.state['epoch'], metrics=summarize_dice(records))
         row['mode'] = self.mode
         row['ce_reduction_mode'] = self.ce_reduction_mode
+        row['foreground_ce_reduction'] = self.foreground_ce_reduction
         row.update(self.ce_weights)
         if self.mode == 'backbone_only_final':
             row['diagnostic_cases'] = {case: record['diagnostic']
@@ -382,6 +403,7 @@ class Trainer:
                        diagnostics=diagnostics)
             row['mode'] = self.mode
             row['ce_reduction_mode'] = self.ce_reduction_mode
+            row['foreground_ce_reduction'] = self.foreground_ce_reduction
             row.update(self.ce_weights)
             if self.mode == 'organ_relation_joint':
                 row['coarse'] = {k: getattr(loss.coarse, k).detach().item()

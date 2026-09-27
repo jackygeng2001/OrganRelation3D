@@ -115,7 +115,7 @@ class BackboneOnlyTests(unittest.TestCase):
                 SegmentationLoss(epsilon=epsilon)
 
     def trainer(self, directory, *, resume=False, extend_to=None, steps=4, board=False,
-                ce_reduction_mode='voxel_mean', ce_weights=None):
+                ce_reduction_mode='voxel_mean', ce_weights=None, foreground_ce_reduction=None):
         seed_all(712)
         model = BackboneOnly(model_config()).to(memory_format=torch.channels_last_3d)
         optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0, foreach=False, fused=False)
@@ -128,8 +128,11 @@ class BackboneOnlyTests(unittest.TestCase):
         identity = json.loads(json.dumps(identity))  # Same canonical identity as the CLI.
         if ce_weights is not None:
             identity.update(ce_weights)
+        fg_options = {} if foreground_ce_reduction is None else dict(foreground_ce_reduction=foreground_ce_reduction)
+        identity.update(fg_options)
         data = fixtures.RandomCases()
-        return Trainer(model, SegmentationLoss(epsilon=1e-6, ce_reduction_mode=ce_reduction_mode, **(ce_weights or {})),
+        return Trainer(model, SegmentationLoss(epsilon=1e-6, ce_reduction_mode=ce_reduction_mode,
+                                               **(ce_weights or {}), **fg_options),
                        optimizer, data, ['one', 'two', 'three'],
                        device='cpu', options=opts, identity=identity, run_dir=directory,
                        validation_dataset=data, validation_case_ids=['one', 'two', 'three'],

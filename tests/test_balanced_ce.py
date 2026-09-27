@@ -286,6 +286,7 @@ class BalancedCETests(unittest.TestCase):
             self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt')]), 0)
         identity = json.loads((run / 'run.json').read_text())['identity']
         self.assertEqual(identity['ce_reduction_mode'], BALANCED)
+        self.assertEqual(identity['foreground_ce_reduction'], cfg.get('foreground_ce_reduction', 'voxel_mean'))
         for name in ('ce_background_weight', 'ce_foreground_weight'):
             self.assertEqual(identity[name], cfg.get(name, .5))
         for row in self.fixture.fixture.rows(run):
@@ -303,7 +304,9 @@ class BalancedCETests(unittest.TestCase):
                         self.assertEqual(set(case), {'coarse', 'final'})
                         for branch in case.values():
                             self.assertEqual(set(branch), {'CE_bg_mean', 'CE_fg_mean', 'balanced_ce',
-                                                           'weighted_ce', 'ce_background_weight', 'ce_foreground_weight'})
+                                                           'weighted_ce', 'ce_background_weight', 'ce_foreground_weight',
+                                                           'foreground_ce_reduction', 'present_foreground_class_count',
+                                                           'per_class_ce_mean', 'CE_fg_macro'})
             cfg['ce_reduction_mode'] = 'voxel_mean'; atomic_json(path, cfg)
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt')]), 2)

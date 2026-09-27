@@ -52,7 +52,7 @@ def execute(args):
         raise ValueError('--extend-to requires --resume and a positive total; not a split preparation option')
     import torch
     from organ_relation.data.full_scan import FullScanDataset, FullScanPreprocessor, ScanPair
-    from organ_relation.losses import CE_REDUCTION_MODES, JointLoss, SegmentationLoss, resolve_ce_weights
+    from organ_relation.losses import CE_REDUCTION_MODES, JointLoss, SegmentationLoss, resolve_ce_weights, validate_foreground_reduction
     from organ_relation.models.backbone_only import BackboneOnly
     from organ_relation.models.segmentor import Segmentor
     from organ_relation.models.segmentor_config import SegmentorConfig
@@ -68,6 +68,8 @@ def execute(args):
     ce_reduction_mode = config.get('ce_reduction_mode', 'voxel_mean')
     if ce_reduction_mode not in CE_REDUCTION_MODES:
         raise ValueError('unsupported ce_reduction_mode')
+    foreground_ce_reduction = validate_foreground_reduction(
+        config.get('foreground_ce_reduction', 'voxel_mean'), ce_reduction_mode)
     w_bg, w_fg = resolve_ce_weights(config.get('ce_background_weight', 0.5),
                                     config.get('ce_foreground_weight', 0.5))
     ce_weights = dict(ce_background_weight=w_bg, ce_foreground_weight=w_fg)
@@ -166,15 +168,17 @@ def execute(args):
     loss_config = dict(epsilon=baseline['epsilon'])
     if mode == 'organ_relation_joint':
         loss_config.update(baseline['loss'])
-        criterion = JointLoss(**loss_config, ce_reduction_mode=ce_reduction_mode, **ce_weights)
+        criterion = JointLoss(**loss_config, ce_reduction_mode=ce_reduction_mode,
+                              foreground_ce_reduction=foreground_ce_reduction, **ce_weights)
     else:
-        criterion = SegmentationLoss(**loss_config, ce_reduction_mode=ce_reduction_mode, **ce_weights)
+        criterion = SegmentationLoss(**loss_config, ce_reduction_mode=ce_reduction_mode,
+                              foreground_ce_reduction=foreground_ce_reduction, **ce_weights)
     data_identity = dict(manifest=manifest, manifest_hash=digest(manifest), split=artifact['development'],
                          split_hash=artifact['split_hash'], role=data['role'], actual_train=chosen,
                          actual_validation=val_records, subset_hash=digest([chosen, val_records]),
                          case_identity=case_identity)
     identity = dict(model=model_config.to_dict(), loss=loss_config, ce_reduction_mode=ce_reduction_mode,
-                    **ce_weights,
+                    foreground_ce_reduction=foreground_ce_reduction, **ce_weights,
                     preprocessing=dict(candidate=data['candidate'], **baseline['preprocessing']),
                     optimizer=optimizer_config, runtime=runtime, training=options, data=data_identity,
                     provenance=dict(git=git_state(), source_hashes=code_hashes()),

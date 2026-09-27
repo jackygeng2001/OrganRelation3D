@@ -25,14 +25,16 @@ def digest(value):
 def identity_with_ce_weights(identity):
     """Comparison-only defaults; never rewrite stored identity or its hashes.
 
-    Only absent CE weights mean historical 50:50. All other fields, including
-    source provenance, retain strict equality requirements.
+    Absent CE weights mean 50:50, absent foreground reduction means voxel_mean.
+    All other fields, including source provenance, retain strict equality.
     """
-    from ..losses import resolve_ce_weights
+    from ..losses import resolve_ce_weights, validate_foreground_reduction
     result = dict(identity)
     bg, fg = resolve_ce_weights(result.get('ce_background_weight', 0.5),
                                 result.get('ce_foreground_weight', 0.5))
     result.update(ce_background_weight=bg, ce_foreground_weight=fg)
+    result['foreground_ce_reduction'] = validate_foreground_reduction(
+        result.get('foreground_ce_reduction', 'voxel_mean'), result.get('ce_reduction_mode', 'voxel_mean'))
     return result
 
 

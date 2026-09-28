@@ -41,6 +41,11 @@ def check_extension_identity(saved, current):
 
 def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume):
     """Pure validation/planning. No RNG use, checkpoint writes or config edits."""
+    if checkpoint and checkpoint.get('engineering_resume_migration'):
+        if extend_to is not None:
+            raise ValueError('engineering migration cannot combine with extension')
+        from .resume_migration import horizon_checkpoint_view
+        checkpoint = horizon_checkpoint_view(checkpoint, identity, case_count)
     if extend_to is not None and options.get('early_stopping'):
         raise ValueError('early-stopped/max-epoch protocol cannot be bypassed by horizon extension')
     original = min(v for v in (options['max_steps'],

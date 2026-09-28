@@ -91,7 +91,7 @@ def save_checkpoint(path, state):
     atomic_bytes(path, MAGIC + hashlib.sha256(payload).digest() + payload)
 
 
-def load_checkpoint(path, identity, *, extension=False):
+def load_checkpoint(path, identity, *, extension=False, engineering_migration=False):
     raw = Path(path).read_bytes()
     start = len(MAGIC)
     if not raw.startswith(MAGIC) or len(raw) <= start + 32:
@@ -105,7 +105,12 @@ def load_checkpoint(path, identity, *, extension=False):
                 'progress', 'rng', 'sampler_generator', 'loader_generator', 'log'}
     if not isinstance(state, dict) or not required <= state.keys() or state['schema_version'] != 1:
         raise ValueError('incomplete checkpoint state')
-    if identity_with_ce_weights(state['identity']) != identity_with_ce_weights(identity):
+    if engineering_migration:
+        if extension:
+            raise ValueError('engineering migration cannot combine with extension')
+        from .resume_migration import check_source_checkpoint
+        check_source_checkpoint(state, identity)
+    elif identity_with_ce_weights(state['identity']) != identity_with_ce_weights(identity):
         if extension:
             from .extension import check_extension_identity
             check_extension_identity(state['identity'], identity)

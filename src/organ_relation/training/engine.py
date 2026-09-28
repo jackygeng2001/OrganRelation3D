@@ -156,8 +156,10 @@ def joint_ce_diagnostic_metrics(output, label, criterion):
 class Trainer:
     def __init__(self, model, criterion, optimizer, dataset, case_ids, *, device,
                  options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None,
-                 console=None, tensorboard=False, extend_to=None):
+                 console=None, tensorboard=False, extend_to=None, engineering_resume_migration=False):
         validate_options(options)
+        if engineering_resume_migration and (resume is None or extend_to is not None):
+            raise ValueError('engineering migration requires --resume and no extension')
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
         self.mode = identity.get('mode', 'organ_relation_joint')
@@ -231,7 +233,13 @@ class Trainer:
         self.state = dict(global_step=0, epoch=0, order=[], cursor=0, pending_validation=False)
         if not resume and self.run_dir.exists() and any(self.run_dir.iterdir()):
             raise ValueError('new run directory must be empty; use --resume')
-        checkpoint = load_checkpoint(resume, identity, extension=extend_to is not None) if resume else None
+        checkpoint = load_checkpoint(resume, identity, extension=extend_to is not None,
+                                     engineering_migration=engineering_resume_migration) if resume else None
+        if engineering_resume_migration:
+            from .resume_migration import migrate_checkpoint
+            checkpoint = migrate_checkpoint(checkpoint, identity, resume)
+        self.migration_pending = engineering_resume_migration
+        self.migration_record = checkpoint.get('engineering_resume_migration') if checkpoint else None
         self.horizon = resolve_horizon(options, len(dataset), checkpoint, extend_to, identity, resume)
         self.total = self.horizon['total_steps']
         self.epochs = math.ceil(self.total / len(dataset))
@@ -313,7 +321,7 @@ class Trainer:
             image = image.contiguous(memory_format=torch.channels_last_3d)
         return image, label
 
-    def checkpoint(self):
+    def checkpoint(self, *, save_best=True):
         if not self.state['global_step']:
             return  # No completed optimizer step yet.
         payload = dict(
@@ -324,6 +332,8 @@ class Trainer:
             sampler_generator=self.sampler_generator.get_state(),
             loader_generator=self.loader_generator.get_state(),
             log=self.log.position(self.state['global_step']))
+        if self.migration_record:
+            payload['engineering_resume_migration'] = self.migration_record
         if self.epoch_mode:
             payload['development_state'] = self.development_state
             if self.early_state is not None:
@@ -331,7 +341,7 @@ class Trainer:
             best = self.development_state['best_dev']
             # Best first, then last: a crash before last commits replays pending
             # validation from its ledger and idempotently writes this best again.
-            if best and best['global_step'] == self.state['global_step'] and not self.state['pending_validation']:
+            if save_best and best and best['global_step'] == self.state['global_step'] and not self.state['pending_validation']:
                 save_checkpoint(self.run_dir / 'best-dev.ckpt', payload)
         save_checkpoint(self.run_dir / 'last.ckpt', payload)
         self.board.flush()  # Observer failure never invalidates a saved checkpoint.
@@ -454,6 +464,11 @@ class Trainer:
     def run(self, *, stop_after=None):
         """Observers start after state restoration and close on every exit path."""
         try:
+            if self.migration_pending:
+                # Commit the identity/audit transaction at the restored optimizer
+                # boundary BEFORE observers, pending validation or any new case.
+                self.checkpoint(save_best=False)
+                self.migration_pending = False
             if self.extension_pending:
                 # Persist the new horizon at the already-completed optimizer
                 # boundary before observers, pending validation or another step.

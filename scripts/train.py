@@ -28,6 +28,8 @@ def parser():
     p.add_argument('--run-dir', type=Path)
     p.add_argument('--split', type=Path, help='Existing fixed split artifact; never regenerated while training')
     p.add_argument('--resume', type=Path, help='Trusted checkpoint in the original run directory')
+    p.add_argument('--allow-engineering-resume-migration', action='store_true',
+                   help='One audited formal C upgrade: checkpoint/console cadence only; strict scientific identity')
     p.add_argument('--extend-to', type=int, help='Explicitly increase the resumed run total; keep the original config unchanged')
     p.add_argument('--extend-epochs', type=int, help='Epoch-cadence runs only: explicitly extend total epochs, keep config unchanged')
     p.add_argument('--prepare-split', type=Path, help='Only write a NEW 160/40 artifact, then exit; no voxels loaded')
@@ -50,6 +52,9 @@ def outside_data(path, data_root):
 
 
 def execute(args):
+    if args.allow_engineering_resume_migration and (args.resume is None or args.extend_to is not None
+            or args.extend_epochs is not None or args.preflight_backward or args.prepare_split):
+        raise ValueError('engineering migration requires --resume, no preflight/split preparation/extension')
     if args.extend_to is not None and (args.resume is None or args.extend_to < 1 or args.prepare_split):
         raise ValueError('--extend-to requires --resume and a positive total; not a split preparation option')
     import torch
@@ -305,6 +310,7 @@ def execute(args):
                       validation_dataset=val_data, validation_case_ids=[r['case_id'] for r in val_records],
                       resume=args.resume, console=TrainingConsole(enabled=not args.quiet_console),
                       tensorboard=not args.no_tensorboard,
+                      engineering_resume_migration=args.allow_engineering_resume_migration,
                       extend_to=args.extend_epochs * len(chosen) if args.extend_epochs is not None else args.extend_to)
     trainer.run(stop_after=args.stop_after)
 

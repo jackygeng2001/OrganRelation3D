@@ -419,9 +419,27 @@ loss windows warm up again after resume; there are no new TensorBoard scalars
 or redundant JSONL summaries. The existing opt-in five-step probe keeps its
 detailed per-step output.
 
-Resume requires matching config/source provenance as before. These new settings
-do not silently migrate an older-version checkpoint; the command below applies
-to a run started with the matching release/config.
+Ordinary resume requires matching config/source provenance. The explicit one-time
+`--allow-engineering-resume-migration` permits only the audited clean Linux source
+`b4e37bfadf7254fc4869fbb0421ad4706e1f261d` formal A-spacing gated C checkpoint
+(with the pinned 50-source-file fingerprint) to adopt the two new cadence fields.
+All other identity fields, including environment, scientific configuration,
+split/case lists, randomness, validation and early stopping, must match exactly.
+Source differences are restricted to the reviewed training/checkpoint/console
+entry points, test runner and migration helper; model/data/loss/metrics sources
+must remain byte-identical. Dirty, unknown-source or already-migrated checkpoints
+are refused. Do not combine migration with extension, split creation or preflight.
+
+Add the flag to the existing C run's `--resume .../last.ckpt` command once. The
+restored state is atomically committed with current identity **before the next
+case**, without rewriting `run.json`, the original run/ledger identity, or best-dev.
+Every new checkpoint retains `engineering_resume_migration`: original/current
+commit, original/current identity hashes, parent checkpoint SHA256, step/epoch/
+cursor, timestamp and the exact cadence change. RNG/order/optimizer/history are
+restored, not reset. If that first atomic write fails, the old checkpoint remains
+valid. After a successful migration, resume normally **without the flag**, even
+if execution stopped before the next optimizer step. No broad ignore-provenance
+option is provided.
 
 Epochs 5,10,...,500 evaluate all 40 dev cases and update `best-dev.ckpt` on
 strict improvement in final mean case foreground hard Dice (raw best). Early stopping

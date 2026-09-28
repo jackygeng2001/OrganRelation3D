@@ -402,7 +402,27 @@ python -B scripts/train.py --config configs/train_monai_relation_gated_A_160_40.
   --data-root "$AMOS_ROOT" --run-dir runs/monai_relation_gated_A_160_40
 ```
 
-Each epoch writes aggregate training metrics and atomic resumable `last.ckpt`.
+Formal configs independently set `checkpoint_every_steps=5` and
+`console_every_steps=5`. Atomic `last.ckpt` is saved after completed steps
+5,10,15,... as well as each epoch end (even when not divisible by five).
+The existing `checkpoint_every=1` still means epochs; validation cadence is
+unchanged. Every-step JSONL is retained. A crash after step 7 restores step 5,
+truncates uncommitted log events, and continues the saved epoch order/cursor/RNG.
+Controlled stops additionally save their exact completed step. No step checkpoint
+creates a new best-dev selection. Each epoch still writes aggregate train metrics.
+
+Every five steps console prints epoch/global step/position, current and recent
+(up to five-step) mean total loss, final/coarse loss, LR, allocated GPU peak,
+rolling step time and ETA. Gated C includes gamma and the scaled writeback ratio
+from that same pre-update forward. Baseline omits coarse/gamma fields. Console
+loss windows warm up again after resume; there are no new TensorBoard scalars
+or redundant JSONL summaries. The existing opt-in five-step probe keeps its
+detailed per-step output.
+
+Resume requires matching config/source provenance as before. These new settings
+do not silently migrate an older-version checkpoint; the command below applies
+to a run started with the matching release/config.
+
 Epochs 5,10,...,500 evaluate all 40 dev cases and update `best-dev.ckpt` on
 strict improvement in final mean case foreground hard Dice (raw best). Early stopping
 uses a separate **patience reference**: after the first validation initializes it,

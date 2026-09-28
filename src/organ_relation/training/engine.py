@@ -34,6 +34,9 @@ def validate_options(options):
     for key in ('checkpoint_every', 'diagnostics_every', 'validation_every'):
         if type(options[key]) is not int or options[key] < (1 if key == 'checkpoint_every' else 0):
             raise ValueError(f'invalid {key}')
+    for key in ('checkpoint_every_steps', 'console_every_steps'):
+        if key in options and (type(options[key]) is not int or options[key] < 1):
+            raise ValueError(f'{key} must be a positive integer when specified')
     for key in ('max_steps', 'max_epochs'):
         if options[key] is not None and (type(options[key]) is not int or options[key] < 1):
             raise ValueError(f'{key} must be positive or null')
@@ -599,7 +602,9 @@ class Trainer:
             due = cadence_due(self.options, 'validation_every', step, epoch, epoch_complete)
             self.state['pending_validation'] = due
             invocation_done = stop_after is not None and step-start_step >= stop_after
-            if cadence_due(self.options, 'checkpoint_every', step, epoch, epoch_complete) or due or not remaining or invocation_done:
+            step_interval = self.options.get('checkpoint_every_steps')
+            step_save = step_interval is not None and (step % step_interval == 0 or epoch_complete)
+            if step_save or cadence_due(self.options, 'checkpoint_every', step, epoch, epoch_complete) or due or not remaining or invocation_done:
                 self.checkpoint()
             if due:
                 self._validation()

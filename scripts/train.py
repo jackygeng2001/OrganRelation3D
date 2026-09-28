@@ -129,6 +129,7 @@ def execute(args):
                 or options['max_epochs'] != (500 if updated_protocol else 300) or options['max_steps'] is not None):
             raise ValueError('invalid full-development A/C protocol')
         if updated_protocol and (options.get('loss_observation') != 'monitor_only'
+                or options.get('checkpoint_every_steps') != 5 or options.get('console_every_steps') != 5
                 or options.get('early_stopping') != dict(min_epochs=100, patience_epochs=25, min_delta=1e-4,
                                                         monitor='dev_mean_foreground_hard_dice')):
             raise ValueError('invalid monitor-only / early stopping protocol')

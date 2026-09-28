@@ -1,5 +1,6 @@
 """Presentation of committed scalar rows; no model, RNG or ETA calculations."""
 from functools import wraps
+from collections import deque
 import json
 import statistics
 import shutil
@@ -73,6 +74,8 @@ class TrainingConsole:
         self.train_bar = self.val_bar = None
         self.last = None
         self.last_summary_step = None
+        self.console_every_steps = None
+        self.recent_losses = deque(maxlen=1)
 
     def _bar(self, total, initial, desc):
         from tqdm import tqdm
@@ -90,6 +93,8 @@ class TrainingConsole:
         self.global_bar = self.count <= 2
         self.last = last
         self.last_summary_step = None
+        self.console_every_steps = options.get('console_every_steps')
+        self.recent_losses = deque(maxlen=self.console_every_steps or 1)
         model, prep = identity.get('model', {}), identity.get('preprocessing', {})
         model = model if isinstance(model, dict) else {}
         prep = prep if isinstance(prep, dict) else {}
@@ -102,6 +107,8 @@ class TrainingConsole:
         env = identity.get('environment', {})
         runtime = identity.get('runtime', {})
         cadence = 'epochs' if options.get('cadence_unit') == 'epoch' else 'steps'
+        checkpoint_text = (f"{options['checkpoint_every_steps']} steps + epoch end"
+                           if options.get('checkpoint_every_steps') else f"every {options['checkpoint_every']} {cadence}")
         self._write(columns([
             (('Model', f'{len(channels)}-stage {channels}' if channels else 'configured model'),
              ('Device', env.get('gpu_name') or runtime.get('device', 'CPU'))),
@@ -110,7 +117,7 @@ class TrainingConsole:
             (('Train Cases', len(cases)), ('Optimizer', optimizer.get('name', 'configured'))),
             (('LR', f"{optimizer['lr']:.2e}" if 'lr' in optimizer else '?'), ('Batch Size', options['batch_size'])),
             (('Max Steps', total), ('Resume', 'Checkpoint' if resume else 'Fresh run')),
-            (('Checkpoint', f"every {options['checkpoint_every']} {cadence}"),
+            (('Checkpoint', checkpoint_text),
              ('Monitor' if options['validation_role'] == 'train_monitor' else 'Validation',
               f"every {options['validation_every']} {cadence}" if options['validation_every'] else 'off')),
         ], 'External MONAI reference' if identity.get('mode') == 'monai_reference_unet' else 'OrganRelation3D'))
@@ -131,6 +138,7 @@ class TrainingConsole:
     @_presentation
     def train_step(self, row):
         self.last = row  # Only Python scalars/lists from the machine log.
+        self.recent_losses.append(row['total_loss'])
         peak = row['memory']['peak_allocated_bytes']
         memory = f'{peak / 2**30:.1f}G' if peak is not None else 'CPU'
         postfix = (f"loss={row['total_loss']:.3f} case={row['case_id']} mem={memory} "
@@ -140,6 +148,33 @@ class TrainingConsole:
         if self.train_bar is not None:
             self.train_bar.set_postfix_str(postfix, refresh=False)
             self.train_bar.update(1)
+        if self.console_every_steps and row['global_step'] % self.console_every_steps == 0:
+            self.step_summary(row)
+
+    @_presentation
+    def step_summary(self, row):
+        position = (row['global_step'] - 1) % self.count + 1
+        peak = row['memory']['peak_allocated_bytes']
+        recent = row['progress']['rolling_seconds']
+        pairs = [
+            (('Epoch', f"{row['epoch']} / {self.epochs}"), ('Step', f"{row['global_step']} / {self.total}")),
+            (('In Epoch', f'{position} / {self.count}'), ('Case', row['case_id'])),
+            (('Total Loss', f"{row['total_loss']:.4f}"),
+             (f'Mean Loss ({len(self.recent_losses)})', f'{statistics.mean(self.recent_losses):.4f}')),
+            (('Final Loss', f"{row['final']['segmentation']:.4f}"),
+             ('Coarse Loss', f"{row['coarse']['segmentation']:.4f}") if 'coarse' in row else None),
+        ]
+        if row.get('relation_scale'):
+            r = row['relation_scale']  # Gamma and norm ratio from the same loss-producing forward.
+            pairs.append((('Gamma', f"{r['gamma']:.6g}"),
+                          ('Writeback/F', f"{r['scaled_writeback_to_feature_norm']:.6g}")))
+        pairs.extend([
+            (('LR', f"{row['lr']:.2e}"), ('GPU Peak', f'{peak/2**30:.2f} GiB' if peak is not None else 'n/a (CPU)')),
+            (('Step Mean', f'{recent:.1f}s' if recent is not None else 'warming up'),
+             ('Train ETA', duration(row['progress']['eta_seconds']))),
+        ])
+        self._write('[Train summary]\n' + columns(pairs))
+        self.last_summary_step = row['global_step']
 
     @_presentation
     def epoch_end(self, *, monitored=False):

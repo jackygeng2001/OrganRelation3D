@@ -52,7 +52,9 @@
       "patience_epochs": 25,
       "min_delta": 0.0001,
       "monitor": "dev_mean_foreground_hard_dice"
-    }
+    },
+    "checkpoint_every_steps": 5,
+    "console_every_steps": 5
   },
   "mode": "monai_relation_unet",
   "model": {

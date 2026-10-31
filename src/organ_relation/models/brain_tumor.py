@@ -187,8 +187,10 @@ class BrainDiagnostics(NamedTuple):
 
 
 class BrainTumorSegmentor(nn.Module):
-    def __init__(self, config: BrainTumorConfig):
+    def __init__(self, config: BrainTumorConfig, *, convolution_backend='native'):
         super().__init__()
+        if convolution_backend not in ('native', 'depth_sliced'):
+            raise ValueError('unsupported convolution execution backend')
         self.config = config
         self.encoder = BrainEncoder(bias=config.conv_bias)
         self.coarse_head = CoarseHead(256,bias=config.coarse_bias,out_channels=3,activation='sigmoid')
@@ -199,6 +201,9 @@ class BrainTumorSegmentor(nn.Module):
         self.fusion = ResidualFusion(256,content_channels=config.content_channels,bias=config.fusion_bias,
                                      learnable_relation_scale=True,relation_scale_init=config.gamma_init)
         self.decoder = BrainDecoder(bias=config.conv_bias,align_corners=config.align_corners)
+        if convolution_backend == 'depth_sliced':
+            from .depth_sliced_conv import enable_depth_sliced_convolutions
+            enable_depth_sliced_convolutions(self)
 
     def _run(self, image, diagnostics):
         if image.ndim != 5 or image.shape[1] != 4 or min(image.shape) < 1 or image.dtype not in (torch.float32,torch.float64):

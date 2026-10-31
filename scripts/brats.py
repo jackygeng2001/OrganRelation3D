@@ -21,6 +21,8 @@ def main(argv=None):
     parser.add_argument('--case',help='Single case for no-update preflight')
     parser.add_argument('--shape',type=int,nargs=3,default=(9,17,19),help='CPU synthetic preflight only')
     parser.add_argument('--device',default='cpu')
+    parser.add_argument('--convolution-backend', choices=('native','depth_sliced'), default='native',
+                        help='Explicit equivalent Conv3d execution; depth_sliced uses bounded NCHW Conv2d')
     parser.add_argument('--split',type=Path,help='Explicit patient-disjoint train/dev JSON with manifest_hash')
     parser.add_argument('--max-steps',type=int,help='Explicit engineering-run horizon; no formal protocol default')
     parser.add_argument('--run-dir',type=Path)
@@ -173,7 +175,11 @@ def execute(args):
         torch.cuda.set_device(device)
     torch.set_num_threads(2)
     seed_all(config['training']['seed'])
-    model = BrainTumorSegmentor(BrainTumorConfig(**config['model'])).to(device=device)
+    model = BrainTumorSegmentor(BrainTumorConfig(**config['model']),
+                               convolution_backend=args.convolution_backend).to(device=device)
+    from organ_relation.models.depth_sliced_conv import DEPTH_CHUNK
+    execution = dict(convolution_backend=args.convolution_backend,
+                     convolution_depth_chunk=DEPTH_CHUNK if args.convolution_backend=='depth_sliced' else None)
     if config['training']['memory_format'] == 'channels_last_3d':
         model.to(memory_format=torch.channels_last_3d)
     criterion = RegionJointLoss(**config['loss'])
@@ -198,6 +204,7 @@ def execute(args):
             report['case_id'], report['cohort'] = args.case, args.cohort
             report['torch'], report['rocm'] = str(torch.__version__), torch.version.hip
             report['memory_format'] = config['training']['memory_format']
+            report.update(execution)
             report['backend_environment'] = {k:v for k,v in os.environ.items()
                 if k.startswith(('MIOPEN_','PYTORCH_MIOPEN_','PYTORCH_CUDA_','PYTORCH_ALLOC_'))}
             print(json.dumps(report,indent=2,allow_nan=False),flush=True)
@@ -213,7 +220,8 @@ def execute(args):
         inventory=parameter_inventory(model)
         print(json.dumps(dict(status='passed' if not inventory['missing_gradients'] and not inventory['nonfinite_gradients'] else 'failed',
             image_shape=list(image.shape),coarse_shape=list(output.coarse_logits.shape),final_shape=list(output.final_logits.shape),
-            loss=loss.total.item(),seconds=time.perf_counter()-start,optimizer_steps=0,memory=memory,**inventory),indent=2))
+            loss=loss.total.item(),seconds=time.perf_counter()-start,optimizer_steps=0,memory=memory,
+            **execution,**inventory),indent=2))
         if inventory['missing_gradients'] or inventory['nonfinite_gradients']:
             raise ValueError('gradient preflight failed')
         return
@@ -230,7 +238,7 @@ def execute(args):
         preprocessing=config['preprocessing'],training=options,optimizer=dict(name='AdamW',**config['optimizer']),
         data=dict(manifest_hash=digest(manifest),manifest=manifest,split_hash=digest(split),split=split),
         runtime=dict(device=str(device),dtype='float32',cpu_threads=torch.get_num_threads(),
-                     backend='rocm' if torch.version.hip else 'cuda'),
+                     backend='rocm' if torch.version.hip else 'cuda',**execution),
         environment=dict(python=platform.python_version(),platform=platform.platform(),
             torch=str(torch.__version__),rocm=torch.version.hip,cuda=torch.version.cuda,
             numpy=importlib.metadata.version('numpy'),nibabel=importlib.metadata.version('nibabel'),

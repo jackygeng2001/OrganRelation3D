@@ -47,7 +47,7 @@ python scripts/brats.py inspect --cohort brats2023_gli \
 
 完整 MRI loader 保留原配准网格，按每文件 scaling 读取，T1/T1ce/T2/FLAIR 逐模态非零 z-score，零值保留零；不裁剪、不重采样、不增加 padding。该强度方案是显式开发配置，待实验协议确认。文件 shape/affine 不匹配即停止，不偷偷配准。
 
-## 后续 AMD 检查（本轮未执行）
+## AMD 无更新检查
 
 经用户确认病例后，指定一个实际 `CASE_ID`，只做一次 forward/loss/backward；不创建训练 run、不更新参数。必须按真实病例完整网格执行，OOM 即停止。
 
@@ -59,6 +59,10 @@ python scripts/brats.py check --device cuda:0 --cohort brats2023_gli \
 ```
 
 不要把旧 MONAI/CT 的显存数字用于此新编码器和全分辨率关系查询。布局选项不能证明所有中间算子/solver 都是 NDHWC。
+
+若 ROCm 的 NDHWC Conv3d 使用低 workspace 但很慢的 naive solver，可在 `check` 或 `train` 显式增加 `--convolution-backend depth_sliced`。默认仍为 `native`。该选项把每个原 Conv3d 的深度核展开为 NCHW Conv2d 求和，每次最多处理 4 个输出深度平面，保留跨平面贡献、边界 padding、stride/dilation 和完整输出；1³ 卷积执行等价线性映射。它不是 2D 分割、patch 输入或 activation checkpointing，权重、初始化、FP32 和 loss 不变。CPU/ROCm 已做输出及梯度容差验证；NVIDIA 尚未实测。首次调用可能包含 MIOpen 算法选择，稳定耗时应预热后测量。
+
+该执行方式及 depth chunk 写入 check JSON 和训练 runtime identity；resume 必须使用相同选项，不放宽旧 checkpoint 身份校验。算子临时内存有界不代表所有 backend workspace 有固定上限，真实整卷仍需检查峰值。正式训练吞吐还包括 optimizer、读取、监测和保存，不能用单次 forward/backward 代替。
 
 遇到 OOM 时，在同一条 `check` 命令后加 `--profile-memory` 再做一次定位。
 该选项仅用于无参数更新的 check，复用已有算子/模块 profiler，分别观察 forward、loss、backward。

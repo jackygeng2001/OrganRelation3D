@@ -21,7 +21,7 @@ from organ_relation.training.resume_migration import (
 
 
 ROOT = fixtures.ROOT
-TEST_CURRENT_COMMIT = 'f' * 40  # Explicit synthetic provenance, never a real run artifact.
+TEST_CURRENT_COMMIT = 'a0ce515e485949abf539c4f9ffe95af00f119ad4'  # Audited historical destination.
 
 
 class ResumeMigrationTests(unittest.TestCase):
@@ -33,10 +33,11 @@ class ResumeMigrationTests(unittest.TestCase):
         cls.old_hashes = {p: hashlib.sha256(git('show', f'{SOURCE_COMMIT}:{p}')).hexdigest()
                           for p in paths if p.endswith('.py') and (p.startswith('src/') or
                               (p.startswith('scripts/') and p.count('/') == 1))}
-        # Simulate a clean Linux checkout (LF); the real runtime hashes raw bytes.
-        files = [*ROOT.glob('src/**/*.py'), *ROOT.glob('scripts/*.py')]
-        cls.new_hashes = {p.relative_to(ROOT).as_posix(): hashlib.sha256(
-            p.read_text(encoding='utf-8').encode()).hexdigest() for p in files}
+        # The migration is pinned to its reviewed release, not future model edits.
+        paths = git('ls-tree', '-r', '--name-only', TEST_CURRENT_COMMIT).decode().splitlines()
+        cls.new_hashes = {p: hashlib.sha256(git('show', f'{TEST_CURRENT_COMMIT}:{p}')).hexdigest()
+                          for p in paths if p.endswith('.py') and (p.startswith('src/') or
+                              (p.startswith('scripts/') and p.count('/') == 1))}
         source = git('show', f'{SOURCE_COMMIT}:src/organ_relation/training/engine.py').decode()
         module = types.ModuleType('organ_relation.training._legacy_engine_test')
         module.__package__ = 'organ_relation.training'
@@ -200,6 +201,14 @@ class ResumeMigrationTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(),original)
         self.assertEqual((old.run_dir/'run.json').read_bytes(),run)
         self.checkpoint(old)  # Original strict identity still loads.
+
+    def test_current_brats_sources_cannot_use_legacy_migration(self):
+        old, current = self.identity(True), self.identity()
+        files = [*ROOT.glob('src/**/*.py'), *ROOT.glob('scripts/*.py')]
+        current['provenance']['source_hashes'] = {
+            p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+        with self.assertRaisesRegex(ValueError, 'outside audited files'):
+            check_migration_identity(old, current)
 
     def test_cli_requires_explicit_resume_and_forbids_extension_preflight(self):
         spec=importlib.util.spec_from_file_location('migration_cli_test',ROOT/'scripts/train.py')

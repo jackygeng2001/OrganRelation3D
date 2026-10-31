@@ -15,6 +15,9 @@ MODULE_NAMES = dict(encoder='Encoder', coarse_head='CoarseHead', relation='Relat
 
 def scalar_values(row):
     """Translate scalar log rows only; never touch live model tensors."""
+    if row.get('mode') == 'brats_regions':
+        from .brain_tumor import region_scalars
+        return region_scalars(row)
     if row.get('observation_profile') in ('development_v1', 'development_v2'):
         from .development import development_scalars
         return development_scalars(row)

@@ -1,5 +1,19 @@
 # AMD 主实验环境
 
+## 当前脑肿瘤代码阶段（2026-10-31）
+
+当前入口为 `scripts/brats.py`，方法与未冻结选项见根目录 METHOD_SPEC.md。使用已有
+`organrelation3d`：Python 3.11.16、torch 2.11.0+rocm7.2、NumPy 2.3.5、NiBabel 5.3.2；
+本次没有安装、升级或降级任何依赖。新模型使用标准 PyTorch，不依赖 MONAI backbone。
+
+本次只执行 CPU 合成公式/梯度/恢复测试和只读数据核查，未执行 GPU 或正式训练。
+实际完整 MRI 显存尚未验证，旧 AMOS/MONAI 的结果不能作为新模型容量证明。
+后续用户授权 preflight 时使用 `check --device cuda:0 --source ... --cohort brats2023_gli --case ...`，
+在 Python 启动前设置 `PYTORCH_MIOPEN_SUGGEST_NHWC=1`；显式配置为 channels_last_3d 时检查此变量，
+不自动回退、不改变标签布局、不保证每个中间算子保持该布局。OOM 即停止。
+
+以下内容保留为历史 AMOS 环境记录；旧训练命令见 `docs/legacy_amos_usage.md`，不用于当前 BraTS 实验。
+
 训练观测依赖单独维护在 `requirements-monitoring.txt`。现有 ROCm 环境中运行 `python -m pip install -r environments/requirements-monitoring.txt` 补齐观测依赖；不包含 torch，不安装 TensorFlow，不切换 GPU 后端。当前 pin 为 tensorboard=2.20.0、tqdm=4.67.1、setuptools=80.9.0（TensorBoard CLI 需要 pkg_resources，过新的 setuptools 会使界面入口导入失败）。本轮只在 Windows CPU 实测，AMD 观测功能待用户运行。已收到用户的真实 AMD 10-step smoke 通过结果。
 
 在另一个终端运行 `tensorboard --logdir runs --host 127.0.0.1 --port 6006 --load_fast=false`，本机浏览器打开 http://127.0.0.1:6006。使用标准事件加载器读取 purge/restart 标记；如果从笔记本查看，可自行通过 SSH 端口转发访问，不默认开放公网监听。完整 step-100 overfit 命令和恢复边界见 README 的训练观测一节。

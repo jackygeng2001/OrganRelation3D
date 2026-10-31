@@ -163,7 +163,16 @@ class Trainer:
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
         self.mode = identity.get('mode', 'organ_relation_joint')
-        if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
+        if self.mode == 'brats_regions':
+            from ..models.brain_tumor import BrainTumorSegmentor
+            from ..losses import RegionJointLoss
+            if (not isinstance(model, BrainTumorSegmentor) or not isinstance(criterion, RegionJointLoss)
+                    or model.config.to_dict() != identity.get('model')
+                    or identity.get('loss') != dict(epsilon=criterion.epsilon,lambda_c=criterion.lambda_c,align_corners=criterion.align_corners)
+                    or not 0 < identity.get('threshold',0) < 1):
+                raise ValueError('brain model/loss/threshold must match strict identity')
+            self.ce_reduction_mode, self.foreground_ce_reduction, self.ce_weights = 'region_probability_bce', 'not_applicable', {}
+        elif self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
             from .monai_reference import MonaiReferenceLoss
             from .monai_relation import MonaiRelationLoss
             expected = MonaiReferenceLoss if self.mode == 'monai_reference_unet' else MonaiRelationLoss
@@ -350,7 +359,7 @@ class Trainer:
         step = self.state['global_step']
         ledger = CaseLedger(self.run_dir / 'validation' / f'step_{step:08d}', dict(
             run_id=self.run_id, model_hash=weights_hash(self.model),
-            run_identity_hash=digest(self.origin_identity), metric_protocol=METRIC_PROTOCOL,
+            run_identity_hash=digest(self.origin_identity), metric_protocol='brats_regions_threshold_both_empty_null_v1' if self.mode == 'brats_regions' else METRIC_PROTOCOL,
             preprocessing_hash=digest(self.identity['preprocessing']),
             manifest_hash=self.identity['data']['manifest_hash'],
             split_hash=self.identity['data'].get('split_hash'),
@@ -371,7 +380,12 @@ class Trainer:
                     with torch.no_grad():
                         image, label = self._batch(self.validation_dataset, index, validation=True)
                         output, relation_stats = observed_forward(self.model, image)
-                        record = hard_dice(output.final_logits.argmax(1)[0], label[0])
+                        if self.mode == 'brats_regions':
+                            from .brain_tumor import region_dice, region_diagnostics
+                            record = region_dice(output.final_logits,label,self.identity['threshold'])
+                            record['region_diagnostic'] = region_diagnostics(output,label,self.criterion,self.identity['threshold'])
+                        else:
+                            record = hard_dice(output.final_logits.argmax(1)[0], label[0])
                         if relation_stats:
                             record['relation_scale'] = relation_stats
                         if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
@@ -398,9 +412,13 @@ class Trainer:
             self.model.train()
             restore_rng(training_rng, self.device)
             self.console.validation_end()
+        from .brain_tumor import summarize_regions
+        summary = summarize_regions(records) if self.mode == 'brats_regions' else summarize_dice(records)
         row = dict(run_id=self.run_id, phase=self.options['validation_role'],
-                   global_step=step, epoch=self.state['epoch'], metrics=summarize_dice(records))
+                   global_step=step, epoch=self.state['epoch'], metrics=summary)
         row['mode'] = self.mode
+        if self.mode == 'brats_regions':
+            row['region_diagnostic_cases'] = {case:record['region_diagnostic'] for case,record in zip(self.validation_case_ids,records)}
         row['ce_reduction_mode'] = self.ce_reduction_mode
         row['foreground_ce_reduction'] = self.foreground_ce_reduction
         row.update(self.ce_weights)
@@ -519,7 +537,7 @@ class Trainer:
             output, relation_stats = observed_forward(self.model, image)  # No supervision enters forward.
             loss_function = self.criterion.objective if self.scalar_only else self.criterion
             loss = (loss_function(output.coarse_logits, output.final_logits, label)
-                    if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux') else loss_function(output.final_logits, label))
+                    if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux', 'brats_regions') else loss_function(output.final_logits, label))
             loss.total.backward()
             epoch_complete = self.state['cursor'] + 1 == len(self.dataset)
             check = cadence_due(self.options, 'diagnostics_every', step, epoch, epoch_complete)
@@ -555,9 +573,12 @@ class Trainer:
             row['ce_reduction_mode'] = self.ce_reduction_mode
             row['foreground_ce_reduction'] = self.foreground_ce_reduction
             row.update(self.ce_weights)
-            if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux'):
+            if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux', 'brats_regions'):
                 row['coarse'] = ({'segmentation': loss.coarse.detach().item()} if self.scalar_only else
                                 {k: getattr(loss.coarse, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')})
+            if self.mode == 'brats_regions':
+                for branch in ('final','coarse'):
+                    row[branch]['bce'] = row[branch].pop('ce')
             if self.epoch_mode:
                 # Observe this same forward, before freeing it; no extra model
                 # call or stochastic sampling. Store only case scalar records.

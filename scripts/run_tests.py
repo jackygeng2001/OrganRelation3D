@@ -7,6 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = {
+    'brats': ('brain_tumor',),
     'tensor': ('backbone', 'coarse_nodes', 'dynamic_relation', 'node_to_space',
                'segmentor', 'joint_loss'),
     'data': ('metadata', 'candidate_estimates', 'fidelity'),

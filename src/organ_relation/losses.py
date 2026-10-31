@@ -241,3 +241,63 @@ class JointLoss(nn.Module):
         if not torch.isfinite(total):
             raise ValueError('joint loss produced a non-finite value')
         return JointLossResult(total, per_case, coarse, final)
+
+
+REGION_NAMES = ('WT', 'TC', 'ET')
+
+
+def region_targets(label: Tensor) -> Tensor:
+    """Canonical BraTS 0/1/2/3 -> overlapping WT/TC/ET. Never used by models."""
+    if label.ndim != 4 or label.dtype != torch.int64 or ((label < 0) | (label > 3)).any():
+        raise ValueError('canonical int64 [B,D,H,W] labels in 0..3 required')
+    return torch.stack((label > 0, (label == 1) | (label == 3), label == 3), 1)
+
+
+class RegionJointLoss(nn.Module):
+    """Revised method (27)-(32); probability BCE(+epsilon), not logits BCE.
+
+    BranchLoss.ce is the shared engine container's historical field name; here
+    it stores binary CE averaged across all THREE regions and all voxels.
+    """
+    def __init__(self, *, epsilon, lambda_c, align_corners):
+        super().__init__()
+        if (isinstance(epsilon, bool) or not math.isfinite(epsilon) or epsilon <= 0
+                or isinstance(lambda_c, bool) or not math.isfinite(lambda_c) or lambda_c <= 0
+                or type(align_corners) is not bool):
+            raise ValueError('positive finite epsilon/lambda_c and explicit align_corners required')
+        self.epsilon, self.lambda_c, self.align_corners = epsilon, lambda_c, align_corners
+
+    def branch(self, logits, target):
+        probability = logits.sigmoid()
+        target = target.to(dtype=logits.dtype)
+        bce = -(target * (probability+self.epsilon).log()
+                + (1-target) * (1-probability+self.epsilon).log()).flatten(1).mean(1)
+        intersection = (probability*target).flatten(2).sum(2)
+        dice = (2*intersection+self.epsilon)/(probability.flatten(2).sum(2)+target.flatten(2).sum(2)+self.epsilon)
+        dice_loss = 1-dice.mean(1)
+        return BranchLoss(bce,dice,dice_loss,bce+dice_loss)
+
+    def align_coarse(self, logits, label):
+        return functional.interpolate(logits,size=label.shape[1:],mode='trilinear',align_corners=self.align_corners)
+
+    def forward(self, coarse_logits, final_logits, label):
+        target = region_targets(label)
+        for logits in (coarse_logits, final_logits):
+            if (logits.ndim != 5 or min(logits.shape) < 1 or logits.shape[:2] != (label.shape[0],3)
+                    or logits.dtype not in (torch.float32,torch.float64)
+                    or logits.device != label.device or not torch.isfinite(logits).all()):
+                raise ValueError('finite three-region FP32/FP64 logits required')
+        if final_logits.shape != target.shape or coarse_logits.dtype != final_logits.dtype:
+            raise ValueError('final logits must match original GT grid and coarse dtype')
+        if torch.is_autocast_enabled(final_logits.device.type):
+            raise ValueError('autocast disabled required')
+        limits = torch.finfo(final_logits.dtype)
+        for value in (self.epsilon, self.lambda_c):
+            if not limits.tiny * limits.eps <= value <= limits.max:
+                raise ValueError('epsilon/lambda_c must be positive and representable in logits dtype')
+        final = self.branch(final_logits,target)
+        coarse = self.branch(self.align_coarse(coarse_logits,label),target)
+        per_case = final.segmentation+self.lambda_c*coarse.segmentation
+        if not torch.isfinite(per_case).all():
+            raise ValueError('nonfinite region loss')
+        return JointLossResult(per_case.mean(),per_case,coarse,final)

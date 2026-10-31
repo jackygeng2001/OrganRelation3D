@@ -104,3 +104,19 @@ python scripts/brats.py overfit --config configs/train_brats_single_case_overfit
 先核对 5 步真实 optimizer 更新、显存与耗时；通过后保持同一配置和源码，删除 `--stop-after 5`，追加 `--resume runs/brats2023_1case_100/last.ckpt` 续到 100。两次都保留 `--max-steps 100`，不重新开始 run，不把 max_steps 从 5 改为 100，不需要 extension。该 GPU 连续训练须实际运行验收，不能用已有无更新检查代替。
 
 原始数据、runs、权重、缓存与诊断输出不进入 Git。新增提交采用 Conventional Commits，不重写历史。
+
+## 只读 checkpoint 概率诊断
+
+`scripts/brats_diagnose.py` 从可信 checkpoint 旁的 `run.json` 读取配置、完整 source manifest 和执行选项；验证 checkpoint 校验和、run 身份、当前数据指纹及全部 `src/` 源码一致。新诊断脚本可以不同于训练时的入口，但不放宽普通 resume。仅一次完整 image-only、FP32、eval/inference-mode 前向，不创建 optimizer，不反向，不修改 run/checkpoint。输出到终端；可选 PNG 只允许新文件、禁止写入原 run/source。
+
+```bash
+PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+python scripts/brats_diagnose.py \
+  --checkpoint runs/brats2023_1case_100_v2/last.ckpt \
+  --case BraTS-GLI-00000-000 --device cuda:0 \
+  --overlay /tmp/brats_step100_overlay.png
+```
+
+source 默认沿用 checkpoint 路径，不需重复配置模型/预处理/backend。final/coarse 分别报告 WT/TC/ET 的 hard Dice、预测/GT/TP/FP/FN、GT 内外概率均值、P05/P50/P95、概率总量及区域外低于阈值的概率分布；coarse 先插值 logits 到原网格。区域外指各自 GT 区域之外，不能把 TC/ET 的区域外全部叫作正常组织。按可比字段核对同 step 监测记录，差异只记录，不在输出统计之前做全字典相等断言。CPU 统计与 GPU 原记录的浮点归约允许容差。
+
+PNG 使用 Pillow（当前 AMD 已安装；可省略 `--overlay` 不渲染），每行独立展示一个区域：完整 FLAIR 切片、GT、final/coarse 的 TP/FP/FN 和 final 概率图。GT 最大截面只用于前向结束后的展示选片；无标签引导训练裁剪。显示为原数组 D 切片，不宣称标准放射学左右方向。默认不保存影像体积，不生成额外报告文件。

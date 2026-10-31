@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import MethodType
 from unittest.mock import patch
 
 import nibabel as nib
@@ -17,7 +18,8 @@ from torch.nn import functional as F
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 import test_training as fixtures
-from organ_relation.models.brain_tumor import BrainTumorConfig,BrainTumorSegmentor,DualReceptiveField,scale_descriptor
+from organ_relation.models.brain_tumor import (BrainTumorConfig,BrainTumorSegmentor,DualReceptiveField,
+                                             ProjectThenUpsample,scale_descriptor,unit)
 from organ_relation.models.space_to_node import SpaceToNode,OrganNodes
 from organ_relation.models.dynamic_relation import DynamicRelation
 from organ_relation.models.node_to_space import NodeToSpace
@@ -230,6 +232,94 @@ class BrainTumorTests(unittest.TestCase):
         torch.testing.assert_close(x.grad,y.grad,rtol=1e-4,atol=1e-6)
         for p,q in zip(ordinary.parameters(),channels_last.parameters()):
             torch.testing.assert_close(p.grad,q.grad,rtol=1e-4,atol=1e-6)
+
+    def test_project_before_resize_matches_original_output_and_all_gradients(self):
+        # Cover affine bias, both supported interpolation conventions, layouts,
+        # odd sizes and singleton spatial axes, in FP32 and high precision.
+        for dtype in (torch.float32,torch.float64):
+            for bias in (False,True):
+                for align in (False,True):
+                    for layout in (torch.contiguous_format,torch.channels_last_3d):
+                        with self.subTest(dtype=dtype,bias=bias,align=align,layout=layout):
+                            torch.manual_seed(49)
+                            old=unit(32,16,kernel=1,bias=bias).to(dtype=dtype,memory_format=layout)
+                            new=ProjectThenUpsample(32,16,bias=bias).to(dtype=dtype,memory_format=layout)
+                            new.load_state_dict(old.state_dict(),strict=True)
+                            self.assertEqual(list(old.state_dict()),list(new.state_dict()))
+                            x=torch.randn(1,32,1,3,4,dtype=dtype).contiguous(memory_format=layout).requires_grad_()
+                            y=x.detach().clone().requires_grad_()
+                            a=old(F.interpolate(x,size=(3,5,7),mode='trilinear',align_corners=align))
+                            b=new(y,size=(3,5,7),align_corners=align)
+                            tol=dict(rtol=2e-4,atol=2e-6) if dtype==torch.float32 else dict(rtol=1e-10,atol=1e-11)
+                            torch.testing.assert_close(a,b,**tol)
+                            probe=torch.randn_like(a)
+                            (a*probe).mean().backward();(b*probe).mean().backward()
+                            torch.testing.assert_close(x.grad,y.grad,**tol)
+                            for (name,p),(other,q) in zip(old.named_parameters(),new.named_parameters()):
+                                self.assertEqual(name,other)
+                                torch.testing.assert_close(p.grad,q.grad,**tol)
+
+    def test_full_model_matches_original_decoder_loss_input_and_parameter_gradients(self):
+        # Independent pre-optimization decoder order, including original local
+        # tensor lifetimes; no production switch or checkpoint migration.
+        def original(decoder,deepest,features,zK,nodes,last_alpha,*,diagnostics=False):
+            weights=decoder.scale_mlp(scale_descriptor(zK,nodes,last_alpha)).softmax(-1)
+            decoded=deepest
+            for index,level in enumerate(decoder.scale_order):
+                skip=features[level]
+                content=decoder.queries[index].forward_with_scale_weights(skip,zK,region_weights=weights[:,:,index:index+1])
+                enhanced=skip+decoder.eta[index]*decoder.skip_projection[index](content)
+                decoded=decoder.up[index](F.interpolate(decoded,size=skip.shape[2:],
+                    mode='trilinear',align_corners=decoder.align_corners))
+                decoded=decoder.fuse[index](torch.cat((decoded,enhanced),1))
+            logits=decoder.head(decoded)
+            return (logits,weights) if diagnostics else logits
+
+        for dtype in (torch.float32,torch.float64):
+            for layout in (torch.contiguous_format,torch.channels_last_3d):
+                with self.subTest(dtype=dtype,layout=layout):
+                    torch.manual_seed(123)
+                    new=self.model().to(dtype=dtype,memory_format=layout)
+                    old=copy.deepcopy(new)
+                    old.decoder.up=torch.nn.ModuleList(torch.nn.Sequential(*block) for block in old.decoder.up)
+                    old.decoder.forward=MethodType(original,old.decoder)
+                    self.assertEqual(list(old.state_dict()),list(new.state_dict()))
+                    self.assertEqual(sum(p.numel() for p in new.parameters()),8330296)
+                    for p,q in zip(old.parameters(),new.parameters()):
+                        torch.testing.assert_close(p,q,rtol=0,atol=0)
+                    x=torch.randn(1,4,9,11,13,dtype=dtype).contiguous(memory_format=layout).requires_grad_()
+                    y=x.detach().clone().requires_grad_()
+                    label=torch.arange(9*11*13).reshape(1,9,11,13)%4
+                    rng=torch.get_rng_state().clone()
+                    a,b=old(x),new(y)
+                    tol=dict(rtol=3e-4,atol=3e-6) if dtype==torch.float32 else dict(rtol=1e-9,atol=1e-11)
+                    for v,w in zip(a,b):torch.testing.assert_close(v,w,**tol)
+                    la,lb=self.criterion()(*a,label).total,self.criterion()(*b,label).total
+                    torch.testing.assert_close(la,lb,**tol)
+                    la.backward();lb.backward()
+                    torch.testing.assert_close(x.grad,y.grad,**tol)
+                    for (name,p),(other,q) in zip(old.named_parameters(),new.named_parameters()):
+                        self.assertEqual(name,other)
+                        self.assertIsNotNone(q.grad,name)
+                        self.assertTrue(torch.isfinite(q.grad).all(),name)
+                        torch.testing.assert_close(p.grad,q.grad,**tol,msg=name)
+                    self.assertTrue(torch.equal(rng,torch.get_rng_state()))
+                    self.assertTrue(all(not m._forward_hooks and not m._forward_pre_hooks for m in new.modules()))
+
+    def test_decoder_resize_halves_channels_and_normalizes_on_target_grid(self):
+        model=self.model()
+        shapes=[]
+        resize=F.interpolate
+        def observe(x,*args,**kwargs):
+            if kwargs.get('mode')=='trilinear':
+                shapes.append((tuple(x.shape),tuple(kwargs['size'])))
+            return resize(x,*args,**kwargs)
+        with patch('organ_relation.models.brain_tumor.functional.interpolate',side_effect=observe):
+            out=model(torch.randn(1,4,9,11,13))
+        self.assertEqual(shapes,[((1,128,2,2,2),(3,3,4)),
+                                 ((1,64,3,3,4),(5,6,7)),
+                                 ((1,32,5,6,7),(9,11,13))])
+        self.assertEqual(out.final_logits.shape,(1,3,9,11,13))
 
     def test_cli_cpu_no_update_preflight_and_explicit_source_guards(self):
         spec=importlib.util.spec_from_file_location('brats_cli_test',fixtures.ROOT/'scripts/brats.py')

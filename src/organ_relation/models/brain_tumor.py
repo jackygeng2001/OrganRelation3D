@@ -89,6 +89,22 @@ def scale_descriptor(zK, nodes, last_alpha):
     return torch.cat((zK,nodes.centroid,nodes.size,nodes.confidence,incoming,identity), -1)
 
 
+class ProjectThenUpsample(nn.Sequential):
+    """Commute only the pointwise affine projection with trilinear resize.
+
+    GroupNorm and activation must remain AFTER resize. Numeric child names
+    preserve the original up-block state_dict keys and parameter order.
+    """
+
+    def __init__(self, a, b, *, bias):
+        super().__init__(*unit(a, b, kernel=1, bias=bias))
+
+    def forward(self, x, *, size, align_corners):
+        x = self[0](x)
+        x = functional.interpolate(x, size=size, mode='trilinear', align_corners=align_corners)
+        return self[2](self[1](x))
+
+
 class BrainDecoder(nn.Module):
     scale_order = (2,1,0)
 
@@ -100,7 +116,7 @@ class BrainDecoder(nn.Module):
             attention_channels=32,content_channels=32) for c in (128,64,32))
         self.skip_projection = nn.ModuleList(nn.Conv3d(32,c,1,bias=False) for c in (128,64,32))
         self.eta = nn.Parameter(torch.full((3,),1e-3))
-        self.up = nn.ModuleList(unit(a,b,kernel=1,bias=bias) for a,b in ((256,128),(128,64),(64,32)))
+        self.up = nn.ModuleList(ProjectThenUpsample(a,b,bias=bias) for a,b in ((256,128),(128,64),(64,32)))
         self.fuse = nn.ModuleList(nn.Sequential(unit(2*c,c,bias=bias),unit(c,c,bias=bias)) for c in (128,64,32))
         self.head = nn.Conv3d(32,3,1,bias=bias)
 
@@ -111,9 +127,11 @@ class BrainDecoder(nn.Module):
             skip = features[level]
             content = self.queries[index].forward_with_scale_weights(skip,zK,region_weights=weights[:,:,index:index+1])
             enhanced = skip + self.eta[index]*self.skip_projection[index](content)
-            decoded = self.up[index](functional.interpolate(decoded,size=skip.shape[2:],
-                                      mode='trilinear',align_corners=self.align_corners))
-            decoded = self.fuse[index](torch.cat((decoded,enhanced),1))
+            del content  # Autograd retains anything required for backward.
+            decoded = self.up[index](decoded,size=skip.shape[2:],align_corners=self.align_corners)
+            decoded = torch.cat((decoded,enhanced),1)
+            del enhanced  # Cat backward needs sizes, not this extra Python reference.
+            decoded = self.fuse[index](decoded)
         logits = self.head(decoded)
         return (logits,weights) if diagnostics else logits
 

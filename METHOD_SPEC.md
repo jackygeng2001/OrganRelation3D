@@ -92,6 +92,8 @@ Phi_l 为 **无偏置** 1³ 卷积 32→C_l；三个独立 eta 初值 **1e-3**�
 
 从 J3=F' 开始，逐级三线性插值到 E_l 的真实尺寸，1³ Conv→GN8→LeakyReLU 降至 C_l，与 E_enhanced_l 拼接；两次 3³ stride=1 pad=1 卷积单元完成 2C_l→C_l→C_l。最后 1³ 32→3 输出 Lf。
 
+工程执行使用数学等价的顺序：仅将逐点 1³ 仿射 Conv 移至三线性插值之前，GN8/LeakyReLU 仍在插值之后。该投影与逐通道线性插值可交换（含 bias），使插值输出通道减半；浮点计算次序变化以输出与梯度容差验证，不保证逐位一致。参数、state_dict 键和配置不变，严格 resume 的源码身份校验不放宽。拼接后释放 enhanced 的局部引用，autograd 所需张量仍正常保存；没有 detach、原地覆盖、checkpointing 或精度变化。
+
 ## 联合监督（式 27–32）
 
 GT 不下采样。先把 coarse **logits** 三线性插值到完整原始 GT 网格，再 sigmoid。两分支各自计算：

@@ -32,9 +32,14 @@ def _volume(x, batch, depth):
     return x.reshape(batch, depth, x.shape[1], *x.shape[2:]).permute(0, 2, 1, 3, 4)
 
 
+def _input_planes(x, second, source):
+    first = _planes(x, source)
+    return first if second is None else torch.cat((first, _planes(second, source)), 1)
+
+
 class _DepthSlicedConv(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, bias, stride, padding, dilation, chunk):
+    def forward(ctx, x, weight, bias, stride, padding, dilation, chunk, second=None):
         batch, _, depth, _, _ = x.shape
         size = tuple((n + 2*p - di*(k-1) - 1)//s + 1
                      for n, p, di, k, s in zip(x.shape[2:], padding, dilation, weight.shape[2:], stride))
@@ -49,46 +54,51 @@ class _DepthSlicedConv(torch.autograd.Function):
                                              start, min(start + chunk, size[0]))
                 if hi <= lo:
                     continue
-                part = F.conv2d(_planes(x, source), kernel, stride=stride[1:],
+                part = F.conv2d(_input_planes(x, second, source), kernel, stride=stride[1:],
                                 padding=padding[1:], dilation=dilation[1:])
                 output[:, :, lo:hi].add_(_volume(part, batch, hi-lo))
         if bias is not None:
             output.add_(bias.view(1, -1, 1, 1, 1))
-        ctx.save_for_backward(x, weight)
+        ctx.save_for_backward(x, weight, second)
         ctx.options = stride, padding, dilation, chunk
         ctx.has_bias = bias is not None
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        x, weight = ctx.saved_tensors
+        x, weight, second = ctx.saved_tensors
         stride, padding, dilation, chunk = ctx.options
         batch, _, depth, _, _ = x.shape
         dx = torch.zeros_like(x) if ctx.needs_input_grad[0] else None
+        dsecond = torch.zeros_like(second) if second is not None and ctx.needs_input_grad[7] else None
         dw = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
         planes = [weight[:, :, k].contiguous() for k in range(weight.shape[2])]
-        if dx is not None or dw is not None:
+        need_image = dx is not None or dsecond is not None
+        if need_image or dw is not None:
             for start in range(0, grad_output.shape[2], chunk):
                 for k, kernel in enumerate(planes):
                     lo, hi, source = _depth_slice(depth, k, stride[0], padding[0], dilation[0],
                                                  start, min(start + chunk, grad_output.shape[2]))
                     if hi <= lo:
                         continue
-                    image = _planes(x, source)
+                    image = _input_planes(x, second, source)
                     gradient = _planes(grad_output, slice(lo, hi))
                     # The same ATen operator used by torch.nn.grad.conv2d_*;
                     # request both derivatives together, without recomputation.
                     gi, gw, _ = torch.ops.aten.convolution_backward.default(
                         gradient, image, kernel, None, list(stride[1:]), list(padding[1:]),
                         list(dilation[1:]), False, [0, 0], 1,
-                        (dx is not None, dw is not None, False))
+                        (need_image, dw is not None, False))
                     if dx is not None:
-                        dx[:, :, source].add_(_volume(gi, batch, hi-lo))
+                        dx[:, :, source].add_(_volume(gi[:, :x.shape[1]], batch, hi-lo))
+                    if dsecond is not None:
+                        dsecond[:, :, source].add_(_volume(gi[:, x.shape[1]:], batch, hi-lo))
                     if dw is not None:
                         dw[:, :, k].add_(gw)
         db = (grad_output.sum((0, 2, 3, 4))
               if ctx.has_bias and ctx.needs_input_grad[2] else None)
-        return dx, dw, db, None, None, None, None
+        result = (dx, dw, db, None, None, None, None)
+        return result + (dsecond,) if len(ctx.needs_input_grad) == 8 else result
 
 
 class DepthSlicedConv3d(nn.Conv3d):
@@ -112,7 +122,9 @@ class DepthSlicedConv3d(nn.Conv3d):
         result.train(module.training)
         return result
 
-    def forward(self, x):
+    def forward(self, x, second=None):
+        if second is not None:
+            return self.forward_concatenated(x, second)
         if self.groups != 1 or self.padding_mode != 'zeros' or isinstance(self.padding, str):
             raise ValueError('depth_sliced requires groups=1 and numeric zero padding')
         if (x.ndim != 5 or x.dtype not in (torch.float32, torch.float64)
@@ -123,6 +135,24 @@ class DepthSlicedConv3d(nn.Conv3d):
             return F.linear(x.movedim(1, -1), self.weight[:, :, 0, 0, 0], self.bias).movedim(-1, 1)
         return _DepthSlicedConv.apply(x, self.weight, self.bias, self.stride,
                                      self.padding, self.dilation, DEPTH_CHUNK)
+
+    def forward_concatenated(self, first, second):
+        """Conv3d(cat(first, second), weight) without a saved full-volume cat.
+
+        Only the bounded NCHW plane batch is concatenated. All input channels
+        enter the same Conv2d call, retaining its channel-reduction order.
+        Both original inputs are saved and receive independent exact gradients.
+        """
+        if (self.groups != 1 or self.padding_mode != 'zeros' or isinstance(self.padding, str)
+                or first.ndim != 5 or second.ndim != 5
+                or first.shape[0] != second.shape[0] or first.shape[2:] != second.shape[2:]
+                or first.shape[1] + second.shape[1] != self.in_channels
+                or first.dtype not in (torch.float32, torch.float64)
+                or second.dtype != first.dtype or second.device != first.device
+                or torch.is_autocast_enabled(first.device.type)):
+            raise ValueError('concatenated convolution requires compatible FP32/FP64 volumes and groups=1 zero padding')
+        return _DepthSlicedConv.apply(first, self.weight, self.bias, self.stride,
+                                     self.padding, self.dilation, DEPTH_CHUNK, second)
 
 
 def enable_depth_sliced_convolutions(module):

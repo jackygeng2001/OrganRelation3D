@@ -121,6 +121,81 @@ class DepthSlicedTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DepthSlicedConv3d(4,4,3,groups=2)(x.float())
 
+    def test_concatenated_inputs_outputs_and_gradients(self):
+        for dtype in (torch.float32, torch.float64):
+            for layout in (torch.contiguous_format, torch.channels_last_3d):
+                for stride, dilation in ((1,1), (2,1), (1,2)):
+                    conv = DepthSlicedConv3d(5,4,3,stride=stride,padding=dilation,dilation=dilation).to(dtype)
+                    a = torch.randn(2,2,7,5,9,dtype=dtype).contiguous(memory_format=layout).requires_grad_()
+                    b = torch.randn(2,3,7,5,9,dtype=dtype).contiguous(memory_format=layout).requires_grad_()
+                    reference = F.conv3d(torch.cat((a,b),1),conv.weight,conv.bias,
+                                         stride=stride,padding=dilation,dilation=dilation)
+                    result = conv.forward_concatenated(a,b)
+                    upstream = torch.randn_like(reference)
+                    params = (a,b,*conv.parameters())
+                    tol = dict(rtol=1e-4,atol=3e-4) if dtype==torch.float32 else dict(rtol=1e-10,atol=1e-10)
+                    torch.testing.assert_close(result,reference,**tol)
+                    for u,v in zip(torch.autograd.grad(result,params,upstream),
+                                   torch.autograd.grad(reference,params,upstream)):
+                        torch.testing.assert_close(u,v,**tol)
+        with self.assertRaises(ValueError):
+            conv.forward_concatenated(a,b[:,:,:-1])
+
+    def test_concatenated_saved_storage_and_bounded_materialization(self):
+        from unittest.mock import patch
+        a = torch.randn(1,2,13,5,7,requires_grad=True)
+        b = torch.randn(1,3,13,5,7,requires_grad=True)
+        conv = DepthSlicedConv3d(5,4,3,padding=1)
+        saved, sizes = [], []
+        original = torch.cat
+        def cat(tensors,dim=0):
+            self.assertTrue(all(t.ndim==4 and t.shape[0]<=DEPTH_CHUNK for t in tensors))
+            sizes.append(tensors[0].shape[0])
+            return original(tensors,dim)
+        def pack(tensor):
+            saved.append(tensor)
+            return tensor
+        with torch.autograd.graph.saved_tensors_hooks(pack,lambda t:t), patch(
+                'organ_relation.models.depth_sliced_conv.torch.cat',side_effect=cat):
+            output = conv.forward_concatenated(a,b)
+            output.sum().backward()
+        self.assertTrue(sizes)
+        self.assertEqual(len(saved),3)
+        self.assertIs(saved[0],a)
+        self.assertIs(saved[1],conv.weight)
+        self.assertIs(saved[2],b)
+
+    def test_decoder_uses_two_inputs_through_normal_module_call(self):
+        model = BrainTumorSegmentor(BrainTumorConfig(**config()['model']),convolution_backend='depth_sliced')
+        observed, handles = [], []
+        for block in model.decoder.fuse:
+            handles.append(block[0][0].register_forward_pre_hook(
+                lambda module,args: observed.append(tuple(tuple(x.shape) for x in args))))
+        try:
+            model(torch.randn(1,4,9,11,13)).final_logits.sum().backward()
+        finally:
+            for handle in handles:
+                handle.remove()
+        self.assertEqual(len(observed),3)
+        self.assertTrue(all(len(shapes)==2 and shapes[0]==shapes[1] for shapes in observed))
+        self.assertTrue(all(not m._forward_pre_hooks for m in model.modules()))
+
+    def test_concatenated_double_backward_and_frozen_inputs(self):
+        a = torch.randn(1,1,2,3,3,dtype=torch.double,requires_grad=True)
+        b = torch.randn_like(a,requires_grad=True)
+        w = torch.randn(2,2,3,3,3,dtype=torch.double,requires_grad=True)
+        bias = torch.randn(2,dtype=torch.double,requires_grad=True)
+        call = lambda a,b,w,bias: _DepthSlicedConv.apply(a,w,bias,(1,1,1),(1,1,1),(1,1,1),2,b)
+        self.assertTrue(torch.autograd.gradcheck(call,(a,b,w,bias)))
+        self.assertTrue(torch.autograd.gradgradcheck(call,(a,b,w,bias)))
+        for mask in ((True,False,False,False),(False,True,False,False),(False,False,True,True)):
+            values = tuple(t.detach().requires_grad_(need) for t,need in zip((a,b,w,bias),mask))
+            inputs = tuple(t for t in values if t.requires_grad)
+            ref = F.conv3d(torch.cat(values[:2],1),values[2],values[3],padding=1)
+            actual = call(*values)
+            for u,v in zip(torch.autograd.grad(ref.sum(),inputs),torch.autograd.grad(actual.sum(),inputs)):
+                torch.testing.assert_close(u,v,rtol=1e-10,atol=1e-10)
+
     def test_full_model_initialization_outputs_loss_gradients_and_no_hooks(self):
         cfg = config()
         for dtype in (torch.float32,torch.float64):

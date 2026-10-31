@@ -9,6 +9,7 @@ from torch.nn import functional as functional
 
 from .coarse_head import CoarseHead
 from .dynamic_relation import DynamicRelation
+from .depth_sliced_conv import DepthSlicedConv3d
 from .group_norm import ChannelsLastGroupNorm
 from .node_to_space import NodeToSpace
 from .residual_fusion import ResidualFusion
@@ -170,9 +171,16 @@ class BrainDecoder(nn.Module):
             enhanced = skip + content
             del content  # Autograd retains anything required for backward.
             decoded = self.up[index](decoded,size=skip.shape[2:],align_corners=self.align_corners)
-            decoded = torch.cat((decoded,enhanced),1)
-            del enhanced  # Cat backward needs sizes, not this extra Python reference.
-            decoded = self.fuse[index](decoded)
+            first_unit, second_unit = self.fuse[index]
+            if isinstance(first_unit[0], DepthSlicedConv3d):
+                decoded = first_unit[0](decoded, enhanced)
+                del enhanced
+                decoded = first_unit[2](first_unit[1](decoded))
+                decoded = second_unit(decoded)
+            else:
+                decoded = torch.cat((decoded,enhanced),1)
+                del enhanced  # Cat backward needs sizes, not this extra Python reference.
+                decoded = self.fuse[index](decoded)
         logits = self.head(decoded)
         return (logits,weights) if diagnostics else logits
 

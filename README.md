@@ -64,6 +64,8 @@ python scripts/brats.py check --device cuda:0 --cohort brats2023_gli \
 
 该执行方式及 depth chunk 写入 check JSON 和训练 runtime identity；resume 必须使用相同选项，不放宽旧 checkpoint 身份校验。算子临时内存有界不代表所有 backend workspace 有固定上限，真实整卷仍需检查峰值。正式训练吞吐还包括 optimizer、读取、监测和保存，不能用单次 forward/backward 代替。
 
+`depth_sliced` 的解码融合卷积直接接收 decoded/enhanced 两个原特征，仅在至多 4 个深度平面的 Conv2d 输入内按原通道顺序拼接。避免保存整幅拼接副本，反向分别返回两个输入的梯度；不修改原卷积权重、跨切面贡献或后续 GN/激活。`native` 仍使用原整幅 cat。此工程更新不绕过源码身份校验；无 checkpoint 的失败 run 不能 resume，应保留旧目录并使用新目录重试。
+
 遇到 OOM 时，在同一条 `check` 命令后加 `--profile-memory` 再做一次定位。
 该选项仅用于无参数更新的 check，复用已有算子/模块 profiler，分别观察 forward、loss、backward。
 stdout 输出失败阶段、活动模块/ATen 算子、输入输出 shape/stride/实际布局、最后成功模块、

@@ -14,11 +14,11 @@ sys.path.insert(0,str(ROOT/'src'))
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('inspect','check','train'))
+    parser.add_argument('action',choices=('inspect','check','overfit','train'))
     parser.add_argument('--config',type=Path,default=ROOT/'configs/brats_regions.json')
     parser.add_argument('--source',type=Path,help='One cohort archive or extracted directory, read-only')
     parser.add_argument('--cohort',choices=('brats2023_gli','brats2024_gli_post','brats2018','brats2019','brats2020','brats2021'))
-    parser.add_argument('--case',help='Single case for no-update preflight')
+    parser.add_argument('--case',help='Single case for no-update check or explicit overfit diagnostic')
     parser.add_argument('--shape',type=int,nargs=3,default=(9,17,19),help='CPU synthetic preflight only')
     parser.add_argument('--device',default='cpu')
     parser.add_argument('--convolution-backend', choices=('native','depth_sliced'), default='native',
@@ -131,9 +131,41 @@ def profile_check(model, criterion, image, label, device):
     return report
 
 
+def training_plan(args, manifest, config):
+    """Keep diagnostic reuse of a case separate from patient-disjoint training."""
+    from organ_relation.data.brats import validate_partition
+    from organ_relation.training.state import digest
+
+    if (manifest is None or args.run_dir is None or args.max_steps is None
+            or args.max_steps < 1):
+        raise ValueError('training requires --source, --run-dir and positive --max-steps')
+    options = dict(config['training'], max_steps=args.max_steps)
+    data = dict(manifest_hash=digest(manifest), manifest=manifest)
+    if args.action == 'overfit':
+        if not args.case or args.split is not None:
+            raise ValueError('overfit requires --case and forbids --split; it is not independent validation')
+        if (options['validation_role'] != 'train_monitor' or options['max_epochs'] is not None
+                or options.get('cadence_unit','step') != 'step'):
+            raise ValueError('overfit requires train_monitor, step cadence and max_epochs=null')
+        selected = [r for r in manifest['records'] if r['case_id'] == args.case]
+        if len(selected) != 1:
+            raise ValueError('overfit case must be uniquely present in source')
+        data['selection'] = dict(kind='single_case_overfit', train=[args.case], monitor=[args.case],
+                                 subject_id=selected[0]['subject_id'], independent_validation=False)
+        return selected, selected, options, data
+    if args.action != 'train' or args.split is None or args.case:
+        raise ValueError('train requires --split and forbids --case; use explicit overfit for a single case')
+    if options['validation_role'] != 'internal_dev':
+        raise ValueError('train requires internal_dev; same-case monitoring belongs to overfit')
+    split = json.loads(args.split.read_text())
+    train, dev = validate_partition(manifest, split)
+    data.update(split_hash=digest(split), split=split)
+    return train, dev, options, data
+
+
 def execute(args):
     import torch
-    from organ_relation.data.brats import BraTSDataset,index_cases,validate_partition
+    from organ_relation.data.brats import BraTSDataset,index_cases
     from organ_relation.losses import RegionJointLoss
     from organ_relation.models.brain_tumor import BrainTumorConfig,BrainTumorSegmentor
     from organ_relation.models.diagnostics import DeviceMemoryMonitor,parameter_inventory
@@ -159,9 +191,8 @@ def execute(args):
         return
     if args.action == 'check' and (args.run_dir or args.resume or args.split or args.max_steps or args.stop_after):
         raise ValueError('check is a no-update/no-run preflight')
-    if args.action == 'train' and (manifest is None or args.split is None or args.run_dir is None
-                                   or args.max_steps is None or args.max_steps < 1 or args.case):
-        raise ValueError('train requires --source, --split, --run-dir, --max-steps; --case is only for check')
+    if args.action in ('train','overfit'):
+        train,dev,options,data_identity = training_plan(args,manifest,config)
     device = torch.device(args.device)
     if device.type not in ('cpu','cuda'):
         raise ValueError('CPU/CUDA/ROCm only; no fallback')
@@ -229,14 +260,11 @@ def execute(args):
         raise ValueError('real CPU training disabled; use CPU synthetic tests for trajectory acceptance')
     if args.run_dir.resolve().is_relative_to(args.source.resolve()):
         raise ValueError('run output must be outside original dataset')
-    split=json.loads(args.split.read_text())
-    train,dev=validate_partition(manifest,split)
     train_data=BraTSDataset(dict(manifest,records=train),**config['preprocessing'])
     dev_data=BraTSDataset(dict(manifest,records=dev),**config['preprocessing'])
-    options=dict(config['training'],max_steps=args.max_steps)
     identity=dict(mode='brats_regions',model=config['model'],loss=config['loss'],threshold=config['threshold'],
         preprocessing=config['preprocessing'],training=options,optimizer=dict(name='AdamW',**config['optimizer']),
-        data=dict(manifest_hash=digest(manifest),manifest=manifest,split_hash=digest(split),split=split),
+        data=data_identity,
         runtime=dict(device=str(device),dtype='float32',cpu_threads=torch.get_num_threads(),
                      backend='rocm' if torch.version.hip else 'cuda',**execution),
         environment=dict(python=platform.python_version(),platform=platform.platform(),

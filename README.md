@@ -17,7 +17,7 @@
 | `src/organ_relation/losses.py` | 新 RegionJointLoss 与历史损失隔离 |
 | `src/organ_relation/data/brats.py` | 四模态完整 MRI、显式标签语义、患者分组检查 |
 | `src/organ_relation/training/brain_tumor.py` | 三重叠区域监测与 TensorBoard 标量 |
-| `scripts/brats.py` | inspect / 无更新 check / 受控 train |
+| `scripts/brats.py` | inspect / 无更新 check / 单病例 overfit / 受控 train |
 | `configs/brats_regions.json` | 显式开发配置，不是正式实验方案 |
 
 新方法固定编码器 32/64/128/256、GN8/LeakyReLU；配置下共 8,330,296 参数。深层 Cr/K/da/Cg=8/2/4/6 等未写死在方法中的选择暂沿用工程值，详见 METHOD_SPEC。没有替换为 micro 模型。
@@ -87,5 +87,18 @@ python scripts/brats.py train --source SOURCE --cohort brats2023_gli \
 ```
 
 恢复时保留所有参数，追加 `--resume RUN_DIR/last.ckpt`。模型、损失、预处理、阈值、优化器、运行条件、完整 split/manifest、源码身份必须一致。`--stop-after` 仅在完整 optimizer step 边界停止，不改计划。旧 AMOS checkpoint 不能迁移成此模型；原迁移开关仍仅允许其审计过的历史版本。
+
+单病例学习诊断使用独立 `overfit` 动作和 `configs/train_brats_single_case_overfit.json`：必须给 `--case`、禁止 `--split`，仅选择该病例训练并做 `train_monitor`，明确不是独立验证。科学设置与 `brats_regions.json` 相同；每 5 步检查梯度/参数更新、保存 checkpoint 并输出摘要，每 25 步监测三区域 hard/soft Dice 与预测体积。
+
+```bash
+PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+python scripts/brats.py overfit --config configs/train_brats_single_case_overfit.json \
+  --device cuda:0 --convolution-backend depth_sliced --cohort brats2023_gli \
+  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
+  --case BraTS-GLI-00000-000 --max-steps 100 \
+  --run-dir runs/brats2023_1case_100 --stop-after 5
+```
+
+先核对 5 步真实 optimizer 更新、显存与耗时；通过后保持同一配置和源码，删除 `--stop-after 5`，追加 `--resume runs/brats2023_1case_100/last.ckpt` 续到 100。两次都保留 `--max-steps 100`，不重新开始 run，不把 max_steps 从 5 改为 100，不需要 extension。该 GPU 连续训练须实际运行验收，不能用已有无更新检查代替。
 
 原始数据、runs、权重、缓存与诊断输出不进入 Git。新增提交采用 Conventional Commits，不重写历史。

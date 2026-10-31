@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "mode": "brats_regions",
+  "status": "single_case_overfit_diagnostic_not_independent_validation",
+  "model": {
+    "relation_channels": 8,
+    "rounds": 2,
+    "attention_channels": 4,
+    "content_channels": 6,
+    "epsilon": 1e-06,
+    "gamma_init": 0.1,
+    "conv_bias": true,
+    "coarse_bias": true,
+    "fusion_bias": true,
+    "align_corners": false
+  },
+  "model_choice_note": "Document fixes encoder 32/64/128/256, GN8, LeakyReLU .01, decoder d=32/Cg=32/MLP64, eta=1e-3. Unspecified deep relation dimensions/K/epsilon/gamma use legacy development values; GRU retains tested explicit reset-before-linear equations. These are engineering choices pending experiment agreement.",
+  "loss": {
+    "epsilon": 1e-06,
+    "lambda_c": 0.5,
+    "align_corners": false
+  },
+  "threshold": 0.5,
+  "preprocessing": {
+    "normalization": "nonzero_zscore",
+    "normalization_epsilon": 1e-08
+  },
+  "optimizer": {
+    "lr": 0.0003,
+    "weight_decay": 0,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "foreach": false,
+    "fused": false
+  },
+  "training": {
+    "max_steps": null,
+    "max_epochs": null,
+    "batch_size": 1,
+    "num_workers": 0,
+    "seed": 20260925,
+    "shuffle": true,
+    "memory_format": "channels_last_3d",
+    "scheduler": null,
+    "checkpoint_every": 5,
+    "diagnostics_every": 5,
+    "validation_every": 25,
+    "validation_role": "train_monitor",
+    "eta_window": 20,
+    "eta_warmup": 5,
+    "console_every_steps": 5
+  }
+}

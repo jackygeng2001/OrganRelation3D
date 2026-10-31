@@ -79,7 +79,7 @@ backward 的算子能定位到 ATen 和形状，但不声称反查到了精确�
 
 新 `brats_regions` 模式复用现有 Trainer：AdamW、原子 checkpoint、RNG/病例顺序恢复、ETA、JSONL、TensorBoard。final/coarse BCE、DiceLoss、soft Dice 与内部 WT/TC/ET hard Dice 使用正确三通道语义。独立阈值预测不做层级修正，监测记录违反数。旧 AMOS 功能和已有配置保留为历史入口。
 
-正式数据划分、HD95/官方评估规则、训练周期及实验分组尚未决定。当前入口仅支持显式 step horizon，不套用 AMOS epoch/early-stop 方案。训练必须提供患者互斥且穷尽的 split JSON：`manifest_hash` 为 inspect 输出的 manifest hash，`train`/`dev` 为病例 ID 列表；同一患者的多次扫描不得跨集合。目录名/年份不等于无患者重复，跨队列实验还需核验。
+正式数据划分、HD95/官方评估规则、训练周期及实验分组尚未决定。当前入口仅支持显式 step horizon，不套用 AMOS epoch/early-stop 方案。普通训练必须提供患者互斥且穷尽的 split JSON：`manifest_hash` 为 inspect 输出的 manifest hash，`train`/`dev` 为病例 ID 列表；同一患者的多次扫描不得跨集合。下述显式 pilot 使用 train/dev/unused 三部分完整覆盖来源，普通划分校验不放宽。目录名/年份不等于无患者重复，跨队列实验还需核验。
 
 完成协议和 AMD preflight 后才能使用以下参数形式（不是现在启动实验的指令）：
 
@@ -138,3 +138,30 @@ python scripts/brats.py overfit --config configs/train_brats_single_case_overfit
 ```
 
 500 是总步数，从 step 100 再训练 400 步。首次 extension 已提交后如中断，保留所有参数并去掉 `--extend-to 500` 普通恢复，horizon 会从 checkpoint 自动读取；不要把 `--max-steps` 改为 500。源码再次变化时，普通恢复仍严格拒绝。
+
+## BraTS2023 小规模患者独立 pilot
+
+`configs/train_brats_patient_pilot.json` 沿用已测试单病例的完整模型、loss、预处理、AdamW、seed、FP32 和运行设置；只将 observer 改为 `internal_dev`，每 80 steps 验证。新 run 从头初始化，**不加载单病例 checkpoint**。本轮计划 16 名患者训练、4 名患者验证，800 steps=50 epochs；每 5 epochs 验证全部 4 例，每 5 steps 保存与检查梯度。800 是 pilot 预算，不是正式训练的固定轮数；没有新增 early stopping。
+
+先只读归档元数据生成本地划分（已存在时拒绝覆盖）。根据 seed+患者 ID 的 SHA256 排序选择患者，每人取病例 ID 字典序最小的一次扫描；不依据标签、病灶大小或模型表现挑选。排除已用于单病例过拟合的整个患者。完整 manifest 指纹以及所有未使用扫描均记录，加载时重新验证选择规则；其余时间点不能跨 train/dev。患者识别沿用归档 ID，不声称影像级去重或独立外部测试。
+
+```bash
+python scripts/brats_pilot_split.py \
+  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
+  --output configs/brats2023_pilot_16_4.local.json \
+  --train-subjects 16 --dev-subjects 4 --seed 20260925 \
+  --exclude-subject BraTS-GLI-00000
+```
+
+先运行同一计划下的前 5 步，核对不同病例的显存、梯度和读盘耗时；OOM 时停止，不自动改模型。GPU 由用户运行。
+
+```bash
+PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+python scripts/brats.py train --config configs/train_brats_patient_pilot.json \
+  --device cuda:0 --convolution-backend depth_sliced --cohort brats2023_gli \
+  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
+  --split configs/brats2023_pilot_16_4.local.json --max-steps 800 \
+  --run-dir runs/brats2023_pilot_16_4_v1 --stop-after 5
+```
+
+前 5 步通过后，保持以上参数，删除 `--stop-after 5` 并添加 `--resume runs/brats2023_pilot_16_4_v1/last.ckpt`，续到 800。后续中断同样恢复；不改变 max_steps 或源码。JSONL/TensorBoard 中 `internal_dev` 是未参与梯度更新的患者，不能与单病例 `train_monitor` 分数直接比较。用此 pilot 观察验证趋势和耗时，再制定正式协议；4 例不足以确定最优超参数或可靠的正式停止轮数。旧 checkpoint 的严格源码恢复校验仍保留，旧实验需要其原始版本。

@@ -132,11 +132,53 @@ class BraTSDataset(torch.utils.data.Dataset):
             modalities=list(MODALITIES),cohort=self.manifest['cohort'],label_encoding=self.encoding))
 
 
+def make_pilot_partition(manifest, *, train_subjects, dev_subjects, seed, excluded_subjects=()):
+    """Metadata-only, reproducible pilot: one lexicographically first scan per patient.
+
+    Unselected scans remain explicitly unused; this is not a formal cohort split.
+    Hash ranking avoids changing any training/global RNG state.
+    """
+    from organ_relation.training.state import digest
+    if manifest.get('cohort') != 'brats2023_gli':
+        raise ValueError('patient pilot currently supports brats2023_gli only')
+    if any(type(n) is not int or n < 1 for n in (train_subjects, dev_subjects)) or type(seed) is not int:
+        raise ValueError('positive integer patient counts and integer seed required')
+    groups = {}
+    case_ids = []
+    for record in manifest['records']:
+        case_ids.append(record['case_id'])
+        groups.setdefault(record['subject_id'], []).append(record['case_id'])
+    if len(set(case_ids)) != len(case_ids):
+        raise ValueError('duplicate manifest case')
+    excluded = sorted(set(excluded_subjects))
+    if not set(excluded) <= set(groups):
+        raise ValueError('excluded patient absent from manifest')
+    ranked = sorted(set(groups)-set(excluded), key=lambda subject: (digest([seed, subject]), subject))
+    if train_subjects + dev_subjects > len(ranked):
+        raise ValueError('not enough eligible patients for pilot')
+    selected = [min(groups[subject]) for subject in ranked[:train_subjects+dev_subjects]]
+    return dict(kind='patient_pilot_v1', manifest_hash=digest(manifest), seed=seed,
+                train_subjects=train_subjects, dev_subjects=dev_subjects,
+                excluded_subjects=excluded, scan_policy='lexicographically_first_per_subject',
+                train=selected[:train_subjects], dev=selected[train_subjects:],
+                unused=sorted(set(case_ids)-set(selected)))
+
+
 def validate_partition(manifest, split):
     """Explicit patient-group partition; never split timepoints across roles."""
     from organ_relation.training.state import digest
     if split.get('manifest_hash') != digest(manifest):
         raise ValueError('split manifest hash mismatch')
+    if split.get('kind') == 'patient_pilot_v1':
+        expected = make_pilot_partition(manifest, train_subjects=split.get('train_subjects'),
+            dev_subjects=split.get('dev_subjects'), seed=split.get('seed'),
+            excluded_subjects=split.get('excluded_subjects', []))
+        if split != expected:
+            raise ValueError('pilot split differs from recorded deterministic patient selection')
+        records = {r['case_id']:r for r in manifest['records']}
+        return ([records[c] for c in split['train']], [records[c] for c in split['dev']])
+    if split.get('kind') is not None or 'unused' in split:
+        raise ValueError('unused cases require explicit patient_pilot_v1 split')
     records = {r['case_id']:r for r in manifest['records']}
     train, dev = split.get('train',[]), split.get('dev',[])
     if not train or not dev or len(set(train+dev)) != len(train+dev) or set(train+dev) != set(records):

@@ -19,7 +19,9 @@ def describe(value):
         return dict(shape=list(value.shape), stride=list(value.stride()),
                     dtype=str(value.dtype), device=str(value.device),
                     bytes=value.numel() * value.element_size(),
-                    contiguous=value.is_contiguous(), requires_grad=value.requires_grad)
+                    contiguous=value.is_contiguous(), requires_grad=value.requires_grad,
+                    channels_last_3d=value.is_contiguous(memory_format=torch.channels_last_3d)
+                    if value.ndim == 5 else None)
     if isinstance(value, tuple) and hasattr(value, '_fields'):
         return {key: describe(item) for key, item in zip(value._fields, value)}
     if isinstance(value, (tuple, list)):
@@ -34,7 +36,11 @@ def describe(value):
 
 
 class ForwardMemoryProfile(TorchDispatchMode):
-    """Call model normally inside this context; backward stays outside it.
+    """Call a module normally inside a context; profile separate phases separately.
+
+    Historical forward-only callers keep backward outside the context. A caller
+    may explicitly profile backward in a separate context: ATen operators are
+    observed, but forward hooks do not identify backward's source modules.
 
     Reset allocator peaks at each boundary and fold each interval into ALL open
     module scopes. This preserves enclosing peaks despite nested resets. Times

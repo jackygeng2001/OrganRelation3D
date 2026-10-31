@@ -26,6 +26,8 @@ def main(argv=None):
     parser.add_argument('--run-dir',type=Path)
     parser.add_argument('--resume',type=Path)
     parser.add_argument('--stop-after',type=int)
+    parser.add_argument('--profile-memory',action='store_true',
+                        help='check only: report phase/operator memory and failures to stdout')
     args = parser.parse_args(argv)
     try:
         execute(args)
@@ -33,6 +35,98 @@ def main(argv=None):
         print(f'BraTS stopped: {exc}',file=sys.stderr)
         return 2
     return 0
+
+
+def profile_check(model, criterion, image, label, device):
+    """One unchanged forward/loss/backward; scalar metadata only, never a retry.
+
+    Reuse the existing ATen/module profiler. Peaks must be folded back across
+    its nested resets; failed snapshots are taken BEFORE locals unwind. Output
+    is bounded to stage summaries, largest operator peaks and failure context.
+    """
+    import torch
+    from organ_relation.models.forward_memory import ForwardMemoryProfile, describe
+    from organ_relation.models.diagnostics import DeviceMemoryMonitor, parameter_inventory
+
+    report = dict(status='running', optimizer_steps=0, image=describe(image), label=describe(label),
+                  failure=None, phases=[], notes=[
+                      'One full-volume FP32 autograd pass; no optimizer step or activation release.',
+                      'Synchronized profiling timings include overhead; not training throughput.',
+                      'ATen memory does not identify the internal MIOpen solver/workspace.',
+                      'Backward reports ATen operators; module scopes refer only to forward calls.'])
+    monitor = DeviceMemoryMonitor(device)
+    for phase in ('forward', 'loss', 'backward'):
+        trace = {}
+        monitor.begin()
+        before = monitor.snapshot(phase)
+        started = time.perf_counter()
+        failure = None
+        try:
+            module = criterion if phase == 'loss' else model
+            with ForwardMemoryProfile(module, device, trace, lambda: None):
+                if phase == 'forward':
+                    output = model(image)
+                elif phase == 'loss':
+                    loss = criterion(output.coarse_logits, output.final_logits, label)
+                else:
+                    loss.total.backward()
+            memory = monitor.snapshot(phase)
+        except Exception as exc:
+            failure = trace.get('failure') or dict(error_type=type(exc).__name__, error=str(exc),
+                oom=isinstance(exc, torch.OutOfMemoryError), active_entries=[])
+            memory = failure.get('memory', {})  # Do not synchronize after a GPU failure.
+
+        entries = trace.get('entries', [])
+        def brief(entry):
+            parents = []
+            parent = entry['parent']
+            while parent is not None:
+                ancestor = entries[parent]
+                if ancestor['kind'] == 'module':
+                    parents.append(ancestor['name'])
+                parent = ancestor['parent']
+            item = {k:entry[k] for k in ('index','kind','name','status','inputs','outputs','before',
+                                         'after','seconds','peak_allocated_bytes','peak_reserved_bytes')}
+            item['module_scopes'] = list(reversed(parents))
+            peak, allocated = entry['peak_allocated_bytes'], entry['before']['allocated_bytes']
+            item['extra_peak_allocated_bytes'] = None if peak is None else max(0, peak-allocated)
+            return item
+
+        def major(entry):
+            name = entry['name']
+            return entry['kind'] == 'module' and (name.count('.') <= 1 or
+                (name.count('.') == 2 and name.startswith(('encoder.stages.', 'decoder.up.',
+                                                          'decoder.fuse.', 'decoder.skip_projection.'))))
+
+        peaks = {}
+        for key in ('peak_allocated_bytes', 'peak_reserved_bytes'):
+            values = [v for v in [memory.get(key), *(e[key] for e in entries)] if v is not None]
+            peaks[key] = max(values) if values else None
+        operators = [brief(e) for e in entries if e['kind'] == 'operator' and e['peak_allocated_bytes'] is not None]
+        operators.sort(key=lambda e:e['extra_peak_allocated_bytes'], reverse=True)
+        last = trace.get('last_successful_operator')
+        last_module = trace.get('last_successful_module')
+        record = dict(phase=phase, status='failed' if failure else 'passed', before=before,
+                      after=memory, seconds=time.perf_counter()-started, **peaks,
+                      modules=[brief(e) for e in entries if major(e)], largest_operator_peaks=operators[:8],
+                      last_successful_module=brief(entries[last_module]) if last_module is not None else None,
+                      last_successful_operator=brief(entries[last]) if last is not None else None)
+        report['phases'].append(record)
+        if failure:
+            report.update(status='failed', failure=dict(phase=phase, **failure,
+                active_scopes=[brief(entries[i]) for i in failure['active_entries']]))
+            break
+        if phase == 'forward':
+            report.update(coarse_shape=list(output.coarse_logits.shape), final_shape=list(output.final_logits.shape))
+        elif phase == 'loss':
+            report['loss'] = loss.total.item()
+    for key in ('peak_allocated_bytes','peak_reserved_bytes'):
+        values = [p[key] for p in report['phases'] if p[key] is not None]
+        report[key] = max(values) if values else None
+    if report['failure'] is None:
+        report.update(parameter_inventory(model))
+        report['status'] = 'failed' if report['missing_gradients'] or report['nonfinite_gradients'] else 'passed'
+    return report
 
 
 def execute(args):
@@ -44,6 +138,8 @@ def execute(args):
     from organ_relation.training.state import digest,seed_all
     from organ_relation.provenance import code_hashes,git_state
 
+    if args.profile_memory and args.action != 'check':
+        raise ValueError('--profile-memory is only available for no-update check')
     config = json.loads(args.config.read_text())
     if config.get('schema_version') != 1 or config.get('mode') != 'brats_regions':
         raise ValueError('expected brain-region config')
@@ -97,6 +193,17 @@ def execute(args):
             image,label = sample.image.unsqueeze(0).to(device),sample.label.unsqueeze(0).to(device)
         if config['training']['memory_format']=='channels_last_3d':
             image=image.contiguous(memory_format=torch.channels_last_3d)
+        if args.profile_memory:
+            report = profile_check(model,criterion,image,label,device)
+            report['case_id'], report['cohort'] = args.case, args.cohort
+            report['torch'], report['rocm'] = str(torch.__version__), torch.version.hip
+            report['memory_format'] = config['training']['memory_format']
+            report['backend_environment'] = {k:v for k,v in os.environ.items()
+                if k.startswith(('MIOPEN_','PYTORCH_MIOPEN_','PYTORCH_CUDA_','PYTORCH_ALLOC_'))}
+            print(json.dumps(report,indent=2,allow_nan=False),flush=True)
+            if report['status'] != 'passed':
+                raise RuntimeError('profile failed; phase/operator details are in the diagnostic JSON on stdout')
+            return
         monitor = DeviceMemoryMonitor(device);monitor.begin()
         start=time.perf_counter()
         output=model(image)

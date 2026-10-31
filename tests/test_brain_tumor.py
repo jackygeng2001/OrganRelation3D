@@ -244,11 +244,96 @@ class BrainTumorTests(unittest.TestCase):
         self.assertEqual(result['missing_gradients'],[])
         self.assertEqual(result['nonfinite_gradients'],[])
         self.assertIsNone(result['memory']['peak_allocated_bytes'])
+        self.assertNotIn('phases',result)  # Default remains the original unprofiled check.
         for args in (['check','--run-dir',str(self.fixture.root/'forbidden')],
                      ['check','--source','missing'],['train'],['check','--shape','100','100','100']):
             with self.subTest(args=args),contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(module.main(args),2)
         self.assertFalse((self.fixture.root/'forbidden').exists())
+
+    def profile_cli(self):
+        spec=importlib.util.spec_from_file_location('brats_profile_test',fixtures.ROOT/'scripts/brats.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module
+
+    def test_profile_all_phases_preserves_loss_gradients_rng_and_cleans_hooks(self):
+        module=self.profile_cli()
+        model=self.model().to(memory_format=torch.channels_last_3d)
+        reference=copy.deepcopy(model)
+        x=torch.randn(1,4,5,7,9).contiguous(memory_format=torch.channels_last_3d).requires_grad_()
+        y=x.detach().clone().requires_grad_()
+        label=torch.arange(5*7*9).reshape(1,5,7,9)%4
+        rng=torch.get_rng_state().clone()
+        result=module.profile_check(model,self.criterion(),x,label,'cpu')
+        expected=self.criterion()(*reference(y),label).total
+        expected.backward()
+        self.assertEqual(result['status'],'passed')
+        self.assertEqual(result['loss'],expected.item())
+        self.assertEqual(result['optimizer_steps'],0)
+        self.assertEqual([p['phase'] for p in result['phases']],['forward','loss','backward'])
+        self.assertTrue(result['image']['channels_last_3d'])
+        self.assertIsNone(result['peak_allocated_bytes'])
+        self.assertTrue(torch.equal(rng,torch.get_rng_state()))
+        torch.testing.assert_close(x.grad,y.grad,rtol=0,atol=0)
+        for a,b in zip(model.parameters(),reference.parameters()):
+            torch.testing.assert_close(a.grad,b.grad,rtol=0,atol=0)
+            torch.testing.assert_close(a,b,rtol=0,atol=0)
+        self.assertTrue(all(not m._forward_hooks and not m._forward_pre_hooks for m in model.modules()))
+        json.dumps(result,allow_nan=False)
+
+    def test_profile_oom_each_phase_reports_operator_without_retry_or_hooks(self):
+        from torch.utils._python_dispatch import TorchDispatchMode
+        module=self.profile_cli()
+        for phase,operation in (('forward','aten.cat.default'),('loss','aten.log.default'),
+                                ('backward','aten.convolution_backward.default')):
+            with self.subTest(phase=phase):
+                model=self.model();criterion=self.criterion()
+                class FailOperator(TorchDispatchMode):
+                    def __torch_dispatch__(self,func,types,args=(),kwargs=None):
+                        match=str(func)==operation
+                        if operation=='aten.cat.default':
+                            match=match and len(args[0])==2 and args[0][0].shape[1]==32
+                        if match:raise torch.OutOfMemoryError('synthetic Tried to allocate 2.13 GiB')
+                        return func(*args,**(kwargs or {}))
+                with FailOperator(),patch.object(model,'forward',wraps=model.forward) as calls:
+                    result=module.profile_check(model,criterion,torch.randn(1,4,5,7,9),
+                                               torch.zeros(1,5,7,9,dtype=torch.long),'cpu')
+                self.assertEqual(calls.call_count,1)
+                self.assertEqual(result['status'],'failed')
+                self.assertEqual(result['failure']['phase'],phase)
+                self.assertTrue(result['failure']['oom'])
+                active=result['failure']['active_scopes']
+                self.assertEqual(active[-1]['name'],operation)
+                if phase=='forward':
+                    self.assertIn('decoder',active[-1]['module_scopes'])
+                    self.assertEqual(active[-1]['inputs']['args'][0][0]['shape'],[1,32,5,7,9])
+                self.assertEqual(len(result['phases']),('forward','loss','backward').index(phase)+1)
+                self.assertTrue(all(p['status']=='passed' for p in result['phases'][:-1]))
+                self.assertTrue(all(not m._forward_hooks and not m._forward_pre_hooks
+                                    for m in (*model.modules(),*criterion.modules())))
+                self.assertEqual(result['optimizer_steps'],0)
+                json.dumps(result,allow_nan=False)
+
+    def test_profile_cli_is_opt_in_check_only_and_prints_failure_before_exit(self):
+        import contextlib
+        module=self.profile_cli()
+        stdout=io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(module.main(['check','--shape','5','7','9','--profile-memory']),0)
+        report=json.loads(stdout.getvalue())
+        self.assertEqual(report['status'],'passed')
+        self.assertEqual(report['memory_format'],'channels_last_3d')
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(module.main(['train','--profile-memory']),2)
+        for error in (torch.OutOfMemoryError('synthetic loss OOM'),ValueError('synthetic nonfinite loss')):
+            stdout=io.StringIO()
+            with patch.object(RegionJointLoss,'forward',side_effect=error),\
+                 contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.main(['check','--shape','5','7','9','--profile-memory']),2)
+            report=json.loads(stdout.getvalue())
+            self.assertEqual(report['status'],'failed')
+            self.assertEqual(report['failure']['phase'],'loss')
+            self.assertEqual(report['failure']['oom'],isinstance(error,torch.OutOfMemoryError))
 
     def trainer(self,path,resume=False):
         seed_all(171);model=self.model();criterion=self.criterion()

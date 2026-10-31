@@ -60,6 +60,14 @@ python scripts/brats.py check --device cuda:0 --cohort brats2023_gli \
 
 不要把旧 MONAI/CT 的显存数字用于此新编码器和全分辨率关系查询。布局选项不能证明所有中间算子/solver 都是 NDHWC。
 
+遇到 OOM 时，在同一条 `check` 命令后加 `--profile-memory` 再做一次定位。
+该选项仅用于无参数更新的 check，复用已有算子/模块 profiler，分别观察 forward、loss、backward。
+stdout 输出失败阶段、活动模块/ATen 算子、输入输出 shape/stride/实际布局、最后成功模块、
+各阶段 allocated/reserved 峰值及最大算子增量峰值。OOM 现场在模型局部变量展开前采样，
+不重试、不清缓存、不手动释放激活、不改 dtype/公式；退出后移除所有 hooks。
+不同阶段的峰值经过合并，不能将嵌套模块时间/峰值相加；诊断时间包含同步开销，不能作为训练速度。
+backward 的算子能定位到 ATen 和形状，但不声称反查到了精确的前向模块或 MIOpen 内部算法。
+
 ## 可恢复训练能力与实验边界
 
 新 `brats_regions` 模式复用现有 Trainer：AdamW、原子 checkpoint、RNG/病例顺序恢复、ETA、JSONL、TensorBoard。final/coarse BCE、DiceLoss、soft Dice 与内部 WT/TC/ET hard Dice 使用正确三通道语义。独立阈值预测不做层级修正，监测记录违反数。旧 AMOS 功能和已有配置保留为历史入口。

@@ -1,5 +1,6 @@
 """One read-only whole-volume inference from a trusted BraTS run checkpoint."""
 import argparse
+import copy
 import json
 import math
 import os
@@ -23,15 +24,44 @@ from organ_relation.training.state import digest, load_checkpoint, seed_all
 
 
 def verify_source(identity):
-    """Inference permits a new diagnostic script, never changed package code.
+    """Inference permits new diagnostics and the audited extension-only upgrade.
 
-    This is not resume: the training identity and checkpoint are not rewritten.
-    Ordinary training resume continues to check the entire identity.
+    Model/data/loss/engine code stays fixed. This is not resume: the training
+    identity and checkpoint are not rewritten. Normal resume stays strict.
     """
     saved = {k:v for k,v in identity['provenance']['source_hashes'].items() if k.startswith('src/')}
     current = {k:v for k,v in code_hashes().items() if k.startswith('src/')}
-    if not saved or saved != current:
+    if not saved:
         raise ValueError('package source differs from checkpoint; use its original model/data/loss implementation')
+    if saved == current:
+        return 'identical'
+    # The only permitted package difference is the audited extension allowlist
+    # itself, never model/data/loss/engine changes. No checkpoint is migrated here.
+    from organ_relation.training.extension import check_extension_identity
+    expected=copy.deepcopy(identity)
+    expected['provenance']=dict(git=git_state(),source_hashes=code_hashes())
+    try:
+        check_extension_identity(identity,expected)
+    except ValueError as exc:
+        raise ValueError('package source differs from checkpoint: '+str(exc)) from exc
+    return 'audited_extension_only'
+
+
+def load_run_checkpoint(checkpoint, run):
+    """Read original or current extended execution identity, retaining run origin."""
+    identity=run['identity']
+    try:
+        state=load_checkpoint(checkpoint,identity)
+    except ValueError as exc:
+        if not str(exc).startswith('resume identity mismatch:'):
+            raise
+        expected=copy.deepcopy(identity)
+        expected['provenance']=dict(git=git_state(),source_hashes=code_hashes())
+        state=load_checkpoint(checkpoint,expected)
+        if state.get('origin_identity')!=identity:
+            raise ValueError('extended checkpoint original run identity mismatch')
+    if state['run_id']!=run['run_id']:raise ValueError('checkpoint/run_id mismatch')
+    return state
 
 
 def distribution(values):
@@ -145,9 +175,9 @@ def execute(args):
     checkpoint = args.checkpoint.resolve();run_dir=checkpoint.parent
     run = json.loads((run_dir/'run.json').read_text());identity=run['identity']
     if identity.get('mode')!='brats_regions':raise ValueError('BraTS region checkpoint required')
-    verify_source(identity)
-    state=load_checkpoint(checkpoint,identity)
-    if state['run_id']!=run['run_id']:raise ValueError('checkpoint/run_id mismatch')
+    state=load_run_checkpoint(checkpoint,run)
+    identity=state['identity']
+    source_compatibility=verify_source(identity)
     saved=identity['data']['manifest'];source=args.source or Path(saved['source'])
     check_overlay_path(args.overlay,run_dir,source)
     if args.overlay is not None:
@@ -193,7 +223,8 @@ def execute(args):
         report=dict(checkpoint=str(checkpoint),checkpoint_sha256=sha256(checkpoint),run_id=run['run_id'],global_step=state['progress']['global_step'],
             case=args.case,shape=list(label.shape[1:]),full_volume_voxels=label.numel(),threshold=identity['threshold'],
             execution=dict(device=str(device),dtype='float32',memory_format=memory_format,convolution_backend=backend,forward_calls=1,optimizer_steps=0),
-            training_commit=identity['provenance']['git'],diagnostic_commit=git_state(),package_sources_match=True,
+            training_commit=identity['provenance']['git'],diagnostic_commit=git_state(),
+            package_sources_match=source_compatibility=='identical',source_compatibility=source_compatibility,
             torch=str(torch.__version__),rocm=torch.version.hip,backend_environment={k:v for k,v in os.environ.items() if k.startswith(('MIOPEN_','PYTORCH_MIOPEN_','PYTORCH_CUDA_','PYTORCH_ALLOC_'))},
             geometry=sample.metadata,forward_seconds=forward_seconds,forward_memory_bytes=memory,
             loss_and_soft_dice=diagnostic,**branches,

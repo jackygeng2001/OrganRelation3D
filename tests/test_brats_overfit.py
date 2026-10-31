@@ -1,9 +1,12 @@
 """Single-case CLI selection and 5 -> 100 transactional CPU continuation."""
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
@@ -82,11 +85,12 @@ class BraTSOverfitTests(unittest.TestCase):
         self.assertEqual(len(train),2);self.assertEqual(len(dev),1)
         self.assertIn('split_hash',data);self.assertNotIn('selection',data)
 
-    def trainer(self,path,resume=False):
+    def trainer(self,path,resume=False,*,extend_to=None,planned=100):
         seed_all(self.cfg['training']['seed'])
         model = BrainTumorSegmentor(BrainTumorConfig(**self.cfg['model']),
                                    convolution_backend='depth_sliced').to(memory_format=torch.channels_last_3d)
         _,_,options,data = self.cli.training_plan(self.args,self.manifest,self.cfg)
+        options['max_steps']=planned
         identity = dict(mode='brats_regions',model=self.cfg['model'],loss=self.cfg['loss'],
                         threshold=self.cfg['threshold'],training=options,data=data,provenance='CPU fixture',
                         preprocessing=self.cfg['preprocessing'],
@@ -95,7 +99,85 @@ class BraTSOverfitTests(unittest.TestCase):
         return Trainer(model,RegionJointLoss(**self.cfg['loss']),optimizer,SingleCase(),['one'],
                        device='cpu',options=options,identity=identity,run_dir=path,
                        validation_dataset=SingleCase(),validation_case_ids=['one'],tensorboard=True,
-                       resume=path/'last.ckpt' if resume else None)
+                       resume=path/'last.ckpt' if resume else None,extend_to=extend_to)
+
+    def test_extension_cli_requires_resume_and_training_action(self):
+        for args in (['overfit','--extend-to','500'],['check','--resume','missing','--extend-to','500'],
+                     ['inspect','--resume','missing','--extend-to','500'],['overfit','--resume','missing','--extend-to','0']):
+            with contextlib.redirect_stderr(io.StringIO()),patch('organ_relation.data.brats.index_cases',side_effect=AssertionError('too late')):
+                self.assertEqual(self.cli.main(args),2)
+
+    def test_brats_extension_to_500_preserves_updates_logs_and_tensorboard(self):
+        # Actual BraTS model at small CPU geometry; bound this integration test
+        # to five updates. The shared-engine test below executes the full 500.
+        whole=self.trainer(self.fixture.root/'whole500',planned=500)
+        self.fixture.quiet_run(whole,stop_after=5)
+        part=self.trainer(self.fixture.root/'part500');self.fixture.quiet_run(part,stop_after=2)
+        original_run=(part.run_dir/'run.json').read_bytes()
+        extended=self.trainer(part.run_dir,True,extend_to=500)
+        self.assertEqual(extended.total,500);self.assertEqual(extended.state['global_step'],2)
+        self.fixture.quiet_run(extended,stop_after=2)
+        normal=self.trainer(part.run_dir,True);self.fixture.quiet_run(normal,stop_after=1)
+        a=load_checkpoint(whole.run_dir/'last.ckpt',whole.identity)
+        b=load_checkpoint(normal.run_dir/'last.ckpt',normal.identity)
+        for key in ('model','optimizer','rng','progress','sampler_generator','loader_generator'):
+            self.fixture.assert_nested_equal(a[key],b[key])
+        self.assertEqual((part.run_dir/'run.json').read_bytes(),original_run)
+        self.assertEqual(normal.run_id,part.run_id)
+        self.assertEqual(b['horizon']['original_total_steps'],100)
+        self.assertEqual(b['horizon']['total_steps'],500)
+        events=EventAccumulator(str(normal.board.directory),size_guidance={'scalars':0}).Reload()
+        self.assertEqual([e.step for e in events.Scalars('Train/Total_Loss')],[1,2,3,4,5])
+
+    def test_shared_engine_100_to_500_exact_full_trajectory(self):
+        options=dict(max_steps=500,checkpoint_every=25,validation_every=25)
+        whole=self.fixture.trainer(self.fixture.root/'full500',options=options,validation=True)
+        self.fixture.quiet_run(whole)
+        part=self.fixture.trainer(self.fixture.root/'extend500',options=dict(options,max_steps=100),validation=True)
+        self.fixture.quiet_run(part)
+        parent=load_checkpoint(part.run_dir/'last.ckpt',part.identity)
+        self.assertEqual(parent['progress']['global_step'],100)
+        extended=self.fixture.trainer(part.run_dir,resume=True,options=dict(options,max_steps=100),validation=True,extend_to=500)
+        self.fixture.quiet_run(extended)
+        a=load_checkpoint(whole.run_dir/'last.ckpt',whole.identity)
+        b=load_checkpoint(part.run_dir/'last.ckpt',extended.identity)
+        for key in ('model','optimizer','rng','progress','sampler_generator','loader_generator'):
+            self.fixture.assert_nested_equal(a[key],b[key])
+        rows=self.fixture.rows(part.run_dir)
+        self.assertEqual([r['global_step'] for r in rows if r['phase']=='train'],list(range(1,501)))
+        self.assertEqual([r['global_step'] for r in rows if r['phase']=='train_monitor'],list(range(25,501,25)))
+        self.assertEqual([r['case_id'] for r in rows if r['phase']=='train'],
+                         [r['case_id'] for r in self.fixture.rows(whole.run_dir) if r['phase']=='train'])
+        event=b['horizon']['extensions'][0]
+        self.assertEqual((event['at_global_step'],event['previous_total_steps'],event['total_steps']),(100,100,500))
+        self.assertEqual(event['max_epochs'],parent['identity']['training']['max_epochs'])
+
+    def test_brats_source_upgrade_is_fixed_and_science_stays_strict(self):
+        from organ_relation.training.extension import check_extension_identity,BRATS_COMMIT
+        old=dict(mode='brats_regions',model='fixed',optimizer=dict(lr=3e-4),
+            training=dict(max_steps=100,max_epochs=None,seed=1),data=dict(selection=dict(kind='single_case_overfit'),split='fixed'),
+            runtime=dict(convolution_backend='depth_sliced'),loss='fixed',preprocessing='fixed',environment='fixed',
+            provenance=dict(git=dict(commit=BRATS_COMMIT,dirty=False),source_hashes={
+                'scripts/brats.py':'old','scripts/run_tests.py':'old','src/organ_relation/training/extension.py':'old',
+                'src/organ_relation/models/brain_tumor.py':'fixed','src/organ_relation/training/engine.py':'fixed'}))
+        new=copy.deepcopy(old);new['provenance']['git']['commit']='extension-release'
+        new['provenance']['source_hashes'].update({'scripts/brats.py':'new','scripts/brats_diagnose.py':'new',
+            'scripts/run_tests.py':'new','src/organ_relation/training/extension.py':'new'})
+        with patch('organ_relation.training.extension.BRATS_SOURCES',digest(old['provenance']['source_hashes'])):
+            check_extension_identity(old,new)
+            for key in ('model','loss','optimizer','data','training','runtime','environment','preprocessing'):
+                bad=copy.deepcopy(new);bad[key]='changed'
+                with self.assertRaisesRegex(ValueError,'identity mismatch'):check_extension_identity(old,bad)
+            for path in ('src/organ_relation/models/brain_tumor.py','src/organ_relation/training/engine.py','src/organ_relation/losses.py','scripts/unreviewed.py'):
+                bad=copy.deepcopy(new);bad['provenance']['source_hashes'][path]='changed'
+                with self.assertRaisesRegex(ValueError,'source mismatch'):check_extension_identity(old,bad)
+            for version in (dict(commit=BRATS_COMMIT,dirty=True),dict(commit='unknown',dirty=False)):
+                bad=copy.deepcopy(old);bad['provenance']['git']=version
+                with self.assertRaisesRegex(ValueError,'provenance mismatch'):check_extension_identity(bad,new)
+            bad=copy.deepcopy(new);bad['provenance']['git']['dirty']=True
+            with self.assertRaisesRegex(ValueError,'dirty checkout'):check_extension_identity(old,bad)
+        bad=copy.deepcopy(old);bad['provenance']['source_hashes']['scripts/brats.py']='different'
+        with self.assertRaisesRegex(ValueError,'provenance mismatch'):check_extension_identity(bad,new)
 
     def test_five_step_stop_then_resume_to_100_preserves_state_logs_and_tensorboard(self):
         whole = self.trainer(self.fixture.root/'whole');self.fixture.quiet_run(whole)

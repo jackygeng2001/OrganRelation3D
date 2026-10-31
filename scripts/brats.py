@@ -27,6 +27,7 @@ def main(argv=None):
     parser.add_argument('--max-steps',type=int,help='Explicit engineering-run horizon; no formal protocol default')
     parser.add_argument('--run-dir',type=Path)
     parser.add_argument('--resume',type=Path)
+    parser.add_argument('--extend-to',type=int,help='With --resume: increase total steps; keep original --max-steps')
     parser.add_argument('--stop-after',type=int)
     parser.add_argument('--profile-memory',action='store_true',
                         help='check only: report phase/operator memory and failures to stdout')
@@ -172,6 +173,8 @@ def execute(args):
     from organ_relation.training.state import digest,seed_all
     from organ_relation.provenance import code_hashes,git_state
 
+    if args.extend_to is not None and (args.action not in ('train','overfit') or args.resume is None or args.extend_to < 1):
+        raise ValueError('--extend-to requires training --resume and a positive total')
     if args.profile_memory and args.action != 'check':
         raise ValueError('--profile-memory is only available for no-update check')
     config = json.loads(args.config.read_text())
@@ -283,7 +286,7 @@ def execute(args):
     Trainer(model,criterion,optimizer,train_data,[r['case_id'] for r in train],device=device,
         options=options,identity=identity,run_dir=args.run_dir,validation_dataset=dev_data,
         validation_case_ids=[r['case_id'] for r in dev],resume=args.resume,tensorboard=True,
-        console=TrainingConsole()).run(stop_after=args.stop_after)
+        console=TrainingConsole(),extend_to=args.extend_to).run(stop_after=args.stop_after)
 
 
 if __name__=='__main__':

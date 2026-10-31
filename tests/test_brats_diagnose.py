@@ -18,7 +18,7 @@ import torch
 from organ_relation.data.brats import index_cases
 from organ_relation.models.brain_tumor import BrainTumorConfig, BrainTumorSegmentor
 from organ_relation.provenance import code_hashes, sha256
-from organ_relation.training.state import digest, save_checkpoint
+from organ_relation.training.state import digest, save_checkpoint, load_checkpoint
 
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('brats_diagnose',ROOT/'scripts/brats_diagnose.py')
@@ -108,6 +108,26 @@ class DiagnoseTests(unittest.TestCase):
         checkpoint=run/'last.ckpt';checkpoint.write_bytes(checkpoint.read_bytes()[:-1])
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(['--checkpoint',str(checkpoint),'--case',case,'--device','cpu']),2)
+
+    def test_read_extended_checkpoint_keeps_original_run_identity(self):
+        run,_,_,original=self.fixture()
+        record=json.loads((run/'run.json').read_text())
+        checkpoint=run/'last.ckpt';state=load_checkpoint(checkpoint,original)
+        state['origin_identity']=copy.deepcopy(original)
+        state['identity']=copy.deepcopy(original)
+        state['identity']['provenance']['git']=dict(commit='extended-release',dirty=False)
+        state['identity']['provenance']['source_hashes']['scripts/brats.py']='extension-cli'
+        state['progress']['global_step']=500
+        save_checkpoint(checkpoint,state)
+        execution=state['identity']['provenance']
+        with patch.object(cli,'git_state',return_value=execution['git']),patch.object(cli,'code_hashes',return_value=execution['source_hashes']):
+            loaded=cli.load_run_checkpoint(checkpoint,record)
+            self.assertEqual(loaded['progress']['global_step'],500)
+            self.assertEqual(loaded['origin_identity'],original)
+            self.assertEqual((run/'run.json').read_text(),json.dumps(record))
+            state['origin_identity']['threshold']=.7;save_checkpoint(checkpoint,state)
+            with self.assertRaisesRegex(ValueError,'original run identity mismatch'):
+                cli.load_run_checkpoint(checkpoint,record)
 
     def test_overlay_cannot_overwrite_or_write_into_run_or_source(self):
         run=self.root/'run';source=self.root/'source';run.mkdir();source.mkdir()

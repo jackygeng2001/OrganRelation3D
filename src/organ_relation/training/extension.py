@@ -16,6 +16,13 @@ LEGACY_SOURCES = 'dca57430d67e2636fad9a20fe9ca3cb0b8ee3573e744665d9cf8a23c332ce1
 EXTENSION_FILES = {'scripts/train.py', 'src/organ_relation/training/engine.py',
                    'src/organ_relation/training/state.py', 'src/organ_relation/training/extension.py'}
 
+# Audited whole-volume BraTS overfit release. Only CLI/diagnostic wiring and
+# this explicit allowlist may differ; engine/model/loss/data remain identical.
+BRATS_COMMIT = '633da43204d1cc6a88185ee4c372b1618e2285f1'
+BRATS_SOURCES = '779cb7d48e6712e3f02e4354d289ea3394abce06177e031cdd260b922816a946'
+BRATS_EXTENSION_FILES = {'scripts/brats.py', 'scripts/brats_diagnose.py',
+                         'scripts/run_tests.py', 'src/organ_relation/training/extension.py'}
+
 
 def check_extension_identity(saved, current):
     # Even max_steps in the input config must match. The override lives only
@@ -26,16 +33,20 @@ def check_extension_identity(saved, current):
         raise ValueError('extension identity mismatch: only explicit horizon increase is allowed')
     if previous == execution:
         return
+    brats_upgrade = (saved.get('mode') == 'brats_regions'
+                     and saved.get('data', {}).get('selection', {}).get('kind') == 'single_case_overfit')
+    commit, sources, allowed = ((BRATS_COMMIT, BRATS_SOURCES, BRATS_EXTENSION_FILES) if brats_upgrade
+                                else (LEGACY_COMMIT, LEGACY_SOURCES, EXTENSION_FILES))
     if (not isinstance(previous, dict) or not isinstance(execution, dict)
-            or previous.get('git') != dict(commit=LEGACY_COMMIT, dirty=False)
-            or digest(previous.get('source_hashes')) != LEGACY_SOURCES
+            or previous.get('git') != dict(commit=commit, dirty=False)
+            or digest(previous.get('source_hashes')) != sources
             or execution.get('git', {}).get('dirty') is not False
             or not execution.get('git', {}).get('commit')
             or set(previous) != set(execution)):
         raise ValueError('extension provenance mismatch: unsupported source upgrade or dirty checkout')
     before, after = previous['source_hashes'], execution.get('source_hashes', {})
     changed = {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
-    if not changed or not changed <= EXTENSION_FILES or not before.keys() <= after.keys():
+    if not changed or not changed <= allowed or not before.keys() <= after.keys():
         raise ValueError('extension source mismatch: model/data/loss and other sources must remain identical')
 
 

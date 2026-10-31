@@ -107,7 +107,7 @@ python scripts/brats.py overfit --config configs/train_brats_single_case_overfit
 
 ## 只读 checkpoint 概率诊断
 
-`scripts/brats_diagnose.py` 从可信 checkpoint 旁的 `run.json` 读取配置、完整 source manifest 和执行选项；验证 checkpoint 校验和、run 身份、当前数据指纹及全部 `src/` 源码一致。新诊断脚本可以不同于训练时的入口，但不放宽普通 resume。仅一次完整 image-only、FP32、eval/inference-mode 前向，不创建 optimizer，不反向，不修改 run/checkpoint。输出到终端；可选 PNG 只允许新文件、禁止写入原 run/source。
+`scripts/brats_diagnose.py` 从可信 checkpoint 旁的 `run.json` 读取原始 run 身份，并使用 checkpoint 的执行配置、完整 source manifest 和执行选项；验证 checkpoint 校验和、run 身份、当前数据指纹及 `src/` 源码。唯一跨源码例外是下述已审计 extension 升级，输出明确区分全部一致与 extension-only 兼容；模型/数据/loss/engine 仍必须一致。新诊断脚本可以不同于训练时的入口，但不放宽普通 resume。仅一次完整 image-only、FP32、eval/inference-mode 前向，不创建 optimizer，不反向，不修改 run/checkpoint。输出到终端；可选 PNG 只允许新文件、禁止写入原 run/source。
 
 ```bash
 PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
@@ -120,3 +120,21 @@ python scripts/brats_diagnose.py \
 source 默认沿用 checkpoint 路径，不需重复配置模型/预处理/backend。final/coarse 分别报告 WT/TC/ET 的 hard Dice、预测/GT/TP/FP/FN、GT 内外概率均值、P05/P50/P95、概率总量及区域外低于阈值的概率分布；coarse 先插值 logits 到原网格。区域外指各自 GT 区域之外，不能把 TC/ET 的区域外全部叫作正常组织。按可比字段核对同 step 监测记录，差异只记录，不在输出统计之前做全字典相等断言。CPU 统计与 GPU 原记录的浮点归约允许容差。
 
 PNG 使用 Pillow（当前 AMD 已安装；可省略 `--overlay` 不渲染），每行独立展示一个区域：完整 FLAIR 切片、GT、final/coarse 的 TP/FP/FN 和 final 概率图。GT 最大截面只用于前向结束后的展示选片；无标签引导训练裁剪。显示为原数组 D 切片，不宣称标准放射学左右方向。默认不保存影像体积，不生成额外报告文件。
+
+## 显式延长 BraTS 单病例训练
+
+`--resume ... --extend-to 500` 调用现有 Trainer 的 horizon 机制；仍保留原 `--max-steps 100`，其余配置不变。新总步数必须同时大于旧计划和已完成步数，不改变 max_epochs。原 run_id/run.json、optimizer、RNG、病例顺序及日志连续；checkpoint 在读取下一病例之前原子记录原计划、新计划、父 checkpoint SHA256 和执行 provenance。TensorBoard 从原目录续写，ETA 按新总步数计算。
+
+仅允许干净 `633da43204d1cc6a88185ee4c372b1618e2285f1`、源码指纹 `779cb7d48e6712e3f02e4354d289ea3394abce06177e031cdd260b922816a946` 的 BraTS single-case overfit 跨本次版本升级。白名单仅含 `scripts/brats.py`、`scripts/brats_diagnose.py`、`scripts/run_tests.py` 和 `training/extension.py`；模型、loss、数据、训练引擎、全部科学/运行/环境 identity 保持严格一致。普通 resume 不放宽，也不修改旧 AMOS 的迁移规则。
+
+```bash
+PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+python scripts/brats.py overfit --config configs/train_brats_single_case_overfit.json \
+  --device cuda:0 --convolution-backend depth_sliced --cohort brats2023_gli \
+  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
+  --case BraTS-GLI-00000-000 --max-steps 100 \
+  --run-dir runs/brats2023_1case_100_v2 \
+  --resume runs/brats2023_1case_100_v2/last.ckpt --extend-to 500
+```
+
+500 是总步数，从 step 100 再训练 400 步。首次 extension 已提交后如中断，保留所有参数并去掉 `--extend-to 500` 普通恢复，horizon 会从 checkpoint 自动读取；不要把 `--max-steps` 改为 500。源码再次变化时，普通恢复仍严格拒绝。

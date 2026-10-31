@@ -43,10 +43,42 @@ class BrainTumorConfig:
         return asdict(self)
 
 
+class ChannelsLastGroupNorm(nn.GroupNorm):
+    """GroupNorm without a full NDHWC -> NCDHW copy for FP32/FP64 volumes.
+
+    Reduce over each group's channels AND the complete spatial grid. Only
+    per-case/per-channel affine coefficients are materialized before addcmul;
+    no full-size centered/normalized intermediates are saved in forward.
+    Standard autograd differentiates the statistics as well as the affine.
+    """
+
+    def forward(self, x):
+        if (x.ndim != 5 or not x.is_contiguous(memory_format=torch.channels_last_3d)
+                or x.is_contiguous() or x.dtype not in (torch.float32, torch.float64)
+                or x.shape[1] != self.num_channels or x.numel() // self.num_groups <= 1
+                or torch.is_autocast_enabled(x.device.type)
+                or any(p.dtype != x.dtype or p.device != x.device for p in self.parameters())):
+            return super().forward(x)
+        batch, channels = x.shape[:2]
+        per_group = channels // self.num_groups
+        # Splitting the channel axis is a view, including in channels-last layout.
+        grouped = x.unflatten(1, (self.num_groups, per_group))
+        variance, mean = torch.var_mean(grouped, dim=(2, 3, 4, 5), unbiased=False)
+        inverse_std = (variance + self.eps).rsqrt().unsqueeze(-1)
+        scale = inverse_std.expand(batch, self.num_groups, per_group)
+        if self.weight is not None:
+            scale = scale * self.weight.view(1, self.num_groups, per_group)
+        shift = -mean.unsqueeze(-1) * scale
+        if self.bias is not None:
+            shift = shift + self.bias.view(1, self.num_groups, per_group)
+        return torch.addcmul(shift.reshape(batch, channels, 1, 1, 1), x,
+                            scale.reshape(batch, channels, 1, 1, 1))
+
+
 def unit(a, b, *, kernel=3, stride=1, dilation=1, bias):
     return nn.Sequential(nn.Conv3d(a, b, kernel, stride=stride,
         padding=dilation if kernel == 3 else 0, dilation=dilation, bias=bias),
-        nn.GroupNorm(8, b), nn.LeakyReLU(0.01, inplace=False))
+        ChannelsLastGroupNorm(8, b), nn.LeakyReLU(0.01, inplace=False))
 
 
 class DualReceptiveField(nn.Module):

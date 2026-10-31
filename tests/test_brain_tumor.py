@@ -19,7 +19,7 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 import test_training as fixtures
 from organ_relation.models.brain_tumor import (BrainTumorConfig,BrainTumorSegmentor,DualReceptiveField,
-                                             ProjectThenUpsample,scale_descriptor,unit)
+                                             ChannelsLastGroupNorm,ProjectThenUpsample,scale_descriptor,unit)
 from organ_relation.models.space_to_node import SpaceToNode,OrganNodes
 from organ_relation.models.dynamic_relation import DynamicRelation
 from organ_relation.models.node_to_space import NodeToSpace
@@ -259,6 +259,86 @@ class BrainTumorTests(unittest.TestCase):
                                 self.assertEqual(name,other)
                                 torch.testing.assert_close(p.grad,q.grad,**tol)
 
+    def test_group_norm_channels_last_matches_native_statistics_and_gradients(self):
+        for dtype in (torch.float32,torch.float64):
+            for affine in (False,True):
+                for groups in (1,8):
+                    for constant in (False,True):
+                        with self.subTest(dtype=dtype,affine=affine,groups=groups,constant=constant):
+                            torch.manual_seed(91)
+                            old=torch.nn.GroupNorm(groups,16,eps=3e-5,affine=affine).to(dtype)
+                            if affine:
+                                with torch.no_grad():
+                                    old.weight.copy_(torch.randn_like(old.weight))
+                                    old.bias.copy_(torch.randn_like(old.bias))
+                            new=ChannelsLastGroupNorm(groups,16,eps=3e-5,affine=affine).to(dtype)
+                            new.load_state_dict(old.state_dict(),strict=True)
+                            data=torch.full((2,16,3,5,7),.25,dtype=dtype) if constant else torch.randn(2,16,3,5,7,dtype=dtype)
+                            x=data.clone().contiguous().requires_grad_()
+                            y=data.clone().contiguous(memory_format=torch.channels_last_3d).requires_grad_()
+                            a,b=old(x),new(y)
+                            self.assertTrue(b.is_contiguous(memory_format=torch.channels_last_3d))
+                            tol=dict(rtol=2e-4,atol=2e-5) if dtype==torch.float32 else dict(rtol=1e-9,atol=1e-11)
+                            torch.testing.assert_close(a,b,**tol)
+                            probe=torch.randn_like(a)
+                            (a*probe).mean().backward();(b*probe).mean().backward()
+                            torch.testing.assert_close(x.grad,y.grad,**tol)
+                            for p,q in zip(old.parameters(),new.parameters()):
+                                torch.testing.assert_close(p.grad,q.grad,**tol)
+
+    def test_group_norm_contiguous_path_exact_and_invalid_shape_still_rejected(self):
+        old=torch.nn.GroupNorm(8,16)
+        new=ChannelsLastGroupNorm(8,16)
+        new.load_state_dict(old.state_dict())
+        x=torch.randn(2,16,3,5,7,requires_grad=True)
+        y=x.detach().clone().requires_grad_()
+        a,b=old(x),new(y)
+        torch.testing.assert_close(a,b,rtol=0,atol=0)
+        a.square().mean().backward();b.square().mean().backward()
+        torch.testing.assert_close(x.grad,y.grad,rtol=0,atol=0)
+        for p,q in zip(old.parameters(),new.parameters()):
+            torch.testing.assert_close(p.grad,q.grad,rtol=0,atol=0)
+        for module in (old,new):
+            with self.assertRaises(RuntimeError):module(torch.randn(1,12,2,3,4))
+        for cls in (torch.nn.GroupNorm,ChannelsLastGroupNorm):
+            with self.assertRaises(ValueError):cls(8,8)(torch.randn(1,8,1,1,1))
+
+    def test_group_norm_no_volume_copy_or_saved_normalized_volume(self):
+        from torch.utils._python_dispatch import TorchDispatchMode
+        norm=ChannelsLastGroupNorm(8,16)
+        x=torch.randn(2,16,3,5,7).contiguous(memory_format=torch.channels_last_3d).requires_grad_()
+        snapshot=x.detach().clone()
+        storage=x.untyped_storage().data_ptr()
+        allocated=[];saved=[]
+        class Observe(TorchDispatchMode):
+            def __torch_dispatch__(self,func,types,args=(),kwargs=None):
+                out=func(*args,**(kwargs or {}))
+                for tensor in out if isinstance(out,tuple) else (out,):
+                    if (isinstance(tensor,torch.Tensor) and tensor.numel()>=x.numel()
+                            and tensor.untyped_storage().data_ptr()!=storage):
+                        allocated.append(str(func))
+                return out
+        def pack(tensor):
+            if tensor.numel()>=x.numel():saved.append(tensor.untyped_storage().data_ptr())
+            return tensor
+        with Observe(),torch.autograd.graph.saved_tensors_hooks(pack,lambda tensor:tensor):
+            y=norm(x)
+        self.assertEqual(allocated,['aten.addcmul.default'])
+        self.assertTrue(saved)
+        self.assertTrue(all(ptr==storage for ptr in saved))
+        torch.testing.assert_close(x,snapshot,rtol=0,atol=0)
+        y.square().mean().backward()
+        self.assertTrue(torch.isfinite(x.grad).all())
+
+    def test_group_norm_gradcheck_and_gradgradcheck(self):
+        norm=ChannelsLastGroupNorm(4,8).double()
+        x=torch.randn(1,8,2,2,2,dtype=torch.double).contiguous(memory_format=torch.channels_last_3d).requires_grad_()
+        def apply(a,w,b):
+            return torch.func.functional_call(norm,{'weight':w,'bias':b},(a,))
+        inputs=(x,norm.weight,norm.bias)
+        self.assertTrue(torch.autograd.gradcheck(apply,inputs))
+        self.assertTrue(torch.autograd.gradgradcheck(apply,inputs))
+
     def test_full_model_matches_original_decoder_loss_input_and_parameter_gradients(self):
         # Independent pre-optimization decoder order, including original local
         # tensor lifetimes; no production switch or checkpoint migration.
@@ -281,6 +361,15 @@ class BrainTumorTests(unittest.TestCase):
                     torch.manual_seed(123)
                     new=self.model().to(dtype=dtype,memory_format=layout)
                     old=copy.deepcopy(new)
+                    # Compare the entire optimized network to native GroupNorm,
+                    # not two copies of the new statistics implementation.
+                    for parent in old.modules():
+                        for name,child in list(parent.named_children()):
+                            if isinstance(child,ChannelsLastGroupNorm):
+                                native=torch.nn.GroupNorm(child.num_groups,child.num_channels,
+                                    eps=child.eps,affine=child.affine).to(dtype)
+                                native.load_state_dict(child.state_dict())
+                                parent.add_module(name,native)
                     old.decoder.up=torch.nn.ModuleList(torch.nn.Sequential(*block) for block in old.decoder.up)
                     old.decoder.forward=MethodType(original,old.decoder)
                     self.assertEqual(list(old.state_dict()),list(new.state_dict()))

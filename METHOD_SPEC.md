@@ -17,6 +17,8 @@
 
 四层通道固定 32/64/128/256。所有编码/解码卷积单元为 Conv3d→GN(8 groups)→LeakyReLU(0.01)。
 
+对 FP32/FP64 的 channels_last_3d 特征，GN 使用等价布局保留实现：无拷贝拆分通道为 `[B,8,C/8,D,H,W]`，在每病例每组的通道及**完整空间**上计算总体方差（correction=0）与均值，保持原 epsilon/逐通道 affine；将小尺寸 scale/shift 合并后用 `addcmul` 输出原布局。统计量正常参与 autograd，不 detach，不按空间块分别归一化。前向不创建完整的 NCDHW 拷贝或中心化中间体；反向使用标准 PyTorch autograd，GPU 反向峰值仍须实测。普通连续布局走原生 GroupNorm；参数名、初始化及组数不变。此实现只用于当前脑肿瘤模型，旧模型不变。
+
 1. E0：两次 3³、stride=1、padding=1 卷积，4→32→32。
 2. 每层 l=1,2,3 先 3³ stride=2 padding=1 下采样，得到 X_l。
 3. 对同一 X_l 独立计算 local 3³ dilation=1 pad=1 与 context 3³ dilation=2 pad=2，两路都有 GN/激活。

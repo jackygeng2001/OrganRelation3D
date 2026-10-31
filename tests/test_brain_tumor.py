@@ -19,7 +19,7 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 import test_training as fixtures
 from organ_relation.models.brain_tumor import (BrainTumorConfig,BrainTumorSegmentor,DualReceptiveField,
-                                             ChannelsLastGroupNorm,ProjectThenUpsample,scale_descriptor,unit)
+                                             ChannelsLastGroupNorm,ProjectedRegionQuery,ProjectThenUpsample,scale_descriptor,unit)
 from organ_relation.models.space_to_node import SpaceToNode,OrganNodes
 from organ_relation.models.dynamic_relation import DynamicRelation
 from organ_relation.models.node_to_space import NodeToSpace
@@ -116,6 +116,32 @@ class BrainTumorTests(unittest.TestCase):
         torch.testing.assert_close(result.G.flatten(2).transpose(1,2),expected)
         result.G.square().mean().backward()
         self.assertTrue(all(t.grad is not None for t in (x,z,weight)))
+
+    def test_projected_decoder_query_matches_uncontracted_formula_and_all_gradients(self):
+        for eta in (-.5,0.,.2):
+            with self.subTest(eta=eta):
+                torch.manual_seed(78)
+                old=NodeToSpace(256,key_channels=64,node_count=3,attention_channels=32,content_channels=32).double()
+                new=ProjectedRegionQuery(256,key_channels=64,node_count=3,attention_channels=32,content_channels=32).double()
+                new.load_state_dict(old.state_dict())
+                projection=torch.nn.Conv3d(32,64,1,bias=False).double()
+                other_projection=copy.deepcopy(projection)
+                x=torch.randn(2,64,2,3,5,dtype=torch.double).contiguous(memory_format=torch.channels_last_3d).requires_grad_()
+                z=torch.randn(2,3,256,dtype=torch.double,requires_grad=True)
+                weights=torch.rand(2,3,1,dtype=torch.double,requires_grad=True)
+                scale=torch.tensor(eta,dtype=torch.double,requires_grad=True)
+                inputs=(x,z,weights,scale)
+                other=[t.detach().clone().requires_grad_() for t in inputs]
+                a=scale*projection(old.forward_with_scale_weights(x,z,weights))
+                b=new.forward_projected(*other[:3],other_projection,other[3])
+                self.assertTrue(b.is_contiguous(memory_format=torch.channels_last_3d))
+                torch.testing.assert_close(a,b,rtol=1e-10,atol=1e-11)
+                probe=torch.randn_like(a)
+                (a*probe).mean().backward();(b*probe).mean().backward()
+                for p,q in zip((*inputs,*old.parameters(),*projection.parameters()),
+                               (*other,*new.parameters(),*other_projection.parameters())):
+                    self.assertIsNotNone(q.grad)
+                    torch.testing.assert_close(p.grad,q.grad,rtol=1e-9,atol=1e-11)
 
     def test_complete_document_architecture_odd_shapes_all_gradients_image_only(self):
         model=self.model()
@@ -339,6 +365,48 @@ class BrainTumorTests(unittest.TestCase):
         self.assertTrue(torch.autograd.gradcheck(apply,inputs))
         self.assertTrue(torch.autograd.gradgradcheck(apply,inputs))
 
+    def test_group_norm_chunked_backward_global_reductions_and_strided_upstream(self):
+        from torch.utils._python_dispatch import TorchDispatchMode
+        for affine in (True,False):
+            old=torch.nn.GroupNorm(8,16,affine=affine).double()
+            new=ChannelsLastGroupNorm(8,16,affine=affine).double()
+            new.load_state_dict(old.state_dict())
+            x=torch.randn(2,16,3,5,7,dtype=torch.double,requires_grad=True)
+            y=x.detach().clone().contiguous(memory_format=torch.channels_last_3d).requires_grad_()
+            upstream=torch.randn_like(x)  # NCDHW, unlike channels-last norm output.
+            a,b=old(x),new(y)
+            large_products=[]
+            class Observe(TorchDispatchMode):
+                def __torch_dispatch__(self,func,types,args=(),kwargs=None):
+                    out=func(*args,**(kwargs or {}))
+                    if str(func)=='aten.mul.Tensor' and out.numel()>128:
+                        large_products.append(out.numel())
+                    return out
+            a.backward(upstream)
+            with patch('organ_relation.models.group_norm._BACKWARD_CHUNK_ELEMENTS',128),Observe():
+                b.backward(upstream)
+            self.assertEqual(large_products,[])
+            torch.testing.assert_close(x.grad,y.grad,rtol=1e-9,atol=1e-11)
+            for p,q in zip(old.parameters(),new.parameters()):
+                torch.testing.assert_close(p.grad,q.grad,rtol=1e-9,atol=1e-11)
+
+    def test_activation_reuses_only_private_normalized_output(self):
+        for layout in (torch.contiguous_format,torch.channels_last_3d):
+            norm=ChannelsLastGroupNorm(8,16).double()
+            activation=unit(16,16,bias=True)[2]
+            self.assertTrue(activation.inplace)
+            x=torch.randn(2,16,3,5,7,dtype=torch.double).contiguous(memory_format=layout).requires_grad_()
+            snapshot=x.detach().clone()
+            normalized=norm(x)
+            address=normalized.data_ptr()
+            expected=F.leaky_relu(normalized.clone(),negative_slope=.01)
+            actual=activation(normalized)
+            self.assertEqual(actual.data_ptr(),address)
+            torch.testing.assert_close(actual,expected,rtol=0,atol=0)
+            torch.testing.assert_close(x,snapshot,rtol=0,atol=0)
+            actual.square().mean().backward()
+            self.assertTrue(torch.isfinite(x.grad).all())
+
     def test_full_model_matches_original_decoder_loss_input_and_parameter_gradients(self):
         # Independent pre-optimization decoder order, including original local
         # tensor lifetimes; no production switch or checkpoint migration.
@@ -364,6 +432,8 @@ class BrainTumorTests(unittest.TestCase):
                     # Compare the entire optimized network to native GroupNorm,
                     # not two copies of the new statistics implementation.
                     for parent in old.modules():
+                        if isinstance(parent,torch.nn.LeakyReLU):
+                            parent.inplace=False
                         for name,child in list(parent.named_children()):
                             if isinstance(child,ChannelsLastGroupNorm):
                                 native=torch.nn.GroupNorm(child.num_groups,child.num_channels,

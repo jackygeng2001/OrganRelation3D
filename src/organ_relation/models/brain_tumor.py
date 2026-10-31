@@ -9,6 +9,7 @@ from torch.nn import functional as functional
 
 from .coarse_head import CoarseHead
 from .dynamic_relation import DynamicRelation
+from .group_norm import ChannelsLastGroupNorm
 from .node_to_space import NodeToSpace
 from .residual_fusion import ResidualFusion
 from .segmentor import SegmentorOutput
@@ -43,42 +44,12 @@ class BrainTumorConfig:
         return asdict(self)
 
 
-class ChannelsLastGroupNorm(nn.GroupNorm):
-    """GroupNorm without a full NDHWC -> NCDHW copy for FP32/FP64 volumes.
-
-    Reduce over each group's channels AND the complete spatial grid. Only
-    per-case/per-channel affine coefficients are materialized before addcmul;
-    no full-size centered/normalized intermediates are saved in forward.
-    Standard autograd differentiates the statistics as well as the affine.
-    """
-
-    def forward(self, x):
-        if (x.ndim != 5 or not x.is_contiguous(memory_format=torch.channels_last_3d)
-                or x.is_contiguous() or x.dtype not in (torch.float32, torch.float64)
-                or x.shape[1] != self.num_channels or x.numel() // self.num_groups <= 1
-                or torch.is_autocast_enabled(x.device.type)
-                or any(p.dtype != x.dtype or p.device != x.device for p in self.parameters())):
-            return super().forward(x)
-        batch, channels = x.shape[:2]
-        per_group = channels // self.num_groups
-        # Splitting the channel axis is a view, including in channels-last layout.
-        grouped = x.unflatten(1, (self.num_groups, per_group))
-        variance, mean = torch.var_mean(grouped, dim=(2, 3, 4, 5), unbiased=False)
-        inverse_std = (variance + self.eps).rsqrt().unsqueeze(-1)
-        scale = inverse_std.expand(batch, self.num_groups, per_group)
-        if self.weight is not None:
-            scale = scale * self.weight.view(1, self.num_groups, per_group)
-        shift = -mean.unsqueeze(-1) * scale
-        if self.bias is not None:
-            shift = shift + self.bias.view(1, self.num_groups, per_group)
-        return torch.addcmul(shift.reshape(batch, channels, 1, 1, 1), x,
-                            scale.reshape(batch, channels, 1, 1, 1))
-
-
 def unit(a, b, *, kernel=3, stride=1, dilation=1, bias):
     return nn.Sequential(nn.Conv3d(a, b, kernel, stride=stride,
         padding=dilation if kernel == 3 else 0, dilation=dilation, bias=bias),
-        ChannelsLastGroupNorm(8, b), nn.LeakyReLU(0.01, inplace=False))
+        # GN backward needs its input/statistics, not its output. Positive-slope
+        # LeakyReLU can safely reuse that private output for its own backward.
+        ChannelsLastGroupNorm(8, b), nn.LeakyReLU(0.01, inplace=True))
 
 
 class DualReceptiveField(nn.Module):
@@ -137,6 +108,43 @@ class ProjectThenUpsample(nn.Sequential):
         return self[2](self[1](x))
 
 
+class ProjectedRegionQuery(NodeToSpace):
+    """Associate decoder linear maps on three nodes, not on full volumes.
+
+    Q (WK F) = (Q WK) F; eta Phi(sum_i A_i V_i) =
+    sum_i A_i (eta Phi(V_i)). Phi is the existing bias-free 1x1x1 map.
+    The inherited unprojected query remains available for formula diagnostics.
+    """
+
+    def forward_projected(self, features, zK, region_weights, projection, scale):
+        self._validate(features, zK)
+        if (region_weights.shape != (features.shape[0], self.node_count, 1)
+                or region_weights.dtype != features.dtype or region_weights.device != features.device
+                or not torch.isfinite(region_weights).all()):
+            raise ValueError('finite scale weights must match [B,nodes,1], dtype and device')
+        if (projection.bias is not None or projection.kernel_size != (1,1,1)
+                or projection.stride != (1,1,1) or projection.padding != (0,0,0)
+                or projection.groups != 1):
+            raise ValueError('decoder projection must be a bias-free pointwise linear map')
+        Q = self.W_Q(zK)
+        query = functional.linear(Q, self.W_K.weight.transpose(0,1))
+        V = self.W_V(zK)
+        # Treat the three nodes as three positions for the existing Conv3d.
+        values = projection(V.transpose(1,2).unsqueeze(-1).unsqueeze(-1))
+        values = values.squeeze(-1).squeeze(-1).transpose(1,2) * scale
+        scores = torch.bmm(query, features.flatten(2)) / math.sqrt(self.attention_channels)
+        scores = scores + self.beta.view(1,self.node_count,1)
+        for name, value in (('Q',Q),('projected query',query),('V',V),('projected values',values),('scores',scores)):
+            if not torch.isfinite(value).all():
+                raise ValueError(f'nonfinite decoder {name}')
+        attention = scores.sigmoid() * region_weights
+        content = torch.bmm(attention.transpose(1,2),values)
+        content = content.transpose(1,2).reshape(features.shape)
+        if not torch.isfinite(content).all():
+            raise ValueError('nonfinite decoder writeback')
+        return content
+
+
 class BrainDecoder(nn.Module):
     scale_order = (2,1,0)
 
@@ -144,7 +152,7 @@ class BrainDecoder(nn.Module):
         super().__init__()
         self.align_corners = align_corners
         self.scale_mlp = nn.Sequential(nn.Linear(266,64),nn.LeakyReLU(.01),nn.Linear(64,3))
-        self.queries = nn.ModuleList(NodeToSpace(256,key_channels=c,node_count=3,
+        self.queries = nn.ModuleList(ProjectedRegionQuery(256,key_channels=c,node_count=3,
             attention_channels=32,content_channels=32) for c in (128,64,32))
         self.skip_projection = nn.ModuleList(nn.Conv3d(32,c,1,bias=False) for c in (128,64,32))
         self.eta = nn.Parameter(torch.full((3,),1e-3))
@@ -157,8 +165,9 @@ class BrainDecoder(nn.Module):
         decoded = deepest
         for index, level in enumerate(self.scale_order):
             skip = features[level]
-            content = self.queries[index].forward_with_scale_weights(skip,zK,region_weights=weights[:,:,index:index+1])
-            enhanced = skip + self.eta[index]*self.skip_projection[index](content)
+            content = self.queries[index].forward_projected(skip,zK,weights[:,:,index:index+1],
+                                                           self.skip_projection[index],self.eta[index])
+            enhanced = skip + content
             del content  # Autograd retains anything required for backward.
             decoded = self.up[index](decoded,size=skip.shape[2:],align_corners=self.align_corners)
             decoded = torch.cat((decoded,enhanced),1)

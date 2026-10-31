@@ -17,7 +17,7 @@
 
 四层通道固定 32/64/128/256。所有编码/解码卷积单元为 Conv3d→GN(8 groups)→LeakyReLU(0.01)。
 
-对 FP32/FP64 的 channels_last_3d 特征，GN 使用等价布局保留实现：无拷贝拆分通道为 `[B,8,C/8,D,H,W]`，在每病例每组的通道及**完整空间**上计算总体方差（correction=0）与均值，保持原 epsilon/逐通道 affine；将小尺寸 scale/shift 合并后用 `addcmul` 输出原布局。统计量正常参与 autograd，不 detach，不按空间块分别归一化。前向不创建完整的 NCDHW 拷贝或中心化中间体；反向使用标准 PyTorch autograd，GPU 反向峰值仍须实测。普通连续布局走原生 GroupNorm；参数名、初始化及组数不变。此实现只用于当前脑肿瘤模型，旧模型不变。
+对 FP32/FP64 的 channels_last_3d 特征，GN 使用等价布局保留实现：无拷贝拆分通道为 `[B,8,C/8,D,H,W]`，在每病例每组的通道及**完整空间**上计算总体方差（correction=0）与均值，保持原 epsilon/逐通道 affine；将小尺寸 scale/shift 合并后用 `addcmul` 输出原布局。统计量正常参与 autograd，不 detach，不按空间块分别归一化。前向不创建完整的 NCDHW 拷贝或中心化中间体。反向在 PyTorch autograd Function 中实现解析梯度：先按完整空间归约每通道 sum(dy)/sum(dy*x)，再按原组累加带 gamma 的统计量，生成 dx/dgamma/dbeta；元素乘积和 dx 写入分段执行（FP32 每份临时张量至多约16 MiB），不改变全局统计、不重新计算网络前向、不做 activation checkpointing。均值和逆标准差作为辅助 autograd 输出，保留二阶导数；CPU gradcheck/gradgradcheck 及原生 GN 梯度对照验证。普通连续布局走原生 GroupNorm；参数名、初始化及组数不变。此实现只用于当前脑肿瘤模型，旧模型不变。
 
 1. E0：两次 3³、stride=1、padding=1 卷积，4→32→32。
 2. 每层 l=1,2,3 先 3³ stride=2 padding=1 下采样，得到 X_l。
@@ -92,9 +92,11 @@ E_enhanced_l = E_l + eta_l Phi_l(G_l)
 
 Phi_l 为 **无偏置** 1³ 卷积 32→C_l；三个独立 eta 初值 **1e-3**，不限制符号。残差相加后不再归一化。
 
+解码器仅调整线性计算的结合顺序：`Q_l (W_K,l E_l) = (Q_l W_K,l) E_l`，避免创建整幅 32 通道 key；`eta_l Phi_l(sum_i w_i,l A_i,l V_i) = sum_i w_i,l A_i,l [eta_l Phi_l(V_i)]`，先在三个节点上执行原有无偏置 Phi_l 和 eta_l，再回写。注意力的 sqrt(32)、beta、sigmoid 和尺度权重位置不变，均值/归约定义不变。输出保持 channels_last_3d，不保存整幅未投影 G_l；原 NodeToSpace 默认接口及深层回写保持不变。输出及所有输入/参数梯度与原展开公式作容差对照，含 eta=0 和负值。
+
 从 J3=F' 开始，逐级三线性插值到 E_l 的真实尺寸，1³ Conv→GN8→LeakyReLU 降至 C_l，与 E_enhanced_l 拼接；两次 3³ stride=1 pad=1 卷积单元完成 2C_l→C_l→C_l。最后 1³ 32→3 输出 Lf。
 
-工程执行使用数学等价的顺序：仅将逐点 1³ 仿射 Conv 移至三线性插值之前，GN8/LeakyReLU 仍在插值之后。该投影与逐通道线性插值可交换（含 bias），使插值输出通道减半；浮点计算次序变化以输出与梯度容差验证，不保证逐位一致。参数、state_dict 键和配置不变，严格 resume 的源码身份校验不放宽。拼接后释放 enhanced 的局部引用，autograd 所需张量仍正常保存；没有 detach、原地覆盖、checkpointing 或精度变化。
+工程执行使用数学等价的顺序：仅将逐点 1³ 仿射 Conv 移至三线性插值之前，GN8/LeakyReLU 仍在插值之后。该投影与逐通道线性插值可交换（含 bias），使插值输出通道减半；浮点计算次序变化以输出与梯度容差验证，不保证逐位一致。参数、state_dict 键和配置不变，严格 resume 的源码身份校验不放宽。拼接后释放 enhanced 的局部引用，autograd 所需张量仍正常保存；没有 detach、checkpointing 或精度变化。卷积单元的 LeakyReLU(0.01) 仅原地复用 GN 的私有输出（GN 反向不依赖此输出），不覆盖原始 feature/skip/输入，保留标准 autograd 与正负区间导数。
 
 ## 联合监督（式 27–32）
 

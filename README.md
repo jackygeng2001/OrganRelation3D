@@ -79,7 +79,7 @@ backward 的算子能定位到 ATen 和形状，但不声称反查到了精确�
 
 新 `brats_regions` 模式复用现有 Trainer：AdamW、原子 checkpoint、RNG/病例顺序恢复、ETA、JSONL、TensorBoard。final/coarse BCE、DiceLoss、soft Dice 与内部 WT/TC/ET hard Dice 使用正确三通道语义。独立阈值预测不做层级修正，监测记录违反数。旧 AMOS 功能和已有配置保留为历史入口。
 
-正式数据划分、HD95/官方评估规则、训练周期及实验分组尚未决定。当前入口仅支持显式 step horizon，不套用 AMOS epoch/early-stop 方案。普通训练必须提供患者互斥且穷尽的 split JSON：`manifest_hash` 为 inspect 输出的 manifest hash，`train`/`dev` 为病例 ID 列表；同一患者的多次扫描不得跨集合。下述显式 pilot 使用 train/dev/unused 三部分完整覆盖来源，普通划分校验不放宽。目录名/年份不等于无患者重复，跨队列实验还需核验。
+正式数据划分、HD95/官方评估规则、训练周期及实验分组尚未决定。旧诊断配置保持显式 step horizon；独立的年份折配置支持 epoch horizon 与三区域早停，不套用 AMOS 数据划分。普通训练必须提供患者互斥且穷尽的 split JSON：`manifest_hash` 为 inspect 输出的 manifest hash，`train`/`dev` 为病例 ID 列表；同一患者的多次扫描不得跨集合。下述显式 pilot 使用 train/dev/unused 三部分完整覆盖来源，普通划分校验不放宽。目录名/年份不等于无患者重复，跨队列实验还需核验。
 
 完成协议和 AMD preflight 后才能使用以下参数形式（不是现在启动实验的指令）：
 
@@ -165,3 +165,52 @@ python scripts/brats.py train --config configs/train_brats_patient_pilot.json \
 ```
 
 前 5 步通过后，保持以上参数，删除 `--stop-after 5` 并添加 `--resume runs/brats2023_pilot_16_4_v1/last.ckpt`，续到 800。后续中断同样恢复；不改变 max_steps 或源码。JSONL/TensorBoard 中 `internal_dev` 是未参与梯度更新的患者，不能与单病例 `train_monitor` 分数直接比较。用此 pilot 观察验证趋势和耗时，再制定正式协议；4 例不足以确定最优超参数或可靠的正式停止轮数。旧 checkpoint 的严格源码恢复校验仍保留，旧实验需要其原始版本。
+
+## BraTS2018–2020 年份独立训练
+
+`index_cases`/`BraTSDataset` 支持只读 `.nii` 和 `.nii.gz`（目录或 ZIP）。包含
+官方无标签验证子目录的旧年份完整包，训练必须显式指定 `--source-partition training`；
+此选项只选择命名明确的旧年份 training 子目录，不靠“有没有标签”静默过滤病例。
+默认 `all` 保持严格完整病例检查。2020 Kaggle 镜像中仅
+`BraTS20_Training_355/W39_1998.09.19_Segm.nii` 被精确识别为该病例的标签；
+不改原文件，不猜测其他特殊文件名，同时出现标准标签与别名会报重复错误。
+
+使用 `scripts/brats_folds.py` 从训练部分生成五个患者互斥的本地划分。种子
+20260925，排序患者后独立 Python RNG 打乱、轮转分配五折，无标签/肿瘤体积筛选或
+分层。每例恰好作为一次 dev；同患者多时间点属于同一折。划分绑定完整 manifest
+哈希、源路径和文件元数据，不能覆盖旧划分。三年患者重叠，须分别实验，不混池随机划分。
+
+```bash
+python scripts/brats_folds.py --cohort brats2018 \
+  --source "$HOME/projects/OrganRelation3D/datasets/BraTS2018/raw/brats2018.zip" \
+  --seed 20260925 --output-dir configs/brats2018_folds
+```
+
+独立 `configs/train_brats_year_fold.json` 保留现有 MRI 模型、loss、预处理、FP32、
+AdamW 3e-4、seed、batch=1。开发协议：最多500轮，至少20轮，每轮验证**全部**内部
+验证病例；以 final WT/TC/ET 病例内平均、再病例间平均的 hard Dice 为早停指标，
+沿用 both-empty=null。相对最近有效提升基准，累计提升达到0.001才重置计数；连续
+20轮未达此阈值停止。计数从首次验证后开始，最少轮数只限制停止时点。
+原始最高分（即使提升不足0.001）仍保存 `best-dev.ckpt`；`last.ckpt` 用于续训。
+早停状态、逐轮汇总、验证历史随完整 RNG/optimizer/病例顺序保存并严格恢复。
+不允许 `--extend-to` 绕过早停，也不允许 `--max-steps` 覆盖这个 epoch 配置。
+这些是首轮开发选择，不是论文最终/最优协议；内部 dev 同时用于早停和选最佳权重，
+不能把该分数称为独立测试结果。官方无标签 validation 不用于早停。
+
+每25 steps及每轮边界保存 checkpoint，每轮末检查梯度/更新；每个训练 step 记录
+loss，逐轮聚合三区域 soft Dice，验证记录 final/coarse hard/soft Dice。TensorBoard
+标签使用 WT/TC/ET 和 BCE。ETA 是到500轮上限的训练时间，**不预测早停轮数**，且
+不含验证/保存时间。完整MRI始终单次前向，无patch/crop/sliding-window。
+
+```bash
+PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
+python scripts/brats.py train --config configs/train_brats_year_fold.json \
+  --device cuda:0 --convolution-backend depth_sliced \
+  --cohort brats2018 --source-partition training \
+  --source "$HOME/projects/OrganRelation3D/datasets/BraTS2018/raw/brats2018.zip" \
+  --split configs/brats2018_folds/brats2018_fold_0.local.json \
+  --run-dir runs/brats2018_fold0
+```
+
+恢复使用完全相同命令并加 `--resume runs/brats2018_fold0/last.ckpt`，保留原代码版本、
+源文件和运行环境。旧 step 模式 run 不迁移成此新协议，也不放宽历史源码身份校验。

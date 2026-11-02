@@ -182,7 +182,7 @@ def execute(args):
     check_overlay_path(args.overlay,run_dir,source)
     if args.overlay is not None:
         from PIL import Image  # Fail before inference if optional rendering dependency is absent.
-    manifest=index_cases(source,cohort=saved['cohort'])
+    manifest=index_cases(source,cohort=saved['cohort'],partition=saved.get('source_partition','all'))
     if manifest!=saved or digest(manifest)!=identity['data']['manifest_hash']:
         raise ValueError('source metadata differs from checkpoint manifest')
     records=[r for r in manifest['records'] if r['case_id']==args.case]

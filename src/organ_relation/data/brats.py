@@ -14,20 +14,22 @@ MODALITIES = ('t1n','t1c','t2w','t2f')  # T1, T1ce, T2, FLAIR, fixed order.
 LEGACY_SUFFIXES = dict(t1n='t1',t1c='t1ce',t2w='t2',t2f='flair',seg='seg')
 
 
-def index_cases(source, *, cohort):
+def index_cases(source, *, cohort, partition="all"):
     """Central-directory/file-list metadata only. One cohort per experiment."""
+    if partition not in ("all", "training"):
+        raise ValueError("source partition must be all or training")
     source = Path(source).expanduser().resolve()
     if cohort not in ('brats2023_gli','brats2024_gli_post','brats2018','brats2019','brats2020','brats2021'):
         raise ValueError('unknown cohort; do not infer label semantics from numeric values')
     if source.is_file() and source.suffix == '.zip':
         with zipfile.ZipFile(source) as archive:
-            entries = [i for i in archive.infolist() if i.filename.endswith('.nii.gz')]
+            entries = [i for i in archive.infolist() if i.filename.endswith(('.nii', '.nii.gz'))]
             if len({i.filename for i in entries}) != len(entries):
                 raise ValueError('duplicate archive member')
             infos = {i.filename: dict(size=i.file_size,crc32=i.CRC) for i in entries}
     elif source.is_dir():
         infos = {p.relative_to(source).as_posix():dict(size=p.stat().st_size,mtime_ns=p.stat().st_mtime_ns)
-                 for p in source.rglob('*.nii.gz')}
+                 for p in source.rglob('*') if p.is_file() and p.name.endswith(('.nii', '.nii.gz'))}
     else:
         raise ValueError('source must be an existing zip or extracted directory')
     # Known release names can contradict a declaration; never reinterpret RC as ET.
@@ -37,6 +39,17 @@ def index_cases(source, *, cohort):
             raise ValueError('known 2024 postoperative source conflicts with declared cohort')
     if any('brats2023' in n for n in release_names) and cohort != 'brats2023_gli':
         raise ValueError('known 2023 source conflicts with declared cohort')
+    for year in (2018, 2019, 2020, 2021):
+        if any(re.search(rf'brats[_-]?{year}', n) for n in release_names) and cohort != f'brats{year}':
+            raise ValueError('known legacy year conflicts with declared cohort')
+    if partition == 'training':
+        if cohort not in ('brats2018','brats2019','brats2020'):
+            raise ValueError('training subtree selection is only defined for legacy 2018-2020 releases')
+        infos = {name: info for name, info in infos.items() if any(
+            'brats' in part.lower() and ('data_training' in part.lower() or 'trainingdata' in part.lower())
+            for part in PurePosixPath(name).parts[:-1])}
+        if not infos:
+            raise ValueError('no recognized legacy training subtree; do not infer labels from missing files')
     groups = {}
     for name, fingerprint in sorted(infos.items()):
         parts = PurePosixPath(name)
@@ -48,7 +61,11 @@ def index_cases(source, *, cohort):
         suffixes = {k:k for k in (*MODALITIES,'seg')} if cohort.startswith(('brats2023','brats2024')) else LEGACY_SUFFIXES
         for role, suffix in suffixes.items():
             separator = '-' if cohort.startswith(('brats2023','brats2024')) else '_'
-            if parts.name == case+separator+suffix+'.nii.gz':
+            regular = parts.name in (case+separator+suffix+'.nii.gz', case+separator+suffix+'.nii')
+            # Audited Kaggle 2020 mirror: exact alias, never a generic '*Segm' guess.
+            alias = (cohort == 'brats2020' and case == 'BraTS20_Training_355'
+                     and role == 'seg' and parts.name == 'W39_1998.09.19_Segm.nii')
+            if regular or alias:
                 group = groups.setdefault(case,{})
                 if role in group:
                     raise ValueError('duplicate case/modality: '+case+'/'+role)
@@ -61,7 +78,10 @@ def index_cases(source, *, cohort):
         records.append(dict(case_id=case,subject_id=subject,files=files))
     if not records:
         raise ValueError('no complete labeled BraTS cases')
-    return dict(cohort=cohort,source=str(source),records=records)
+    result = dict(cohort=cohort,source=str(source),records=records)
+    if partition != 'all':
+        result['source_partition'] = partition
+    return result
 
 
 def canonical_labels(array, *, encoding):
@@ -94,7 +114,8 @@ class BraTSDataset(torch.utils.data.Dataset):
         name = record['files'][role]['path']
         if self.source.is_file():
             with zipfile.ZipFile(self.source) as archive:
-                return nib.Nifti1Image.from_bytes(gzip.decompress(archive.read(name)))
+                raw = archive.read(name)
+                return nib.Nifti1Image.from_bytes(gzip.decompress(raw) if name.endswith('.gz') else raw)
         path = (self.source/name).resolve()
         if not path.is_relative_to(self.source.resolve()):
             raise ValueError('source path escapes dataset')
@@ -164,11 +185,40 @@ def make_pilot_partition(manifest, *, train_subjects, dev_subjects, seed, exclud
                 unused=sorted(set(case_ids)-set(selected)))
 
 
+def make_folds(manifest, *, seed, folds=5):
+    """Label-independent patient folds, stable under record ordering; no global RNG."""
+    import random
+    from organ_relation.training.state import digest
+    if manifest['cohort'] not in ('brats2018', 'brats2019', 'brats2020'):
+        raise ValueError('legacy year-specific folds only')
+    subjects = sorted({r['subject_id'] for r in manifest['records']})
+    if type(seed) is not int or type(folds) is not int or not 2 <= folds <= len(subjects):
+        raise ValueError('integer seed and valid fold count required')
+    random.Random(seed).shuffle(subjects)
+    records = sorted(manifest['records'], key=lambda r: r['case_id'])
+    result = []
+    for fold in range(folds):
+        dev = set(subjects[fold::folds])
+        result.append(dict(manifest_hash=digest(manifest),
+            train=[r['case_id'] for r in records if r['subject_id'] not in dev],
+            dev=[r['case_id'] for r in records if r['subject_id'] in dev],
+            fold=fold, folds=folds, seed=seed, cohort=manifest['cohort'],
+            protocol='patient_kfold_v1', stratification='none'))
+    return result
+
+
 def validate_partition(manifest, split):
     """Explicit patient-group partition; never split timepoints across roles."""
     from organ_relation.training.state import digest
     if split.get('manifest_hash') != digest(manifest):
         raise ValueError('split manifest hash mismatch')
+    if split.get('protocol') == 'patient_kfold_v1':
+        candidates = make_folds(manifest, seed=split.get('seed'), folds=split.get('folds'))
+        fold = split.get('fold')
+        if type(fold) is not int or not 0 <= fold < len(candidates) or split != candidates[fold]:
+            raise ValueError('fold differs from deterministic patient partition')
+    elif 'protocol' in split:
+        raise ValueError('unknown partition protocol')
     if split.get('kind') == 'patient_pilot_v1':
         expected = make_pilot_partition(manifest, train_subjects=split.get('train_subjects'),
             dev_subjects=split.get('dev_subjects'), seed=split.get('seed'),

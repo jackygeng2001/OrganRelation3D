@@ -24,6 +24,8 @@ from .tensorboard import TensorBoardObserver
 from .development import (cadence_due, summarize_branches, validation_branches,
                           validate_early_stopping, new_early_state, advance_early_stopping)
 from .monai_relation import observed_forward
+from .brain_tumor import (region_training_branches, region_validation_branches,
+                          summarize_region_branches)
 
 
 def validate_options(options):
@@ -230,8 +232,14 @@ class Trainer:
         self.observation_profile = 'development_v2' if self.scalar_only else 'development_v1'
         if self.scalar_only and (not self.epoch_mode or self.mode not in ('monai_reference_unet', 'monai_relation_unet')):
             raise ValueError('monitor-only optimization requires epoch MONAI A/C')
-        if self.epoch_mode and self.mode not in ('monai_reference_unet', 'monai_relation_unet'):
-            raise ValueError('epoch observation currently requires MONAI A/C')
+        if self.epoch_mode and self.mode not in ('monai_reference_unet', 'monai_relation_unet', 'brats_regions'):
+            raise ValueError('epoch observation requires MONAI A/C or BraTS regions')
+        if options.get('early_stopping'):
+            expected_monitor = ('dev_mean_region_hard_dice' if self.mode == 'brats_regions'
+                                else 'dev_mean_foreground_hard_dice')
+            if options['early_stopping']['monitor'] != expected_monitor:
+                raise ValueError('early stopping monitor does not match model region semantics')
+        self.summarize_epoch = summarize_region_branches if self.mode == 'brats_regions' else summarize_branches
         self.run_dir = Path(run_dir)
         self.console = console if console is not None else TrainingConsole(enabled=False)
         self.board = TensorBoardObserver(self.run_dir, enabled=tensorboard)
@@ -433,7 +441,8 @@ class Trainer:
                                           for case, record in zip(self.validation_case_ids, records)}
         if self.epoch_mode:
             row['observation_profile'] = self.observation_profile
-            row['epoch_metrics'] = summarize_branches([validation_branches(r) for r in records])
+            branches = region_validation_branches if self.mode == 'brats_regions' else validation_branches
+            row['epoch_metrics'] = self.summarize_epoch([branches(r) for r in records])
             score = row['metrics']['mean_case_dice']
             best = self.development_state['best_dev']
             improved = score is not None and (best is None or score > best['score'])
@@ -582,22 +591,25 @@ class Trainer:
             if self.epoch_mode:
                 # Observe this same forward, before freeing it; no extra model
                 # call or stochastic sampling. Store only case scalar records.
-                with torch.no_grad():
-                    branches = dict(total_loss=row['total_loss'], final=dict(
-                        loss=row['final']['segmentation'],
-                        hard=hard_dice(output.final_logits.argmax(1)[0], label[0])))
-                    if not self.scalar_only:
-                        branches['final']['soft_per_organ'] = row['soft_dice_per_organ']
-                    if self.mode == 'monai_relation_unet':
-                        branches['coarse'] = dict(loss=row['coarse']['segmentation'])
+                if self.mode == 'brats_regions':
+                    branches = region_training_branches(loss)
+                else:
+                    with torch.no_grad():
+                        branches = dict(total_loss=row['total_loss'], final=dict(
+                            loss=row['final']['segmentation'],
+                            hard=hard_dice(output.final_logits.argmax(1)[0], label[0])))
                         if not self.scalar_only:
-                            coarse = self.criterion.align_coarse(output.coarse_logits, label)
-                            branches['coarse'].update(soft_per_organ=loss.coarse.dice_per_class[0].detach().cpu().tolist(),
-                                hard=hard_dice(coarse.argmax(1)[0], label[0]))
-                            del coarse
-                    if self.scalar_only and relation_stats:
-                        branches['relation_scale'] = dict(relation_stats)
-                        branches['gamma_after_step'] = row['gamma_after_step']
+                            branches['final']['soft_per_organ'] = row['soft_dice_per_organ']
+                        if self.mode == 'monai_relation_unet':
+                            branches['coarse'] = dict(loss=row['coarse']['segmentation'])
+                            if not self.scalar_only:
+                                coarse = self.criterion.align_coarse(output.coarse_logits, label)
+                                branches['coarse'].update(soft_per_organ=loss.coarse.dice_per_class[0].detach().cpu().tolist(),
+                                    hard=hard_dice(coarse.argmax(1)[0], label[0]))
+                                del coarse
+                        if self.scalar_only and relation_stats:
+                            branches['relation_scale'] = dict(relation_stats)
+                            branches['gamma_after_step'] = row['gamma_after_step']
                 row['branch_metrics'] = branches
                 row['observation_profile'] = self.observation_profile
                 self.development_state['epoch_cases'].append(branches)
@@ -624,7 +636,7 @@ class Trainer:
             if self.epoch_mode and epoch_complete:
                 summary = dict(run_id=self.run_id, phase='train_epoch', epoch=epoch, global_step=step,
                     mode=self.mode, observation_profile=self.observation_profile,
-                    epoch_metrics=summarize_branches(self.development_state['epoch_cases']))
+                    epoch_metrics=self.summarize_epoch(self.development_state['epoch_cases']))
                 if self.scalar_only and relation_stats:
                     cases = self.development_state['epoch_cases']
                     summary['relation_scale'] = dict(gamma=row['gamma_after_step'],

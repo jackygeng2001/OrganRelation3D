@@ -17,6 +17,8 @@ def main(argv=None):
     parser.add_argument('action',choices=('inspect','check','overfit','train'))
     parser.add_argument('--config',type=Path,default=ROOT/'configs/brats_regions.json')
     parser.add_argument('--source',type=Path,help='One cohort archive or extracted directory, read-only')
+    parser.add_argument('--source-partition', choices=('all','training'), default='all',
+                        help='Explicit legacy training subtree; excludes official unlabeled validation')
     parser.add_argument('--cohort',choices=('brats2023_gli','brats2024_gli_post','brats2018','brats2019','brats2020','brats2021'))
     parser.add_argument('--case',help='Single case for no-update check or explicit overfit diagnostic')
     parser.add_argument('--shape',type=int,nargs=3,default=(9,17,19),help='CPU synthetic preflight only')
@@ -137,9 +139,14 @@ def training_plan(args, manifest, config):
     from organ_relation.data.brats import validate_partition
     from organ_relation.training.state import digest
 
-    if (manifest is None or args.run_dir is None or args.max_steps is None
-            or args.max_steps < 1):
-        raise ValueError('training requires --source, --run-dir and positive --max-steps')
+    epoch_mode = config['training'].get('cadence_unit') == 'epoch'
+    if (manifest is None or args.run_dir is None or (not epoch_mode and args.max_steps is None)
+            or (args.max_steps is not None and args.max_steps < 1)):
+        raise ValueError('training requires source, run directory and explicit step/epoch horizon')
+    if epoch_mode and (args.max_steps is not None or config['training']['max_steps'] is not None
+                       or type(config['training']['max_epochs']) is not int
+                       or config['training']['max_epochs'] < 1):
+        raise ValueError('epoch protocol requires config max_epochs and forbids --max-steps')
     options = dict(config['training'], max_steps=args.max_steps)
     data = dict(manifest_hash=digest(manifest), manifest=manifest)
     if args.action == 'overfit':
@@ -184,7 +191,7 @@ def execute(args):
         raise ValueError('--source requires an explicit --cohort; labels are not inferred from values')
     if config['training']['memory_format'] not in ('contiguous','channels_last_3d'):
         raise ValueError('unsupported memory format')
-    manifest = index_cases(args.source,cohort=args.cohort) if args.source else None
+    manifest = index_cases(args.source,cohort=args.cohort,partition=args.source_partition) if args.source else None
     if args.action == 'inspect':
         if manifest is None:
             raise ValueError('--source required')

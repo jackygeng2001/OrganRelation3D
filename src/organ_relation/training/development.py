@@ -96,7 +96,7 @@ def validate_early_stopping(options):
     if (set(c) != {'min_epochs', 'patience_epochs', 'min_delta', 'monitor'}
             or options.get('cadence_unit') != 'epoch' or options['validation_role'] != 'internal_dev'
             or options['validation_every'] < 1 or options['max_epochs'] is None
-            or c['monitor'] != 'dev_mean_foreground_hard_dice'
+            or c['monitor'] not in ('dev_mean_foreground_hard_dice', 'dev_mean_region_hard_dice')
             or type(c['min_epochs']) is not int or not 1 <= c['min_epochs'] <= options['max_epochs']
             or type(c['patience_epochs']) is not int or c['patience_epochs'] < 1
             or c['patience_epochs'] % options['validation_every']

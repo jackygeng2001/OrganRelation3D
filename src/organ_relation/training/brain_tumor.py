@@ -45,6 +45,14 @@ def region_diagnostics(output, label, criterion, threshold):
 
 
 def region_scalars(row):
+    if row['phase'] == 'train_epoch':
+        summary = row['epoch_metrics']
+        values = {'TrainEpoch/Total_Loss': summary['total_loss']}
+        for branch in ('final', 'coarse'):
+            values[f'TrainEpoch/{branch}/Loss'] = summary[branch]['loss']
+            for name, value in zip(REGION_NAMES, summary[branch]['soft_per_region']):
+                values[f'TrainEpoch/{branch}/SoftDice/{name}'] = value
+        return values
     if row['phase'] == 'train':
         values = {'Train/Total_Loss':row['total_loss'],'Optimizer/LR':row['lr'],'System/Step_Time':row['step_seconds']}
         for branch in ('final','coarse'):
@@ -64,5 +72,36 @@ def region_scalars(row):
                 values[f'{prefix}/{branch}/{key}'] = sum(c[branch][key] for c in cases)/len(cases)
             for i,name in enumerate(REGION_NAMES):
                 values[f'{prefix}/{branch}/SoftDice/{name}'] = sum(c[branch]['soft_dice'][i] for c in cases)/len(cases)
+        if row.get('early_stopping'):
+            values[prefix+'/EarlyStop/NonImprovingValidations'] = row['early_stopping']['no_improvement_count']
+            values[prefix+'/EarlyStop/BestDice'] = row['early_stopping']['best_metric']
         return {k:v for k,v in values.items() if v is not None}
     return {}
+
+
+def region_training_branches(loss):
+    """Reuse scalar loss outputs, without an additional full-volume monitor pass."""
+    return dict(total_loss=loss.total.detach().item(), **{name: dict(
+        loss=getattr(loss, name).segmentation.detach().item(),
+        soft_per_region=getattr(loss, name).dice_per_class.detach().cpu()[0].tolist())
+        for name in ('final', 'coarse')})
+
+
+def region_validation_branches(record):
+    diagnostic = record['region_diagnostic']
+    return dict(total_loss=diagnostic['total_loss'], **{name: dict(
+        loss=diagnostic[name]['loss'], soft_per_region=diagnostic[name]['soft_dice'],
+        hard=record if name == 'final' else diagnostic[name]['hard'])
+        for name in ('final', 'coarse')})
+
+
+def summarize_region_branches(cases):
+    result = dict(total_loss=sum(c['total_loss'] for c in cases)/len(cases))
+    for name in ('final', 'coarse'):
+        values = [c[name] for c in cases]
+        soft = [sum(v['soft_per_region'][i] for v in values)/len(values) for i in range(3)]
+        result[name] = dict(loss=sum(v['loss'] for v in values)/len(values),
+                            soft_per_region=soft, soft_mean=sum(soft)/3)
+        if 'hard' in values[0]:
+            result[name]['hard'] = summarize_regions([v['hard'] for v in values])
+    return result

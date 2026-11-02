@@ -129,6 +129,6 @@ MRI 在原配准网格按各文件 scaling 读取；逐模态非零体素 z-scor
 
 当前输入可直接只读 ZIP 或已解压目录，不自动下载/解压。manifest 记录文件名与 ZIP size/CRC32 或目录 size/mtime；这不是解压影像的 SHA256。每个训练 run 保存完整 manifest/划分及哈希，不复用 AMOS split；划分须包含患者 ID，禁止同一患者不同时间点跨 train/dev。
 
-所给 DHAS 论文实验分别使用 BraTS2018/2019/2020，各自五折训练与官方 validation 评估，并非三年混成一个数据集；其 128³ patch、batch=4、两阶段训练和后处理不能直接移植为本项目既定协议。当前仅实现内部逐病例三区域 DSC 监测（both-empty=null），不冒充官方 BraTS 评估；HD95、官方空肿瘤约定、正式 split/CV、后处理、训练周期须后续明确。
+所给 DHAS 论文实验分别使用 BraTS2018/2019/2020，各自五折训练与官方 validation 评估，并非三年混成一个数据集；其 128³ patch、batch=4、两阶段训练和后处理不能直接移植为本项目既定协议。当前实现内部逐病例三区域 DSC 监测（both-empty=null），不冒充官方 BraTS 评估；HD95、官方空肿瘤约定、正式 split/CV、后处理、训练周期须后续明确。
 
-训练复用现有 Trainer 的原子 checkpoint、optimizer/RNG/病例顺序、ETA、JSONL、TensorBoard 与严格 resume。当前新入口为 step cadence；不挪用历史 AMOS 的 160/40 或 500-epoch 协议。CPU 合成测试不能证明 24GB 上完整 MRI 可训练；下一步需用户授权真实 AMD preflight，OOM 停止，不自动改方法。
+训练复用现有 Trainer 的原子 checkpoint、optimizer/RNG/病例顺序、ETA、JSONL、TensorBoard 与严格 resume。旧诊断入口保持 step cadence；独立年份折配置支持 epoch cadence。`train_brats_year_fold.json` 的500轮上限、最少20轮、20轮patience、min_delta=.001是2026-11-02用户同意准备的首轮开发协议，不来自旧AMOS协议，也不是最终论文选择。每轮全量internal dev，以final三区域mean-case hard Dice早停；原始最高分保存best-dev，早停计数和历史严格恢复。2018–2020支持只读nii/nii.gz及显式training子目录选择，五折由固定seed的患者随机分配产生，无分层，不混合年份。CPU 合成测试不能证明 24GB 上完整 MRI 可训练；下一步需用户授权真实 AMD preflight，OOM 停止，不自动改方法。

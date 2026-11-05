@@ -49,7 +49,7 @@ python scripts/brats.py inspect --cohort brats2023_gli \
 
 可选执行选项 `--data-cache DIR`（check/overfit/train）把 loader 的最终输出逐例存为 `.npy`（图像 float32、标签 uint8、元数据 JSON），之后逐位相同地读回（BraTS2018 裁剪框每例约 55 MB，读取约 0.05 s，ZIP 约 0.69 s）。缓存键含 cohort、标签编码、各源文件 ZIP size/CRC32（目录为 size/mtime）、预处理设置与 `data/brats.py` 的 SHA256，任一变化自动生成新条目；条目先写临时文件再原子改名，形状/键不符即报错。缓存目录不得位于原始数据内，建议仓库 `cache/`（已 git 忽略）。用了缓存的 run 在 runtime identity 记 `data_cache=brats_npy_v1`，续训须保持一致。预构建：`scripts/brats_cache.py --config ... --source ... --cohort ... --data-cache cache/npy`。
 
-可选 `training.convolution_compute_dtype=bfloat16`（`configs/train_brats_year_fold_bbox_bf16.json`，需 `--convolution-backend depth_sliced`）只让 3×3×3 卷积乘加用 bfloat16，其余全部 FP32；7900 XTX 实测训练步约快 5%，真实病例梯度相对 FP32 误差约 0.5%。float16 会使梯度下溢，训练入口拒绝。细节与对照要求见 METHOD_SPEC。文件 shape/affine 不匹配即停止，不偷偷配准。
+两种显式降精度选项，二选一，均需 `--convolution-backend depth_sliced`：`training.convolution_compute_dtype=bfloat16`（`configs/train_brats_year_fold_bbox_conv_bf16.json`）只让 3×3×3 卷积乘加用 bfloat16，其余全部 FP32；`training.mixed_precision=bfloat16`（`configs/train_brats_year_fold_bbox_amp_bf16.json`）为整网混合精度，体数据存 bf16，GroupNorm 统计量、节点/关系、深层回写、门控与损失保持 FP32，峰值显存约减半。真实病例梯度相对 FP32 误差分别约 0.5% 与 0.7%。float16 会使梯度下溢，训练入口拒绝。`scripts/brats_compare_runs.py RUN_A RUN_B [RUN_C ...]` 只读逐轮对比各臂 dev Dice 与步时。细节与对照要求见 METHOD_SPEC。文件 shape/affine 不匹配即停止，不偷偷配准。
 
 ## AMD 无更新检查
 

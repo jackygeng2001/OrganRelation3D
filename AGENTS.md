@@ -19,7 +19,7 @@
 - 标准 PyTorch 算子，兼容 CPU/ROCm/CUDA，不引入 NVIDIA 专属扩展。设备由入口管理，内部临时张量继承输入 device/dtype。
 - 保留有限值、autocast 与形状检查；性能同步问题待 AMD profile 后处理，不为速度擅自删除。不能用 CPU 小输入通过来宣称 full-volume 显存可行。
 - channels_last_3d 为显式运行设置；ROCm 启动前检查 PYTORCH_MIOPEN_SUGGEST_NHWC=1，不偷偷设置或回退。不保证每个中间算子都保持该布局。
-- 显存不足先定位并报告，不自动缩 channels/spacing、AMP、activation checkpointing、patch。唯一允许的降精度是 2026-11-05 用户批准、须在配置中显式开启的 `training.convolution_compute_dtype=bfloat16`（仅 depth_sliced 3×3×3 卷积乘加），同一组对比实验必须统一精度。大型依赖/数据下载由用户手动执行。
+- 显存不足先定位并报告，不自动缩 channels/spacing、AMP、activation checkpointing、patch。允许的降精度只有两种，均须在配置中显式开启且二选一：2026-11-05 用户批准的 `training.convolution_compute_dtype=bfloat16`（仅 depth_sliced 3×3×3 卷积乘加），与 2026-11-06 用户批准的 `training.mixed_precision=bfloat16`（整网 bf16 体数据，敏感部分 FP32，见 METHOD_SPEC）；同一组对比实验必须统一精度。大型依赖/数据下载由用户手动执行。
 
 ## 工程与复现
 

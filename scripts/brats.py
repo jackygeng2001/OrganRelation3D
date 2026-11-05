@@ -26,6 +26,7 @@ def main(argv=None):
     parser.add_argument('--convolution-backend', choices=('native','depth_sliced'), default='native',
                         help='Explicit equivalent Conv3d execution; depth_sliced uses bounded NCHW Conv2d')
     parser.add_argument('--split',type=Path,help='Explicit patient-disjoint train/dev JSON with manifest_hash')
+    parser.add_argument('--data-cache',type=Path,help='Optional .npy copy of exact loader output (execution option)')
     parser.add_argument('--max-steps',type=int,help='Explicit engineering-run horizon; no formal protocol default')
     parser.add_argument('--run-dir',type=Path)
     parser.add_argument('--resume',type=Path)
@@ -236,7 +237,7 @@ def execute(args):
             selected = [r for r in manifest['records'] if r['case_id']==args.case]
             if len(selected)!=1:
                 raise ValueError('case not uniquely present')
-            sample = BraTSDataset(dict(manifest,records=selected),**config['preprocessing'])[0]
+            sample = BraTSDataset(dict(manifest,records=selected),**config['preprocessing'],cache_dir=args.data_cache)[0]
             image,label = sample.image.unsqueeze(0).to(device),sample.label.unsqueeze(0).to(device)
         if config['training']['memory_format']=='channels_last_3d':
             image=image.contiguous(memory_format=torch.channels_last_3d)
@@ -270,8 +271,10 @@ def execute(args):
         raise ValueError('real CPU training disabled; use CPU synthetic tests for trajectory acceptance')
     if args.run_dir.resolve().is_relative_to(args.source.resolve()):
         raise ValueError('run output must be outside original dataset')
-    train_data=BraTSDataset(dict(manifest,records=train),**config['preprocessing'])
-    dev_data=BraTSDataset(dict(manifest,records=dev),**config['preprocessing'])
+    train_data=BraTSDataset(dict(manifest,records=train),**config['preprocessing'],cache_dir=args.data_cache)
+    dev_data=BraTSDataset(dict(manifest,records=dev),**config['preprocessing'],cache_dir=args.data_cache)
+    if args.data_cache is not None:  # Bitwise-identical data; recorded so a run never switches silently.
+        execution['data_cache'] = 'brats_npy_v1'
     identity=dict(mode='brats_regions',model=config['model'],loss=config['loss'],threshold=config['threshold'],
         preprocessing=config['preprocessing'],training=options,optimizer=dict(name='AdamW',**config['optimizer']),
         data=data_identity,

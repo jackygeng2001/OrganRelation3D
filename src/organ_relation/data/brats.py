@@ -1,5 +1,8 @@
 """Read-only MRI whole-volume input, with explicit cohort/label semantics."""
 import gzip
+import hashlib
+import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import zipfile
@@ -12,6 +15,7 @@ from .full_scan import FullScanSample
 
 MODALITIES = ('t1n','t1c','t2w','t2f')  # T1, T1ce, T2, FLAIR, fixed order.
 LEGACY_SUFFIXES = dict(t1n='t1',t1c='t1ce',t2w='t2',t2f='flair',seg='seg')
+CACHE_FORMAT = 'brats_npy_v1'  # Bitwise copy of the loader output; never a different preprocessing.
 
 
 def index_cases(source, *, cohort, partition="all"):
@@ -140,7 +144,15 @@ def expand_box(tight, shape, *, margin, multiple_of):
 
 
 class BraTSDataset(torch.utils.data.Dataset):
-    def __init__(self, manifest, *, normalization, normalization_epsilon, spatial_crop=None):
+    """Loader output is a pure function of the source files and preprocessing.
+
+    `cache_dir` is an execution option only: each case's exact output arrays
+    and metadata are stored once as .npy/.json and later read back bitwise.
+    The entry key covers cohort, label encoding, every source file fingerprint
+    (ZIP size/CRC32 or file size/mtime), the preprocessing settings and this
+    loader file's SHA256, so any change creates a new entry instead of reuse.
+    """
+    def __init__(self, manifest, *, normalization, normalization_epsilon, spatial_crop=None, cache_dir=None):
         if manifest['cohort'] == 'brats2024_gli_post':
             raise ValueError('2024 post-treatment/RC requires a separately agreed protocol; cannot use three-region preoperative labels')
         if normalization != 'nonzero_zscore' or normalization_epsilon <= 0 or not np.isfinite(normalization_epsilon):
@@ -149,6 +161,13 @@ class BraTSDataset(torch.utils.data.Dataset):
         self.epsilon = normalization_epsilon
         self.spatial_crop = validate_spatial_crop(spatial_crop)
         self.encoding = '0123' if manifest['cohort'] == 'brats2023_gli' else '0124_preoperative'
+        self.cache_dir = None
+        if cache_dir is not None:
+            self.cache_dir = Path(cache_dir).expanduser().resolve()
+            source = self.source.expanduser().resolve()
+            if self.cache_dir.is_relative_to(source if source.is_dir() else source.parent):
+                raise ValueError('data cache must be outside the read-only source dataset')
+            self.loader_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
     def __len__(self):
         return len(self.manifest['records'])
@@ -167,6 +186,52 @@ class BraTSDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         record = self.manifest['records'][index]
+        if self.cache_dir is None:
+            image, label, metadata = self._build(record)
+        else:
+            image, label, metadata = self._cached(record)
+        return FullScanSample(torch.from_numpy(np.ascontiguousarray(image)),
+                              torch.from_numpy(np.ascontiguousarray(label)), metadata)
+
+    def cache_key(self, record):
+        return dict(format=CACHE_FORMAT, cohort=self.manifest['cohort'], label_encoding=self.encoding,
+                    case_id=record['case_id'], subject_id=record['subject_id'], files=record['files'],
+                    preprocessing=dict(normalization='nonzero_zscore', normalization_epsilon=self.epsilon,
+                                       spatial_crop=self.spatial_crop),
+                    loader_sha256=self.loader_sha256)
+
+    def _cached(self, record):
+        key = self.cache_key(record)
+        stem = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:24]
+        folder = self.cache_dir / self.manifest['cohort'] / record['case_id']
+        paths = {name: folder / f'{stem}.{name}' for name in ('image.npy', 'label.npy', 'json')}
+        if paths['json'].exists():  # Written last: its presence marks a complete entry.
+            entry = json.loads(paths['json'].read_text())
+            try:
+                image = np.load(paths['image.npy'], allow_pickle=False)
+                label = np.load(paths['label.npy'], allow_pickle=False)
+            except (OSError, ValueError) as exc:
+                raise ValueError(f'unreadable data cache entry; delete {folder}: {exc}') from exc
+            if (entry.get('key') != key or image.dtype != np.float32 or label.dtype != np.uint8
+                    or list(image.shape) != entry['image_shape'] or list(label.shape) != entry['label_shape']):
+                raise ValueError(f'data cache entry does not match its key/shape; delete {folder}')
+            return image, label.astype(np.int64), entry['metadata']
+        image, label, metadata = self._build(record)
+        if label.min() < 0 or label.max() > 255:
+            raise ValueError('canonical labels must fit uint8 for caching')
+        folder.mkdir(parents=True, exist_ok=True)
+        entry = dict(key=key, image_shape=list(image.shape), label_shape=list(label.shape), metadata=metadata)
+        for name, array in (('image.npy', np.ascontiguousarray(image)), ('label.npy', label.astype(np.uint8))):
+            temporary = folder / f'.{stem}.{name}.{os.getpid()}.tmp'
+            with temporary.open('wb') as handle:
+                np.save(handle, array, allow_pickle=False)
+            os.replace(temporary, paths[name])
+        temporary = folder / f'.{stem}.json.{os.getpid()}.tmp'
+        temporary.write_text(json.dumps(entry))
+        os.replace(temporary, paths['json'])
+        return image, label, json.loads(json.dumps(metadata))
+
+    def _build(self, record):
         images = []; reference = None; normalization = []; support = None
         for role in (*MODALITIES,'seg'):
             nii = self._read(record,role)
@@ -209,8 +274,7 @@ class BraTSDataset(torch.utils.data.Dataset):
                                             start_dhw=start, stop_dhw=stop)
             image, label = image[(slice(None), *window)], cropped
         metadata['shape_dhw'] = list(label.shape)
-        return FullScanSample(torch.from_numpy(np.ascontiguousarray(image)),
-                              torch.from_numpy(np.ascontiguousarray(label)), metadata)
+        return image, label, metadata
 
 
 def make_pilot_partition(manifest, *, train_subjects, dev_subjects, seed, excluded_subjects=()):

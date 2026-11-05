@@ -124,7 +124,7 @@ Lhier = (1/(2|Omega_I|)) * sum_x [ReLU(P_TC(x)-P_WT(x)) + ReLU(P_ET(x)-P_TC(x))]
 L = mean_batch(Lseg_final + lambda_c*Lseg_coarse + lambda_hier*Lhier_final)
 ```
 
-Omega_I 为输入体素网格（使用 spatial_crop 时即框内体素，与 BCE 的平均范围一致）。软约束只在训练中惩罚违例，推理仍独立阈值化、不强制包含。`loss.lambda_hier` 缺省（null）时目标函数与返回结构逐位等同旧式 27–32，历史 run 的严格 identity 不变；配置为数值（>=0）时启用式 33，日志与 TensorBoard 另记未乘权重的 Lhier（`hierarchy`）。文档规定 lambda_hier>=0 但未给数值，`train_brats_year_fold_bbox.json` 的 1.0 是待用户确认的工程起始值。
+Omega_I 为输入体素网格（使用 spatial_crop 时即框内体素，与 BCE 的平均范围一致）。软约束只在训练中惩罚违例，推理仍独立阈值化、不强制包含。`loss.lambda_hier` 缺省（null）时目标函数与返回结构逐位等同旧式 27–32，历史 run 的严格 identity 不变；配置为数值（>=0）时启用式 33，日志与 TensorBoard 另记未乘权重的 Lhier（`hierarchy`）。文档规定 lambda_hier>=0 但未给数值，`train_brats_year_fold_bbox.json` 的 1.0 是用户 2026-11-05 同意提交的开发取值（未调参）。
 
 ## 明示的开发配置与尚待冻结项
 
@@ -132,7 +132,9 @@ Omega_I 为输入体素网格（使用 spatial_crop 时即框内体素，与 BCE
 
 尚未由修订文档给定的 deep Cr/K/da/Cg 暂沿用旧工程值 8/2/4/6，epsilon=1e-6，lambda_c=.5，gamma_init=.1；conv/coarse/deep fusion bias=true、align_corners=false、beta_init=0、tau=.5 均明确记录。标准层初始化保留 PyTorch 默认。模型参数量在这些显式设置下为 8,330,296。
 
-MRI 在原配准网格按各文件 scaling 读取；逐模态非零体素 z-score（std 下限 1e-8），原零值保持零；默认不空间裁剪，裁剪仅按上述 spatial_crop 显式开启。该强度选择、seed=20260925、AdamW 3e-4/weight_decay=0、batch=1、channels_last_3d 是开发选择，不声称来自论文或已是最优配置。没有 augmentation、AMP、checkpointing 或 scheduler。
+MRI 在原配准网格按各文件 scaling 读取；逐模态非零体素 z-score（std 下限 1e-8），原零值保持零；默认不空间裁剪，裁剪仅按上述 spatial_crop 显式开启。该强度选择、seed=20260925、AdamW 3e-4/weight_decay=0、batch=1、channels_last_3d 是开发选择，不声称来自论文或已是最优配置。没有 augmentation、checkpointing 或 scheduler；默认没有 AMP。
+
+可选卷积计算精度（2026-11-05 用户批准，显式 `training.convolution_compute_dtype`，缺省为 FP32 且计算与 identity 逐位不变）：只在 depth_sliced 的 3×3×3 卷积内部把每批输入平面与权重舍入为 bfloat16 做乘加，部分和、输出、输入/权重梯度均累加回 FP32；参数、优化器、1×1 投影、GroupNorm、激活、节点构建与关系推理、深层回写、解码器注意力与尺度权重、损失全部保持 FP32，方法公式不变。训练入口只接受 null/bfloat16：float16 在真实体积上每体素梯度下溢（BraTS2018 一例实测 27.6% 梯度为 0，全梯度相对误差 67%），需要未实现的损失缩放。同例 bf16 相对 FP32：损失 2.61243/2.61230，logits 相对 L2 误差 0.65%，全参数梯度 0.54%（余弦约 1.0）。7900 XTX 实测训练步 3.47 s 对 3.64 s（约快 5%）。对照臂为 `configs/train_brats_year_fold_bbox_bf16.json`；所有对比实验必须统一精度。
 
 ## 数据与实验协议边界
 

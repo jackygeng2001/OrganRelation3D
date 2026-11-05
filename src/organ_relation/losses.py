@@ -253,19 +253,40 @@ def region_targets(label: Tensor) -> Tensor:
     return torch.stack((label > 0, (label == 1) | (label == 3), label == 3), 1)
 
 
+class RegionLossResult(NamedTuple):
+    total: Tensor  # Scalar batch mean of per_case.
+    per_case: Tensor  # [B] final + lambda_c*coarse + lambda_hier*hierarchy, eq. (33).
+    coarse: BranchLoss
+    final: BranchLoss
+    hierarchy: Tensor  # [B] eq. (32) on FINAL probabilities, before lambda_hier.
+
+
+def hierarchy_violation(logits: Tensor) -> Tensor:
+    """Eq. (32): (1/(2|Omega_I|)) sum_x [ReLU(P_TC-P_WT) + ReLU(P_ET-P_TC)], per case."""
+    probability = logits.sigmoid()
+    wt, tc, et = probability[:, 0], probability[:, 1], probability[:, 2]
+    return (torch.relu(tc - wt) + torch.relu(et - tc)).flatten(1).mean(1) / 2
+
+
 class RegionJointLoss(nn.Module):
-    """Revised method (27)-(32); probability BCE(+epsilon), not logits BCE.
+    """Revised method (27)-(31) and hierarchy revision (32)-(33); probability BCE(+epsilon).
 
     BranchLoss.ce is the shared engine container's historical field name; here
     it stores binary CE averaged across all THREE regions and all voxels.
+    lambda_hier=None keeps the earlier (27)-(32) objective and result type
+    bit-for-bit; a number (>=0) adds the final-only hierarchy term of (33).
     """
-    def __init__(self, *, epsilon, lambda_c, align_corners):
+    def __init__(self, *, epsilon, lambda_c, align_corners, lambda_hier=None):
         super().__init__()
         if (isinstance(epsilon, bool) or not math.isfinite(epsilon) or epsilon <= 0
                 or isinstance(lambda_c, bool) or not math.isfinite(lambda_c) or lambda_c <= 0
                 or type(align_corners) is not bool):
             raise ValueError('positive finite epsilon/lambda_c and explicit align_corners required')
+        if lambda_hier is not None and (type(lambda_hier) not in (int, float)
+                                        or not math.isfinite(lambda_hier) or lambda_hier < 0):
+            raise ValueError('lambda_hier must be null or a finite number >= 0')
         self.epsilon, self.lambda_c, self.align_corners = epsilon, lambda_c, align_corners
+        self.lambda_hier = None if lambda_hier is None else float(lambda_hier)
 
     def branch(self, logits, target):
         probability = logits.sigmoid()
@@ -298,6 +319,12 @@ class RegionJointLoss(nn.Module):
         final = self.branch(final_logits,target)
         coarse = self.branch(self.align_coarse(coarse_logits,label),target)
         per_case = final.segmentation+self.lambda_c*coarse.segmentation
+        if self.lambda_hier is None:
+            if not torch.isfinite(per_case).all():
+                raise ValueError('nonfinite region loss')
+            return JointLossResult(per_case.mean(),per_case,coarse,final)
+        hierarchy = hierarchy_violation(final_logits)  # Final branch only; coarse keeps L_seg.
+        per_case = per_case+self.lambda_hier*hierarchy
         if not torch.isfinite(per_case).all():
             raise ValueError('nonfinite region loss')
-        return JointLossResult(per_case.mean(),per_case,coarse,final)
+        return RegionLossResult(per_case.mean(),per_case,coarse,final,hierarchy)

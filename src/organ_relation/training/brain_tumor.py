@@ -41,7 +41,10 @@ def region_diagnostics(output, label, criterion, threshold):
                     soft_dice=branch.dice_per_class[0].tolist())
     coarse = stats(result.coarse)
     coarse['hard'] = region_dice(criterion.align_coarse(output.coarse_logits,label),label,threshold)
-    return dict(total_loss=result.total.item(),final=stats(result.final),coarse=coarse)
+    diagnostic = dict(total_loss=result.total.item(),final=stats(result.final),coarse=coarse)
+    if getattr(result, 'hierarchy', None) is not None:  # Only when lambda_hier is configured.
+        diagnostic['hierarchy'] = result.hierarchy.item()
+    return diagnostic
 
 
 def region_scalars(row):
@@ -52,6 +55,8 @@ def region_scalars(row):
             values[f'TrainEpoch/{branch}/Loss'] = summary[branch]['loss']
             for name, value in zip(REGION_NAMES, summary[branch]['soft_per_region']):
                 values[f'TrainEpoch/{branch}/SoftDice/{name}'] = value
+        if 'hierarchy' in summary:
+            values['TrainEpoch/final/Hierarchy'] = summary['hierarchy']
         return values
     if row['phase'] == 'train':
         values = {'Train/Total_Loss':row['total_loss'],'Optimizer/LR':row['lr'],'System/Step_Time':row['step_seconds']}
@@ -60,6 +65,8 @@ def region_scalars(row):
                 values[f'Train/{branch}/{key}'] = row[branch][key]
         for name,v in zip(REGION_NAMES,row['soft_dice_per_organ']):
             values['Train/SoftDice/'+name] = v
+        if 'hierarchy' in row:
+            values['Train/final/hierarchy'] = row['hierarchy']
         return values
     if row['phase'] in ('train_monitor','internal_dev'):
         prefix = 'Monitor' if row['phase']=='train_monitor' else 'Val'
@@ -72,6 +79,8 @@ def region_scalars(row):
                 values[f'{prefix}/{branch}/{key}'] = sum(c[branch][key] for c in cases)/len(cases)
             for i,name in enumerate(REGION_NAMES):
                 values[f'{prefix}/{branch}/SoftDice/{name}'] = sum(c[branch]['soft_dice'][i] for c in cases)/len(cases)
+        if all('hierarchy' in c for c in cases):
+            values[prefix+'/final/hierarchy'] = sum(c['hierarchy'] for c in cases)/len(cases)
         if row.get('early_stopping'):
             values[prefix+'/EarlyStop/NonImprovingValidations'] = row['early_stopping']['no_improvement_count']
             values[prefix+'/EarlyStop/BestDice'] = row['early_stopping']['best_metric']
@@ -81,22 +90,30 @@ def region_scalars(row):
 
 def region_training_branches(loss):
     """Reuse scalar loss outputs, without an additional full-volume monitor pass."""
-    return dict(total_loss=loss.total.detach().item(), **{name: dict(
+    result = dict(total_loss=loss.total.detach().item(), **{name: dict(
         loss=getattr(loss, name).segmentation.detach().item(),
         soft_per_region=getattr(loss, name).dice_per_class.detach().cpu()[0].tolist())
         for name in ('final', 'coarse')})
+    if getattr(loss, 'hierarchy', None) is not None:
+        result['hierarchy'] = loss.hierarchy.detach().item()
+    return result
 
 
 def region_validation_branches(record):
     diagnostic = record['region_diagnostic']
-    return dict(total_loss=diagnostic['total_loss'], **{name: dict(
+    result = dict(total_loss=diagnostic['total_loss'], **{name: dict(
         loss=diagnostic[name]['loss'], soft_per_region=diagnostic[name]['soft_dice'],
         hard=record if name == 'final' else diagnostic[name]['hard'])
         for name in ('final', 'coarse')})
+    if 'hierarchy' in diagnostic:
+        result['hierarchy'] = diagnostic['hierarchy']
+    return result
 
 
 def summarize_region_branches(cases):
     result = dict(total_loss=sum(c['total_loss'] for c in cases)/len(cases))
+    if all('hierarchy' in c for c in cases):
+        result['hierarchy'] = sum(c['hierarchy'] for c in cases)/len(cases)
     for name in ('final', 'coarse'):
         values = [c[name] for c in cases]
         soft = [sum(v['soft_per_region'][i] for v in values)/len(values) for i in range(3)]

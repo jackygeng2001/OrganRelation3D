@@ -168,9 +168,13 @@ class Trainer:
         if self.mode == 'brats_regions':
             from ..models.brain_tumor import BrainTumorSegmentor
             from ..losses import RegionJointLoss
+            expected_loss = (dict(epsilon=criterion.epsilon,lambda_c=criterion.lambda_c,align_corners=criterion.align_corners)
+                             if isinstance(criterion, RegionJointLoss) else None)
+            if expected_loss is not None and criterion.lambda_hier is not None:
+                expected_loss['lambda_hier'] = criterion.lambda_hier  # Eq. (33); absent keeps legacy identity.
             if (not isinstance(model, BrainTumorSegmentor) or not isinstance(criterion, RegionJointLoss)
                     or model.config.to_dict() != identity.get('model')
-                    or identity.get('loss') != dict(epsilon=criterion.epsilon,lambda_c=criterion.lambda_c,align_corners=criterion.align_corners)
+                    or identity.get('loss') != expected_loss
                     or not 0 < identity.get('threshold',0) < 1):
                 raise ValueError('brain model/loss/threshold must match strict identity')
             self.ce_reduction_mode, self.foreground_ce_reduction, self.ce_weights = 'region_probability_bce', 'not_applicable', {}
@@ -588,6 +592,8 @@ class Trainer:
             if self.mode == 'brats_regions':
                 for branch in ('final','coarse'):
                     row[branch]['bce'] = row[branch].pop('ce')
+                if getattr(loss, 'hierarchy', None) is not None:  # Eq. (32), before lambda_hier.
+                    row['hierarchy'] = loss.hierarchy.detach().item()
             if self.epoch_mode:
                 # Observe this same forward, before freeing it; no extra model
                 # call or stochastic sampling. Store only case scalar records.

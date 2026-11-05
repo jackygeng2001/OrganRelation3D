@@ -96,14 +96,58 @@ def canonical_labels(array, *, encoding):
     return label
 
 
+def validate_spatial_crop(crop):
+    """None keeps the full registered grid; nonzero_bbox is the only crop rule."""
+    if crop is None:
+        return None
+    if (not isinstance(crop, dict) or set(crop) != {'kind', 'margin', 'multiple_of'}
+            or crop['kind'] != 'nonzero_bbox'
+            or type(crop['margin']) is not int or crop['margin'] < 0
+            or type(crop['multiple_of']) is not int or crop['multiple_of'] < 1):
+        raise ValueError('spatial_crop must be null or {kind: nonzero_bbox, margin>=0, multiple_of>=1}')
+    return dict(crop)
+
+
+def nonzero_bbox(support, *, margin, multiple_of):
+    """DHW [start, stop) box of image-only support; never smaller than the support.
+
+    The tight box of all nonzero voxels is widened by `margin`, then grown
+    (centred) to a multiple of `multiple_of` where the volume allows, and
+    clamped/shifted inside the volume. Every supported voxel stays inside.
+    """
+    if support.ndim != 3 or support.dtype != np.bool_ or not support.any():
+        raise ValueError('nonempty boolean DHW support mask required')
+    tight = []
+    for axis in range(3):
+        index = np.flatnonzero(support.any(axis=tuple(a for a in range(3) if a != axis)))
+        tight.append((int(index[0]), int(index[-1]) + 1))
+    return expand_box(tight, support.shape, margin=margin, multiple_of=multiple_of)
+
+
+def expand_box(tight, shape, *, margin, multiple_of):
+    """Grow per-axis [low, high) boxes; result always contains the input box."""
+    start, stop = [], []
+    for (low, high), size in zip(tight, shape):
+        low, high = max(low - margin, 0), min(high + margin, size)
+        target = min(-(-(high - low) // multiple_of) * multiple_of, size)
+        low = max(low - (target - (high - low)) // 2, 0)
+        high = low + target
+        if high > size:
+            low, high = size - target, size
+        start.append(low)
+        stop.append(high)
+    return start, stop
+
+
 class BraTSDataset(torch.utils.data.Dataset):
-    def __init__(self, manifest, *, normalization, normalization_epsilon):
+    def __init__(self, manifest, *, normalization, normalization_epsilon, spatial_crop=None):
         if manifest['cohort'] == 'brats2024_gli_post':
             raise ValueError('2024 post-treatment/RC requires a separately agreed protocol; cannot use three-region preoperative labels')
         if normalization != 'nonzero_zscore' or normalization_epsilon <= 0 or not np.isfinite(normalization_epsilon):
             raise ValueError('explicit per-modality nonzero_zscore with positive epsilon required')
         self.manifest, self.source = manifest, Path(manifest['source'])
         self.epsilon = normalization_epsilon
+        self.spatial_crop = validate_spatial_crop(spatial_crop)
         self.encoding = '0123' if manifest['cohort'] == 'brats2023_gli' else '0124_preoperative'
 
     def __len__(self):
@@ -123,7 +167,7 @@ class BraTSDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         record = self.manifest['records'][index]
-        images = []; reference = None; normalization = []
+        images = []; reference = None; normalization = []; support = None
         for role in (*MODALITIES,'seg'):
             nii = self._read(record,role)
             if len(nii.shape) != 3 or not np.isfinite(nii.affine).all():
@@ -146,11 +190,27 @@ class BraTSDataset(torch.utils.data.Dataset):
             normalized[mask] = (array[mask]-mean)/max(std,self.epsilon)
             images.append(normalized.transpose(2,1,0).copy())
             normalization.append(dict(modality=role,mean=mean,std=std))
-        image = torch.from_numpy(np.stack(images))
-        label = torch.from_numpy(label.transpose(2,1,0).copy())
-        return FullScanSample(image,label,dict(case_id=record['case_id'],subject_id=record['subject_id'],
-            shape_dhw=list(label.shape),affine_xyz=reference[1].tolist(),normalization=normalization,
-            modalities=list(MODALITIES),cohort=self.manifest['cohort'],label_encoding=self.encoding))
+            support = mask.transpose(2,1,0) if support is None else support | mask.transpose(2,1,0)
+        image = np.stack(images)
+        label = label.transpose(2,1,0)
+        metadata = dict(case_id=record['case_id'],subject_id=record['subject_id'],
+            affine_xyz=reference[1].tolist(),normalization=normalization,
+            modalities=list(MODALITIES),cohort=self.manifest['cohort'],label_encoding=self.encoding)
+        if self.spatial_crop is not None:
+            # Box from the union of nonzero voxels of the four images only;
+            # the label is used solely to refuse a crop that would drop GT.
+            start, stop = nonzero_bbox(support, margin=self.spatial_crop['margin'],
+                                       multiple_of=self.spatial_crop['multiple_of'])
+            window = tuple(slice(a, b) for a, b in zip(start, stop))
+            cropped = label[window]
+            if np.count_nonzero(cropped) != np.count_nonzero(label):
+                raise ValueError('spatial crop would discard labeled tumor voxels: '+record['case_id'])
+            metadata['spatial_crop'] = dict(self.spatial_crop, original_shape_dhw=list(label.shape),
+                                            start_dhw=start, stop_dhw=stop)
+            image, label = image[(slice(None), *window)], cropped
+        metadata['shape_dhw'] = list(label.shape)
+        return FullScanSample(torch.from_numpy(np.ascontiguousarray(image)),
+                              torch.from_numpy(np.ascontiguousarray(label)), metadata)
 
 
 def make_pilot_partition(manifest, *, train_subjects, dev_subjects, seed, excluded_subjects=()):

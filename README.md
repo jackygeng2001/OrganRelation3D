@@ -1,6 +1,6 @@
 # OrganRelation3D
 
-当前方向：完整四模态 MRI 的脑肿瘤 WT/TC/ET 多标签分割，依据《脑肿瘤分割方法_修订版.docx》。仓库和 Python 包名 `organ_relation` 保留。
+当前方向：完整四模态 MRI 的脑肿瘤 WT/TC/ET 多标签分割，依据《脑肿瘤分割方法_修订版.docx》及其 2026-11-05 层级一致性修订版（只新增损失式 32–33，见 METHOD_SPEC）。仓库和 Python 包名 `organ_relation` 保留。
 
 新的双感受野编码器 → 三节点动态关系 → 深层残差回写 → 关系尺度自适应解码器。三个区域独立 sigmoid，无标签参与建图，完整 volume 一次前向。**当前完成代码与 CPU 验证，尚未验证完整 MRI 在 AMD 24GB 上的显存或训练效果。**
 
@@ -45,7 +45,7 @@ python scripts/brats.py inspect --cohort brats2023_gli \
   --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip"
 ```
 
-完整 MRI loader 保留原配准网格，按每文件 scaling 读取，T1/T1ce/T2/FLAIR 逐模态非零 z-score，零值保留零；不裁剪、不重采样、不增加 padding。该强度方案是显式开发配置，待实验协议确认。文件 shape/affine 不匹配即停止，不偷偷配准。
+完整 MRI loader 保留原配准网格，按每文件 scaling 读取，T1/T1ce/T2/FLAIR 逐模态非零 z-score，零值保留零；默认不裁剪、不重采样、不增加 padding。显式 `preprocessing.spatial_crop` 可只送四模态非零体素的整脑外接框（`configs/train_brats_year_fold_bbox.json`，仅由图像决定，肿瘤体素落框外即报错），先用 `scripts/brats_crop_audit.py` 只读核验；`scripts/brats_benchmark.py` 在真实病例上对不同输入/卷积后端测速，不创建 run。该强度方案是显式开发配置，待实验协议确认。文件 shape/affine 不匹配即停止，不偷偷配准。
 
 ## AMD 无更新检查
 
@@ -200,7 +200,7 @@ AdamW 3e-4、seed、batch=1。开发协议：最多500轮，至少20轮，每轮
 每25 steps及每轮边界保存 checkpoint，每轮末检查梯度/更新；每个训练 step 记录
 loss，逐轮聚合三区域 soft Dice，验证记录 final/coarse hard/soft Dice。TensorBoard
 标签使用 WT/TC/ET 和 BCE。ETA 是到500轮上限的训练时间，**不预测早停轮数**，且
-不含验证/保存时间。完整MRI始终单次前向，无patch/crop/sliding-window。
+不含验证/保存时间。每例始终单次整脑前向，无patch/sliding-window；仅显式 spatial_crop 时送整脑外接框。
 
 ```bash
 PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \

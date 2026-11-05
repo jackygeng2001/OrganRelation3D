@@ -3,11 +3,13 @@
 2026-10-31 起以用户提供的《脑肿瘤分割方法_修订版.docx》为方法依据。仓库与包名保留 OrganRelation3D / organ_relation；不提前命名论文方法。历史腹部 CT 规范移至 [legacy_amos_method.md](docs/legacy_amos_method.md)，其 15 节点、MONAI、AMOS split 与训练配置不用于新方案。
 
 方法文档 SHA256：`76cf95d033b0026539cf38c1d3f07240223928dde854d86c48ee2ae676258a0b`。
+2026-11-05 用户提供《脑肿瘤分割方法_层级一致性修订版.docx》（SHA256：`b687a888cf65a38d3d42f00519c54f2a46c4314c5e72ac28b223a26f14093691`）。逐段比对，相对上一版只改动损失：新增仅作用于最终预测的层级一致性损失（新式 32）、总损失改为新式 33，并补充参考文献 [14][15]；网络结构与式 1–31 不变。
 实验参考 PDF《Deep Hierarchy-Aware Segmentation: A Novel Framework for MRIs Brain Tumor Segmentation》SHA256：`43dd46d0bff87a399884fa3773fc8d153b88b7e1a2d0dfbd5a87fa573fb88065`。参考论文不是新方法的结构来源；若用户另有第二篇实验参考，须再核实。
 
 ## 输入、区域与上下文
 
-- 完整配准 MRI，顺序 T1、T1ce、T2、FLAIR；image `[B,4,D,H,W]`，FP32。无 crop、patch、滑窗或标签引导空间处理。
+- 完整配准 MRI，顺序 T1、T1ce、T2、FLAIR；image `[B,4,D,H,W]`，FP32。无 patch、滑窗或标签引导空间处理。
+- 可选整脑外接框（2026-11-05 用户批准，显式 `preprocessing.spatial_crop={kind:nonzero_bbox,margin,multiple_of}`，默认 null 为原网格）：框只由四模态非零体素的并集决定，再按 margin 外扩、按 multiple_of 居中补足并限制在原体积内；所有非零体素在框内，故逐模态 z-score 统计不变。若任何标注肿瘤体素落在框外则加载直接报错（不静默丢弃）。每例仍是整脑一次前向；节点 c/s 相对当前输入框，BCE 按框内体素平均。框外等价于预测背景，在 GT 全在框内时框内 Dice 等于贴回原网格的 Dice。`scripts/brats_crop_audit.py` 只读核验全部病例。
 - 原标注统一到 0/1/2/3：背景、坏死/非增强核心、瘤周水肿、增强肿瘤。三重叠区域顺序 WT={1,2,3}、TC={1,3}、ET={3}。
 - coarse/final 均为三个独立 sigmoid 通道。背景不单列通道/节点。始终三个节点，GT 只进入损失与指标。
 - 推理每通道独立以 `P>=tau` 二值化；不做 argmax，不额外强制 ET⊆TC⊆WT。监测可以报告层级违反数。
@@ -102,7 +104,7 @@ Phi_l 为 **无偏置** 1³ 卷积 32→C_l；三个独立 eta 初值 **1e-3**�
 
 工程执行使用数学等价的顺序：仅将逐点 1³ 仿射 Conv 移至三线性插值之前，GN8/LeakyReLU 仍在插值之后。该投影与逐通道线性插值可交换（含 bias），使插值输出通道减半；浮点计算次序变化以输出与梯度容差验证，不保证逐位一致。参数、state_dict 键和配置不变，严格 resume 的源码身份校验不放宽。拼接后释放 enhanced 的局部引用，autograd 所需张量仍正常保存；没有 detach、checkpointing 或精度变化。卷积单元的 LeakyReLU(0.01) 仅原地复用 GN 的私有输出（GN 反向不依赖此输出），不覆盖原始 feature/skip/输入，保留标准 autograd 与正负区间导数。
 
-## 联合监督（式 27–32）
+## 联合监督（式 27–33，含层级一致性修订）
 
 GT 不下采样。先把 coarse **logits** 三线性插值到完整原始 GT 网格，再 sigmoid。两分支各自计算：
 
@@ -115,13 +117,22 @@ L = mean_batch(Lseg_final + lambda_c*Lseg_coarse)
 
 三区域全部保留，病例内归约后取 batch mean。该概率 BCE 不能静默换成 BCEWithLogitsLoss、MONAI DiceCELoss、balanced CE 或类别加权。
 
+层级一致性修订（新式 32–33）仅作用于最终概率 P^f（WT/TC/ET 依次为通道 1/2/3），coarse 仍只用 Lseg：
+
+```
+Lhier = (1/(2|Omega_I|)) * sum_x [ReLU(P_TC(x)-P_WT(x)) + ReLU(P_ET(x)-P_TC(x))]
+L = mean_batch(Lseg_final + lambda_c*Lseg_coarse + lambda_hier*Lhier_final)
+```
+
+Omega_I 为输入体素网格（使用 spatial_crop 时即框内体素，与 BCE 的平均范围一致）。软约束只在训练中惩罚违例，推理仍独立阈值化、不强制包含。`loss.lambda_hier` 缺省（null）时目标函数与返回结构逐位等同旧式 27–32，历史 run 的严格 identity 不变；配置为数值（>=0）时启用式 33，日志与 TensorBoard 另记未乘权重的 Lhier（`hierarchy`）。文档规定 lambda_hier>=0 但未给数值，`train_brats_year_fold_bbox.json` 的 1.0 是待用户确认的工程起始值。
+
 ## 明示的开发配置与尚待冻结项
 
 `configs/brats_regions.json` 是实现检查配置，**不是正式实验协议**。文档固定的编码器和解码器尺寸已完整实现；不是缩通道的 micro 替身。
 
 尚未由修订文档给定的 deep Cr/K/da/Cg 暂沿用旧工程值 8/2/4/6，epsilon=1e-6，lambda_c=.5，gamma_init=.1；conv/coarse/deep fusion bias=true、align_corners=false、beta_init=0、tau=.5 均明确记录。标准层初始化保留 PyTorch 默认。模型参数量在这些显式设置下为 8,330,296。
 
-MRI 在原配准网格按各文件 scaling 读取；逐模态非零体素 z-score（std 下限 1e-8），原零值保持零，不空间裁剪。该强度选择、seed=20260925、AdamW 3e-4/weight_decay=0、batch=1、channels_last_3d 是开发选择，不声称来自论文或已是最优配置。没有 augmentation、AMP、checkpointing 或 scheduler。
+MRI 在原配准网格按各文件 scaling 读取；逐模态非零体素 z-score（std 下限 1e-8），原零值保持零；默认不空间裁剪，裁剪仅按上述 spatial_crop 显式开启。该强度选择、seed=20260925、AdamW 3e-4/weight_decay=0、batch=1、channels_last_3d 是开发选择，不声称来自论文或已是最优配置。没有 augmentation、AMP、checkpointing 或 scheduler。
 
 ## 数据与实验协议边界
 

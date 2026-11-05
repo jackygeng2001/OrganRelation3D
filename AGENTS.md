@@ -1,12 +1,12 @@
 # 项目开发规范
 
-所有任务先读本文件和 METHOD_SPEC.md。2026-10-31 用户明确重启研究方向：当前依据《脑肿瘤分割方法_修订版.docx》，旧腹部 CT 方法保留为历史代码与回归，不再支配新方法。GitHub 仓库/发行名 OrganRelation3D，Python 包 organ_relation，不虚构论文方法名。沿用当前 src/configs/scripts/tests/environments 骨架，不再建立嵌套“代码”目录。
+所有任务先读本文件和 METHOD_SPEC.md。2026-10-31 用户明确重启研究方向：当前依据《脑肿瘤分割方法_修订版.docx》及 2026-11-05 的《层级一致性修订版》（仅新增层级一致性损失），旧腹部 CT 方法保留为历史代码与回归，不再支配新方法。GitHub 仓库/发行名 OrganRelation3D，Python 包 organ_relation，不虚构论文方法名。沿用当前 src/configs/scripts/tests/environments 骨架，不再建立嵌套“代码”目录。
 
 ## 方法与范围
 
-- 当前完整四模态 MRI，顺序 T1/T1ce/T2/FLAIR。一次整例前向，无 patch/crop/sliding-window 或标签引导采样。原始数据只读。
+- 当前完整四模态 MRI，顺序 T1/T1ce/T2/FLAIR。一次整例（整脑）前向，无 patch/sliding-window 或标签引导采样。原始数据只读。唯一允许的空间裁剪是 2026-11-05 用户批准的显式 `preprocessing.spatial_crop`：仅由四模态非零体素决定的整脑外接框，标签只用于拒绝会丢失肿瘤体素的裁剪；默认 null 保持原网格。
 - WT/TC/ET 三个重叠区域，独立 sigmoid 与阈值；三个固定节点、六条有向边、无 self-loop。GT 只用于监督与评估，绝不进入模型或存在性判断。
-- 严格按 METHOD_SPEC 的双感受野编码器、关系公式、深层回写、关系尺度自适应解码器、BCE+Dice 联合损失实现。c/s/q 固定但不 detach；各轮共享参数、同步更新、重算边权。解码使用 z(K) 与缓存 alpha(K-1)，不再重算一轮关系。
+- 严格按 METHOD_SPEC 的双感受野编码器、关系公式、深层回写、关系尺度自适应解码器、BCE+Dice 联合损失实现；层级一致性损失仅加在最终预测上、权重由配置 lambda_hier 显式给出。c/s/q 固定但不 detach；各轮共享参数、同步更新、重算边权。解码使用 z(K) 与缓存 alpha(K-1)，不再重算一轮关系。
 - 新方法无需 MONAI backbone；旧 AMOS/MONAI 配置与接口保持可追溯。不得把旧 15 节点、16 类 CE、CT HU、160/40 split 套到 MRI。
 - 方法文档未确定的实验选择必须显式配置并标为待冻结，不声称正式最优。当前 brats_regions.json 仅实现检查，训练周期与 split 必须显式提供。
 - 2024 GLI 术后 RC 不能当作旧 BraTS ET=4；未确定标签/实验协议前只允许元数据检查。不同年份/任务不自动混合；同一患者多时间点不得跨 train/dev。

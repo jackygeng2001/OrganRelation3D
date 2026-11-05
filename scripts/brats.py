@@ -192,6 +192,8 @@ def execute(args):
         raise ValueError('--source requires an explicit --cohort; labels are not inferred from values')
     if config['training']['memory_format'] not in ('contiguous','channels_last_3d'):
         raise ValueError('unsupported memory format')
+    if config['training'].get('convolution_compute_dtype') not in (None,'bfloat16'):
+        raise ValueError('convolution_compute_dtype must be null or bfloat16 (float16 needs gradient scaling)')
     manifest = index_cases(args.source,cohort=args.cohort,partition=args.source_partition) if args.source else None
     if args.action == 'inspect':
         if manifest is None:
@@ -218,7 +220,8 @@ def execute(args):
     torch.set_num_threads(2)
     seed_all(config['training']['seed'])
     model = BrainTumorSegmentor(BrainTumorConfig(**config['model']),
-                               convolution_backend=args.convolution_backend).to(device=device)
+                               convolution_backend=args.convolution_backend,
+                               convolution_compute_dtype=config['training'].get('convolution_compute_dtype')).to(device=device)
     from organ_relation.models.depth_sliced_conv import DEPTH_CHUNK
     execution = dict(convolution_backend=args.convolution_backend,
                      convolution_depth_chunk=DEPTH_CHUNK if args.convolution_backend=='depth_sliced' else None)

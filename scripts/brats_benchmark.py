@@ -40,6 +40,8 @@ def main(argv=None):
     parser.add_argument('--crop', default='none', help='none or bbox:MARGIN:MULTIPLE')
     parser.add_argument('--convolution-backend', choices=('native', 'depth_sliced'), default='depth_sliced')
     parser.add_argument('--cudnn-benchmark', action='store_true', help='MIOpen exhaustive solver search')
+    parser.add_argument('--conv-dtype', choices=('bfloat16', 'float16'),
+                        help='Override training.convolution_compute_dtype (depth_sliced 3x3x3 kernels only)')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
@@ -73,8 +75,9 @@ def main(argv=None):
         load_seconds.append(time.perf_counter() - started)
 
     seed_all(config['training']['seed'])
-    model = BrainTumorSegmentor(BrainTumorConfig(**config['model']),
-                               convolution_backend=args.convolution_backend).to(device)
+    conv_dtype = args.conv_dtype or config['training'].get('convolution_compute_dtype')
+    model = BrainTumorSegmentor(BrainTumorConfig(**config['model']), convolution_backend=args.convolution_backend,
+                               convolution_compute_dtype=conv_dtype).to(device)
     channels_last = config['training']['memory_format'] == 'channels_last_3d'
     if channels_last:
         model.to(memory_format=torch.channels_last_3d)
@@ -133,7 +136,7 @@ def main(argv=None):
         return statistics.fmean(values) if values else None
     last = [s for s in steps if s['pass_index'] == args.passes - 1]
     report = dict(
-        variant=dict(crop=crop, convolution_backend=args.convolution_backend,
+        variant=dict(crop=crop, convolution_backend=args.convolution_backend, convolution_compute_dtype=conv_dtype,
                      cudnn_benchmark=args.cudnn_benchmark, memory_format=config['training']['memory_format']),
         torch=torch.__version__, hip=torch.version.hip, gpu=torch.cuda.get_device_name(device),
         cases=train_ids, failure=failure,

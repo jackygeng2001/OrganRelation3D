@@ -50,6 +50,9 @@ def validate_options(options):
         raise ValueError('scheduler not implemented')
     if options['memory_format'] not in ('contiguous', 'channels_last_3d'):
         raise ValueError('invalid memory format')
+    if options.get('convolution_compute_dtype') not in (None, 'bfloat16'):
+        # float16 would underflow per-voxel gradients without loss scaling, which is not implemented.
+        raise ValueError('convolution_compute_dtype must be null or bfloat16 for training')
     if type(options['seed']) is not int or type(options['shuffle']) is not bool:
         raise ValueError('explicit seed and shuffle required')
     ProgressClock(options['eta_window'], options['eta_warmup'])

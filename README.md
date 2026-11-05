@@ -45,7 +45,9 @@ python scripts/brats.py inspect --cohort brats2023_gli \
   --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip"
 ```
 
-完整 MRI loader 保留原配准网格，按每文件 scaling 读取，T1/T1ce/T2/FLAIR 逐模态非零 z-score，零值保留零；默认不裁剪、不重采样、不增加 padding。显式 `preprocessing.spatial_crop` 可只送四模态非零体素的整脑外接框（`configs/train_brats_year_fold_bbox.json`，仅由图像决定，肿瘤体素落框外即报错），先用 `scripts/brats_crop_audit.py` 只读核验；`scripts/brats_benchmark.py` 在真实病例上对不同输入/卷积后端测速，不创建 run。该强度方案是显式开发配置，待实验协议确认。文件 shape/affine 不匹配即停止，不偷偷配准。
+完整 MRI loader 保留原配准网格，按每文件 scaling 读取，T1/T1ce/T2/FLAIR 逐模态非零 z-score，零值保留零；默认不裁剪、不重采样、不增加 padding。显式 `preprocessing.spatial_crop` 可只送四模态非零体素的整脑外接框（`configs/train_brats_year_fold_bbox.json`，仅由图像决定，肿瘤体素落框外即报错），先用 `scripts/brats_crop_audit.py` 只读核验；`scripts/brats_benchmark.py` 在真实病例上对不同输入/卷积后端测速，不创建 run。该强度方案是显式开发配置，待实验协议确认。
+
+可选执行选项 `--data-cache DIR`（check/overfit/train）把 loader 的最终输出逐例存为 `.npy`（图像 float32、标签 uint8、元数据 JSON），之后逐位相同地读回（BraTS2018 裁剪框每例约 55 MB，读取约 0.05 s，ZIP 约 0.69 s）。缓存键含 cohort、标签编码、各源文件 ZIP size/CRC32（目录为 size/mtime）、预处理设置与 `data/brats.py` 的 SHA256，任一变化自动生成新条目；条目先写临时文件再原子改名，形状/键不符即报错。缓存目录不得位于原始数据内，建议仓库 `cache/`（已 git 忽略）。用了缓存的 run 在 runtime identity 记 `data_cache=brats_npy_v1`，续训须保持一致。预构建：`scripts/brats_cache.py --config ... --source ... --cohort ... --data-cache cache/npy`。文件 shape/affine 不匹配即停止，不偷偷配准。
 
 ## AMD 无更新检查
 

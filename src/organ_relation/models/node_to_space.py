@@ -61,20 +61,23 @@ class NodeToSpace(nn.Module):
         return (f'channels={self.channels}, attention_channels={self.attention_channels}, '
                 f'content_channels={self.content_channels}')
 
-    def _validate(self, features: Tensor, zK: Tensor) -> None:
+    def _validate(self, features: Tensor, zK: Tensor, *, reduced_features: bool = False) -> None:
         if not isinstance(features, Tensor) or features.ndim != 5:
             raise ValueError('features must have shape [B,C,Df,Hf,Wf]')
         if min(features.shape) < 1 or features.shape[1] != self.key_channels:
             raise ValueError('features require positive sizes and configured channels')
         if not isinstance(zK, Tensor) or tuple(zK.shape) != (features.shape[0], self.node_count, self.channels):
             raise ValueError(f'zK must have shape [B,{self.node_count},C], matching the feature batch/channels')
-        if features.dtype not in (torch.float32, torch.float64):
+        # reduced_features: whole-network mixed precision stores the decoder skip
+        # volume in bfloat16 while nodes and parameters stay FP32.
+        dtype = zK.dtype if reduced_features and features.dtype == torch.bfloat16 else features.dtype
+        if dtype not in (torch.float32, torch.float64) or (dtype != features.dtype and dtype != torch.float32):
             raise ValueError('NodeToSpace requires float32 or float64; AMP is not validated')
-        if zK.device != features.device or zK.dtype != features.dtype:
+        if zK.device != features.device or zK.dtype != dtype:
             raise ValueError('features and zK must share device and dtype')
         if torch.is_autocast_enabled(features.device.type):
             raise ValueError('NodeToSpace requires autocast disabled until AMP is validated')
-        if any(p.device != features.device or p.dtype != features.dtype for p in self.parameters()):
+        if any(p.device != features.device or p.dtype != dtype for p in self.parameters()):
             raise ValueError('module parameters and inputs must share device and dtype')
         _finite(features, 'features')
         _finite(zK, 'zK')

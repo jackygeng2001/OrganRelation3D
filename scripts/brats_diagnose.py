@@ -202,7 +202,8 @@ def execute(args):
     torch.set_num_threads(runtime['cpu_threads']);seed_all(identity['training']['seed'])
     sample=BraTSDataset(dict(manifest,records=records),**identity['preprocessing'])[0]
     model=BrainTumorSegmentor(BrainTumorConfig(**identity['model']),convolution_backend=backend,
-                              convolution_compute_dtype=identity['training'].get('convolution_compute_dtype'))
+                              convolution_compute_dtype=identity['training'].get('convolution_compute_dtype'),
+                              mixed_precision=identity['training'].get('mixed_precision'))
     model.load_state_dict(state['model'],strict=True)
     del state['optimizer']  # CPU deserialized state only; no optimizer is constructed/restored.
     model=model.to(device).eval();image=sample.image.unsqueeze(0).to(device)
@@ -223,7 +224,7 @@ def execute(args):
         branches={name:probability_statistics(logits,label,identity['threshold']) for name,logits in (('final',output.final_logits),('coarse',coarse))}
         report=dict(checkpoint=str(checkpoint),checkpoint_sha256=sha256(checkpoint),run_id=run['run_id'],global_step=state['progress']['global_step'],
             case=args.case,shape=list(label.shape[1:]),full_volume_voxels=label.numel(),threshold=identity['threshold'],
-            execution=dict(device=str(device),dtype='float32',memory_format=memory_format,convolution_backend=backend,convolution_compute_dtype=identity['training'].get('convolution_compute_dtype'),forward_calls=1,optimizer_steps=0),
+            execution=dict(device=str(device),dtype='float32',memory_format=memory_format,convolution_backend=backend,convolution_compute_dtype=identity['training'].get('convolution_compute_dtype'),mixed_precision=identity['training'].get('mixed_precision'),forward_calls=1,optimizer_steps=0),
             training_commit=identity['provenance']['git'],diagnostic_commit=git_state(),
             package_sources_match=source_compatibility=='identical',source_compatibility=source_compatibility,
             torch=str(torch.__version__),rocm=torch.version.hip,backend_environment={k:v for k,v in os.environ.items() if k.startswith(('MIOPEN_','PYTORCH_MIOPEN_','PYTORCH_CUDA_','PYTORCH_ALLOC_'))},

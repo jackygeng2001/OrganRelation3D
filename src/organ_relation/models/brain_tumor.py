@@ -118,9 +118,13 @@ class ProjectedRegionQuery(NodeToSpace):
     """
 
     def forward_projected(self, features, zK, region_weights, projection, scale):
-        self._validate(features, zK)
+        """bf16 skip volumes (whole-network mixed precision): node-level maps, score
+        bias, sigmoid gates and scale weights stay FP32; only the two volume
+        products take bf16 operands with FP32 accumulation."""
+        self._validate(features, zK, reduced_features=True)
+        reduced = features.dtype == torch.bfloat16
         if (region_weights.shape != (features.shape[0], self.node_count, 1)
-                or region_weights.dtype != features.dtype or region_weights.device != features.device
+                or region_weights.dtype != zK.dtype or region_weights.device != features.device
                 or not torch.isfinite(region_weights).all()):
             raise ValueError('finite scale weights must match [B,nodes,1], dtype and device')
         if (projection.bias is not None or projection.kernel_size != (1,1,1)
@@ -133,12 +137,18 @@ class ProjectedRegionQuery(NodeToSpace):
         # Treat the three nodes as three positions for the existing Conv3d.
         values = projection(V.transpose(1,2).unsqueeze(-1).unsqueeze(-1))
         values = values.squeeze(-1).squeeze(-1).transpose(1,2) * scale
-        scores = torch.bmm(query, features.flatten(2)) / math.sqrt(self.attention_channels)
+        if reduced:
+            scores = torch.bmm(query.to(features.dtype), features.flatten(2)).float()
+        else:
+            scores = torch.bmm(query, features.flatten(2))
+        scores = scores / math.sqrt(self.attention_channels)
         scores = scores + self.beta.view(1,self.node_count,1)
         for name, value in (('Q',Q),('projected query',query),('V',V),('projected values',values),('scores',scores)):
             if not torch.isfinite(value).all():
                 raise ValueError(f'nonfinite decoder {name}')
         attention = scores.sigmoid() * region_weights
+        if reduced:
+            attention, values = attention.to(features.dtype), values.to(features.dtype)
         content = torch.bmm(attention.transpose(1,2),values)
         content = content.transpose(1,2).reshape(features.shape)
         if not torch.isfinite(content).all():
@@ -194,13 +204,30 @@ class BrainDiagnostics(NamedTuple):
     scale_weights: torch.Tensor
 
 
+MIXED_PRECISION = {'bfloat16': torch.bfloat16}
+
+
 class BrainTumorSegmentor(nn.Module):
-    def __init__(self, config: BrainTumorConfig, *, convolution_backend='native', convolution_compute_dtype=None):
+    """mixed_precision='bfloat16' (whole-network mixed precision, depth_sliced only):
+    encoder/decoder volumes, their convolutions and pointwise projections run in
+    bf16 with FP32 accumulation; parameters, GroupNorm statistics and arithmetic,
+    coarse head, Space-to-Node, relation rounds, deep writeback/fusion, scale
+    weights, decoder score bias/gates and the logits given to the loss are FP32.
+    convolution_compute_dtype is the narrower kernel-only option; not both.
+    """
+
+    def __init__(self, config: BrainTumorConfig, *, convolution_backend='native', convolution_compute_dtype=None,
+                 mixed_precision=None):
         super().__init__()
         if convolution_backend not in ('native', 'depth_sliced'):
             raise ValueError('unsupported convolution execution backend')
         if convolution_compute_dtype is not None and convolution_backend != 'depth_sliced':
             raise ValueError('reduced-precision convolution arithmetic requires the depth_sliced backend')
+        if mixed_precision is not None and (mixed_precision not in MIXED_PRECISION
+                                            or convolution_backend != 'depth_sliced'
+                                            or convolution_compute_dtype is not None):
+            raise ValueError('mixed_precision must be bfloat16, with depth_sliced and no convolution_compute_dtype')
+        self.volume_dtype = None if mixed_precision is None else MIXED_PRECISION[mixed_precision]
         self.config = config
         self.encoder = BrainEncoder(bias=config.conv_bias)
         self.coarse_head = CoarseHead(256,bias=config.coarse_bias,out_channels=3,activation='sigmoid')
@@ -220,15 +247,24 @@ class BrainTumorSegmentor(nn.Module):
             raise ValueError('image must be FP32/FP64 [B,4,D,H,W]')
         if torch.is_autocast_enabled(image.device.type) or not torch.isfinite(image).all():
             raise ValueError('finite input with autocast disabled required')
-        features = self.encoder(image)
-        F = features[-1]
+        reduced = self.volume_dtype is not None
+        if reduced and image.dtype != torch.float32:
+            raise ValueError('mixed precision takes an FP32 image')
+        features = self.encoder(image.to(self.volume_dtype) if reduced else image)
+        # The deepest grid is 1/512 of the volume: coarse head, nodes, relation
+        # rounds and the deep writeback/fusion stay FP32 under mixed precision.
+        F = features[-1].float() if reduced else features[-1]
         coarse = self.coarse_head(F)
         nodes = self.space_to_node(F,coarse.probabilities)
         relation = self.relation.forward_with_last_edges(nodes.z0,nodes.centroid,nodes.size,nodes.confidence)
         content = self.node_to_space(F,relation.zK)
         fused = self.fusion(F,content)
+        if reduced:
+            fused = fused.to(self.volume_dtype)
         decoded = self.decoder(fused,features,relation.zK,nodes,relation.last_alpha,diagnostics=diagnostics)
         final = decoded[0] if diagnostics else decoded
+        if reduced:
+            final = final.float()
         if not torch.isfinite(final).all():
             raise ValueError('nonfinite final logits')
         output = SegmentorOutput(coarse.logits,final)

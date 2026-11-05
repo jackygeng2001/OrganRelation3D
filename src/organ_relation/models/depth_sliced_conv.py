@@ -14,6 +14,9 @@ DEPTH_CHUNK = 4
 # weights are rounded per plane batch; every partial result, output and
 # gradient is accumulated into the original FP32 buffers.
 COMPUTE_DTYPES = {'bfloat16': torch.bfloat16, 'float16': torch.float16}
+# Whole-network mixed precision instead stores volumes in bfloat16. Kernel-plane
+# partial sums are then accumulated per depth chunk in FP32 and rounded once.
+VOLUME_DTYPES = (torch.float32, torch.float64, torch.bfloat16)
 
 
 def _depth_slice(depth, kernel_index, stride, padding, dilation, start, end):
@@ -53,6 +56,11 @@ class _DepthSlicedConv(torch.autograd.Function):
                      for n, p, di, k, s in zip(x.shape[2:], padding, dilation, weight.shape[2:], stride))
         if min(size) < 1:
             raise ValueError('convolution kernel exceeds padded input')
+        ctx.save_for_backward(x, weight, second)
+        ctx.options = stride, padding, dilation, chunk, compute_dtype
+        ctx.has_bias = bias is not None
+        if x.dtype == torch.bfloat16:
+            return _reduced_forward(x, weight, bias, stride, padding, dilation, chunk, second, size)
         output = torch.empty((batch, weight.shape[0], *size), device=x.device, dtype=x.dtype,
                              memory_format=torch.channels_last_3d).zero_()
         planes = [weight[:, :, k].contiguous() if compute_dtype is None
@@ -68,15 +76,17 @@ class _DepthSlicedConv(torch.autograd.Function):
                 output[:, :, lo:hi].add_(_volume(part, batch, hi-lo))
         if bias is not None:
             output.add_(bias.view(1, -1, 1, 1, 1))
-        ctx.save_for_backward(x, weight, second)
-        ctx.options = stride, padding, dilation, chunk, compute_dtype
-        ctx.has_bias = bias is not None
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         x, weight, second = ctx.saved_tensors
         stride, padding, dilation, chunk, compute_dtype = ctx.options
+        if x.dtype == torch.bfloat16:
+            dx, dw, db, dsecond = _reduced_backward(ctx, x, weight, second, grad_output,
+                                                    stride, padding, dilation, chunk)
+            result = (dx, dw, db, None, None, None, None, dsecond, None)
+            return result[:len(ctx.needs_input_grad)]
         batch, _, depth, _, _ = x.shape
         dx = torch.zeros_like(x) if ctx.needs_input_grad[0] else None
         dsecond = torch.zeros_like(second) if second is not None and ctx.needs_input_grad[7] else None
@@ -111,11 +121,92 @@ class _DepthSlicedConv(torch.autograd.Function):
         return result[:len(ctx.needs_input_grad)]
 
 
+def _reduced_forward(x, weight, bias, stride, padding, dilation, chunk, second, size):
+    """bf16 volumes: bf16 kernel arithmetic, FP32 accumulation, one rounding per output."""
+    batch = x.shape[0]
+    planes = [weight[:, :, k].to(x.dtype).contiguous() for k in range(weight.shape[2])]
+    output = torch.empty((batch, weight.shape[0], *size), device=x.device, dtype=x.dtype,
+                         memory_format=torch.channels_last_3d)
+    for start in range(0, size[0], chunk):
+        end = min(start + chunk, size[0])
+        total = torch.empty((batch, weight.shape[0], end - start, *size[1:]), device=x.device,
+                            dtype=torch.float32, memory_format=torch.channels_last_3d).zero_()
+        for k, kernel in enumerate(planes):
+            lo, hi, source = _depth_slice(x.shape[2], k, stride[0], padding[0], dilation[0], start, end)
+            if hi <= lo:
+                continue
+            part = F.conv2d(_input_planes(x, second, source), kernel, stride=stride[1:],
+                            padding=padding[1:], dilation=dilation[1:])
+            total[:, :, lo-start:hi-start].add_(_volume(part, batch, hi-lo))
+        if bias is not None:
+            total.add_(bias.view(1, -1, 1, 1, 1))
+        output[:, :, start:end].copy_(total)
+    return output
+
+
+def _reduced_backward(ctx, x, weight, second, grad_output, stride, padding, dilation, chunk):
+    """Input gradients of one output chunk are summed in FP32 before touching the bf16 buffer.
+
+    An input plane is then rounded once per output chunk that reads it (at most
+    twice for these 3x3x3 kernels). Weight/bias gradients accumulate in FP32.
+    """
+    batch, channels, depth = x.shape[:3]
+    grad_output = grad_output.to(x.dtype)
+    dx = torch.zeros_like(x) if ctx.needs_input_grad[0] else None
+    dsecond = torch.zeros_like(second) if second is not None and ctx.needs_input_grad[7] else None
+    dw = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+    need_image = dx is not None or dsecond is not None
+    planes = [weight[:, :, k].to(x.dtype).contiguous() for k in range(weight.shape[2])]
+    if need_image or dw is not None:
+        inputs = channels + (0 if second is None else second.shape[1])
+        for start in range(0, grad_output.shape[2], chunk):
+            end = min(start + chunk, grad_output.shape[2])
+            work = []
+            for k in range(len(planes)):
+                lo, hi, source = _depth_slice(depth, k, stride[0], padding[0], dilation[0], start, end)
+                if hi > lo:
+                    work.append((k, lo, hi, source))
+            if not work:
+                continue
+            first = min(source.start for _, _, _, source in work)
+            last = max(source.stop for _, _, _, source in work)
+            total = (torch.empty((batch, inputs, last - first, *x.shape[3:]), device=x.device,
+                                 dtype=torch.float32, memory_format=torch.channels_last_3d).zero_()
+                     if need_image else None)
+            for k, lo, hi, source in work:
+                image = _input_planes(x, second, source)
+                gradient = _planes(grad_output, slice(lo, hi))
+                gi, gw, _ = torch.ops.aten.convolution_backward.default(
+                    gradient, image, planes[k], None, list(stride[1:]), list(padding[1:]),
+                    list(dilation[1:]), False, [0, 0], 1, (need_image, dw is not None, False))
+                if need_image:
+                    shifted = slice(source.start - first, source.stop - first, source.step)
+                    total[:, :, shifted].add_(_volume(gi, batch, hi-lo))
+                if dw is not None:
+                    dw[:, :, k].add_(gw)
+            if dx is not None:
+                dx[:, :, first:last].add_(total[:, :channels])
+            if dsecond is not None:
+                dsecond[:, :, first:last].add_(total[:, channels:])
+    db = (grad_output.sum((0, 2, 3, 4), dtype=torch.float32)
+          if ctx.has_bias and ctx.needs_input_grad[2] else None)
+    return dx, dw, db, dsecond
+
+
 class DepthSlicedConv3d(nn.Conv3d):
-    """Opt-in FP32/FP64, groups=1, zero-padding Conv3d with unchanged weights."""
+    """Opt-in groups=1, zero-padding Conv3d with unchanged FP32/FP64 weights.
+
+    FP32/FP64 volumes keep the original arithmetic. bfloat16 volumes (whole-network
+    mixed precision) round weights per call and return bfloat16 outputs.
+    """
     compute_dtype = None  # Optional bf16/fp16 kernel arithmetic; parameters stay FP32.
 
     def _apply_sliced(self, x, second=None):
+        if x.dtype == torch.bfloat16:
+            if self.compute_dtype is not None:
+                raise ValueError('choose either convolution-only or whole-network reduced precision')
+            return _DepthSlicedConv.apply(x, self.weight, self.bias, self.stride, self.padding,
+                                         self.dilation, DEPTH_CHUNK, second)
         if self.compute_dtype is None:  # Exactly the original FP32 call.
             if second is None:
                 return _DepthSlicedConv.apply(x, self.weight, self.bias, self.stride,
@@ -150,12 +241,16 @@ class DepthSlicedConv3d(nn.Conv3d):
             return self.forward_concatenated(x, second)
         if self.groups != 1 or self.padding_mode != 'zeros' or isinstance(self.padding, str):
             raise ValueError('depth_sliced requires groups=1 and numeric zero padding')
-        if (x.ndim != 5 or x.dtype not in (torch.float32, torch.float64)
+        if (x.ndim != 5 or x.dtype not in VOLUME_DTYPES
                 or torch.is_autocast_enabled(x.device.type)):
-            raise ValueError('depth_sliced requires batched FP32/FP64 input and autocast disabled')
+            raise ValueError('depth_sliced requires batched FP32/FP64/BF16 input and autocast disabled')
         if self.kernel_size == (1, 1, 1) and self.stride == (1, 1, 1) and self.padding == (0, 0, 0):
-            # A pointwise convolution is a channel-wise linear map.
-            return F.linear(x.movedim(1, -1), self.weight[:, :, 0, 0, 0], self.bias).movedim(-1, 1)
+            # A pointwise convolution is a channel-wise linear map. For bf16 volumes
+            # the FP32 weights are rounded per call; FP32/FP64 calls are unchanged.
+            weight, bias = self.weight[:, :, 0, 0, 0], self.bias
+            if x.dtype == torch.bfloat16:
+                weight, bias = weight.to(x.dtype), None if bias is None else bias.to(x.dtype)
+            return F.linear(x.movedim(1, -1), weight, bias).movedim(-1, 1)
         return self._apply_sliced(x)
 
     def forward_concatenated(self, first, second):
@@ -169,10 +264,10 @@ class DepthSlicedConv3d(nn.Conv3d):
                 or first.ndim != 5 or second.ndim != 5
                 or first.shape[0] != second.shape[0] or first.shape[2:] != second.shape[2:]
                 or first.shape[1] + second.shape[1] != self.in_channels
-                or first.dtype not in (torch.float32, torch.float64)
+                or first.dtype not in VOLUME_DTYPES
                 or second.dtype != first.dtype or second.device != first.device
                 or torch.is_autocast_enabled(first.device.type)):
-            raise ValueError('concatenated convolution requires compatible FP32/FP64 volumes and groups=1 zero padding')
+            raise ValueError('concatenated convolution requires compatible FP32/FP64/BF16 volumes and groups=1 zero padding')
         return self._apply_sliced(first, second)
 
 

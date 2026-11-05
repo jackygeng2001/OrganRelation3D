@@ -53,6 +53,10 @@ def validate_options(options):
     if options.get('convolution_compute_dtype') not in (None, 'bfloat16'):
         # float16 would underflow per-voxel gradients without loss scaling, which is not implemented.
         raise ValueError('convolution_compute_dtype must be null or bfloat16 for training')
+    if options.get('mixed_precision') not in (None, 'bfloat16'):
+        raise ValueError('mixed_precision must be null or bfloat16 for training')
+    if options.get('mixed_precision') is not None and options.get('convolution_compute_dtype') is not None:
+        raise ValueError('choose either convolution_compute_dtype or whole-network mixed_precision')
     if type(options['seed']) is not int or type(options['shuffle']) is not bool:
         raise ValueError('explicit seed and shuffle required')
     ProgressClock(options['eta_window'], options['eta_warmup'])

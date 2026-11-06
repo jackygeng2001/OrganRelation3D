@@ -11,6 +11,7 @@ import uuid
 import torch
 from torch.utils.data import DataLoader
 
+from ..data import augmentation as augment
 from ..evaluation.progress import CaseLedger
 from ..metrics import METRIC_PROTOCOL, hard_dice, summarize_dice
 from ..losses import (JointLoss, SegmentationLoss, foreground_background_ce_means,
@@ -59,6 +60,7 @@ def validate_options(options):
         raise ValueError('choose either convolution_compute_dtype or whole-network mixed_precision')
     if type(options['seed']) is not int or type(options['shuffle']) is not bool:
         raise ValueError('explicit seed and shuffle required')
+    augment.validate_augmentation(options.get('augmentation'))
     ProgressClock(options['eta_window'], options['eta_warmup'])
     validate_early_stopping(options)
 
@@ -172,6 +174,9 @@ class Trainer:
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
         self.mode = identity.get('mode', 'organ_relation_joint')
+        self.augmentation = options.get('augmentation')
+        if self.augmentation is not None and self.mode != 'brats_regions':
+            raise ValueError('training augmentation is defined only for BraTS region volumes')
         if self.mode == 'brats_regions':
             from ..models.brain_tumor import BrainTumorSegmentor
             from ..losses import RegionJointLoss
@@ -554,6 +559,13 @@ class Trainer:
             started = time.perf_counter()
             self.optimizer.zero_grad(set_to_none=True)
             image, label = self._batch(self.dataset, index)
+            augmentation = None
+            if self.augmentation is not None:  # Training cases only; drawn from (seed, step), never from labels.
+                augmentation = augment.draw(self.augmentation, augment.step_generator(self.options['seed'], step),
+                                            image.shape[1])
+                image, label = augment.apply(image, label, augmentation)
+                if self.options['memory_format'] == 'channels_last_3d':
+                    image = image.contiguous(memory_format=torch.channels_last_3d)
             output, relation_stats = observed_forward(self.model, image)  # No supervision enters forward.
             loss_function = self.criterion.objective if self.scalar_only else self.criterion
             loss = (loss_function(output.coarse_logits, output.final_logits, label)
@@ -590,6 +602,8 @@ class Trainer:
                 from ..models.monai_reference import padding_geometry
                 row['geometry'] = padding_geometry(image.shape[2:])
             row['mode'] = self.mode
+            if augmentation is not None:
+                row['augmentation'] = augmentation
             row['ce_reduction_mode'] = self.ce_reduction_mode
             row['foreground_ce_reduction'] = self.foreground_ce_reduction
             row.update(self.ce_weights)

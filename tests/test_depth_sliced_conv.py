@@ -271,5 +271,62 @@ class DepthSlicedTests(unittest.TestCase):
             load_checkpoint(resumed.run_dir/'last.ckpt',changed)
 
 
+
+class InterleavedDilationTests(unittest.TestCase):
+    """In-plane dilated 'same' kernels run as interleaved ordinary convolutions."""
+
+    def observe(self, run):
+        from unittest.mock import patch
+        dilations = []
+        original = F.conv2d
+        def conv2d(image, weight, *args, **kwargs):
+            dilations.append(tuple(kwargs.get('dilation', (1, 1))) if 'dilation' in kwargs else (1, 1))
+            return original(image, weight, *args, **kwargs)
+        with patch('organ_relation.models.depth_sliced_conv.F.conv2d', side_effect=conv2d):
+            result = run()
+        return result, dilations
+
+    def compare(self, shape, stride, padding, dilation):
+        g = torch.Generator().manual_seed(7)
+        x = torch.randn(*shape, generator=g, dtype=torch.float64).contiguous(
+            memory_format=torch.channels_last_3d).requires_grad_()
+        w = torch.randn(4, shape[1], 3, 3, 3, generator=g, dtype=torch.float64, requires_grad=True)
+        bias = torch.randn(4, generator=g, dtype=torch.float64, requires_grad=True)
+        old = F.conv3d(x, w, bias, stride=stride, padding=padding, dilation=dilation)
+        new, dilations = self.observe(lambda: _DepthSlicedConv.apply(x, w, bias, stride, padding, dilation, 2))
+        grad = torch.randn(old.shape, generator=g, dtype=torch.float64)
+        torch.testing.assert_close(new, old, rtol=1e-10, atol=1e-10)
+        for u, v in zip(torch.autograd.grad(new, (x, w, bias), grad), torch.autograd.grad(old, (x, w, bias), grad)):
+            torch.testing.assert_close(u, v, rtol=1e-10, atol=1e-10)
+        return dilations
+
+    def test_dilated_same_kernels_never_reach_the_dilated_solver(self):
+        for shape, dilation in (((1, 3, 6, 9, 11), (2, 2, 2)), ((2, 3, 5, 8, 7), (1, 1, 2)),
+                                ((1, 3, 5, 7, 10), (1, 2, 1)), ((1, 2, 7, 10, 11), (3, 3, 3)),
+                                ((1, 2, 3, 1, 3), (2, 2, 2))):
+            with self.subTest(shape=shape, dilation=dilation):
+                dilations = self.compare(shape, (1, 1, 1), dilation, dilation)
+                self.assertTrue(dilations)
+                self.assertEqual(set(dilations), {(1, 1)})
+
+    def test_other_geometries_keep_the_original_call(self):
+        # Not 'same' (padding != dilation) or strided in-plane: one plain dilated call per plane batch.
+        for stride, padding, dilation in (((1, 1, 1), (1, 1, 1), (2, 2, 2)), ((1, 2, 2), (2, 2, 2), (2, 2, 2))):
+            with self.subTest(stride=stride, padding=padding):
+                dilations = self.compare((1, 3, 6, 9, 11), stride, padding, dilation)
+                self.assertEqual(set(dilations), {dilation[1:]})
+
+    def test_module_and_concatenated_inputs_use_interleaving(self):
+        conv = DepthSlicedConv3d(5, 4, 3, padding=2, dilation=2).double()
+        a = torch.randn(1, 2, 6, 7, 9, dtype=torch.float64, requires_grad=True)
+        b = torch.randn(1, 3, 6, 7, 9, dtype=torch.float64, requires_grad=True)
+        reference = F.conv3d(torch.cat((a, b), 1), conv.weight, conv.bias, padding=2, dilation=2)
+        out, dilations = self.observe(lambda: conv(a, b))
+        torch.testing.assert_close(out, reference, rtol=1e-10, atol=1e-10)
+        for u, v in zip(torch.autograd.grad(out.sum(), (a, b, conv.weight)),
+                        torch.autograd.grad(reference.sum(), (a, b, conv.weight))):
+            torch.testing.assert_close(u, v, rtol=1e-10, atol=1e-10)
+        self.assertEqual(set(dilations), {(1, 1)})
+
 if __name__ == '__main__':
     unittest.main()

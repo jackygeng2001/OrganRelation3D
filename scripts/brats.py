@@ -225,9 +225,11 @@ def execute(args):
                                convolution_backend=args.convolution_backend,
                                convolution_compute_dtype=config['training'].get('convolution_compute_dtype'),
                                mixed_precision=config['training'].get('mixed_precision')).to(device=device)
-    from organ_relation.models.depth_sliced_conv import DEPTH_CHUNK
+    from organ_relation.models.depth_sliced_conv import DEPTH_CHUNK,POLYPHASE_DILATION
     execution = dict(convolution_backend=args.convolution_backend,
                      convolution_depth_chunk=DEPTH_CHUNK if args.convolution_backend=='depth_sliced' else None)
+    if args.convolution_backend == 'depth_sliced':
+        execution['convolution_dilation'] = POLYPHASE_DILATION
     if config['training']['memory_format'] == 'channels_last_3d':
         model.to(memory_format=torch.channels_last_3d)
     criterion = RegionJointLoss(**config['loss'])

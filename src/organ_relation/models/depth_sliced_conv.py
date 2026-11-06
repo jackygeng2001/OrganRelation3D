@@ -4,12 +4,15 @@ This is a convolution execution backend, not a patch model. Every depth-kernel
 plane contributes with the original stride/padding/dilation; all spatial output
 positions are assembled before the next network layer sees the result. Only the
 original input and weight are saved. No network forward is recomputed backward.
+In-plane dilated 'same' kernels run as interleaved ordinary convolutions
+(POLYPHASE_DILATION), the same sums in a different order.
 """
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 DEPTH_CHUNK = 4
+POLYPHASE_DILATION = 'interleaved_v1'  # Recorded in run identity: see _polyphase.
 # Optional reduced-precision arithmetic for the 3x3x3 kernels only. Inputs and
 # weights are rounded per plane batch; every partial result, output and
 # gradient is accumulated into the original FP32 buffers.
@@ -37,6 +40,59 @@ def _planes(x, depth_slice, dtype=None):
     planes = torch.empty((batch, depth, channels, height, width), device=x.device, dtype=dtype)
     planes.copy_(part.permute(0, 2, 1, 3, 4))  # One pass: NCHW layout and rounding together.
     return planes.view(batch * depth, channels, height, width)
+
+
+def _polyphase(kernel, stride, padding, dilation):
+    """True for an in-plane 'same' dilated kernel: stride 1, padding dilation*(k-1)/2.
+
+    Such a convolution only combines positions of equal residue modulo the
+    dilation, so it splits exactly into dilation_h*dilation_w ordinary
+    (dilation 1) convolutions on interleaved sub-images with the same weights.
+    MIOpen has no fast solver for dilated kernels and falls back to a naive one.
+    """
+    return (any(d > 1 for d in dilation) and all(s == 1 for s in stride)
+            and all(k % 2 == 1 and p == d * (k - 1) // 2
+                    for k, p, d in zip(kernel.shape[2:], padding, dilation)))
+
+
+def _phases(planes, dilation):
+    for a in range(dilation[0]):
+        for b in range(dilation[1]):
+            if a < planes.shape[2] and b < planes.shape[3]:
+                yield (slice(None), slice(None), slice(a, None, dilation[0]), slice(b, None, dilation[1]))
+
+
+def _conv2d(planes, kernel, stride, padding, dilation):
+    """F.conv2d over a plane batch; dilated 'same' kernels run as interleaved ordinary convolutions."""
+    if not _polyphase(kernel, stride, padding, dilation):
+        return F.conv2d(planes, kernel, stride=stride, padding=padding, dilation=dilation)
+    plain = tuple((k - 1) // 2 for k in kernel.shape[2:])
+    output = planes.new_empty((planes.shape[0], kernel.shape[0], *planes.shape[2:]))
+    for phase in _phases(planes, dilation):
+        output[phase] = F.conv2d(planes[phase].contiguous(), kernel, padding=plain)
+    return output
+
+
+def _conv2d_backward(gradient, planes, kernel, stride, padding, dilation, mask):
+    """(input, weight) gradients of _conv2d; the weight gradient of the phases is summed in >= FP32."""
+    if not _polyphase(kernel, stride, padding, dilation):
+        gi, gw, _ = torch.ops.aten.convolution_backward.default(
+            gradient, planes, kernel, None, list(stride), list(padding), list(dilation),
+            False, [0, 0], 1, mask)
+        return gi, gw
+    plain = [(k - 1) // 2 for k in kernel.shape[2:]]
+    gi = planes.new_empty(planes.shape) if mask[0] else None
+    gw = None
+    for phase in _phases(planes, dilation):
+        part_i, part_w, _ = torch.ops.aten.convolution_backward.default(
+            gradient[phase].contiguous(), planes[phase].contiguous(), kernel, None, [1, 1], plain, [1, 1],
+            False, [0, 0], 1, mask)
+        if mask[0]:
+            gi[phase] = part_i
+        if mask[1]:
+            part_w = part_w.to(torch.promote_types(part_w.dtype, torch.float32))
+            gw = part_w if gw is None else gw.add_(part_w)
+    return gi, gw
 
 
 def _volume(x, batch, depth):
@@ -71,8 +127,8 @@ class _DepthSlicedConv(torch.autograd.Function):
                                              start, min(start + chunk, size[0]))
                 if hi <= lo:
                     continue
-                part = F.conv2d(_input_planes(x, second, source, compute_dtype), kernel, stride=stride[1:],
-                                padding=padding[1:], dilation=dilation[1:])
+                part = _conv2d(_input_planes(x, second, source, compute_dtype), kernel,
+                               stride[1:], padding[1:], dilation[1:])
                 output[:, :, lo:hi].add_(_volume(part, batch, hi-lo))
         if bias is not None:
             output.add_(bias.view(1, -1, 1, 1, 1))
@@ -105,10 +161,8 @@ class _DepthSlicedConv(torch.autograd.Function):
                     gradient = _planes(grad_output, slice(lo, hi), compute_dtype)
                     # The same ATen operator used by torch.nn.grad.conv2d_*;
                     # request both derivatives together, without recomputation.
-                    gi, gw, _ = torch.ops.aten.convolution_backward.default(
-                        gradient, image, kernel, None, list(stride[1:]), list(padding[1:]),
-                        list(dilation[1:]), False, [0, 0], 1,
-                        (need_image, dw is not None, False))
+                    gi, gw = _conv2d_backward(gradient, image, kernel, stride[1:], padding[1:],
+                                              dilation[1:], (need_image, dw is not None, False))
                     if dx is not None:
                         dx[:, :, source].add_(_volume(gi[:, :x.shape[1]], batch, hi-lo))
                     if dsecond is not None:
@@ -135,8 +189,7 @@ def _reduced_forward(x, weight, bias, stride, padding, dilation, chunk, second, 
             lo, hi, source = _depth_slice(x.shape[2], k, stride[0], padding[0], dilation[0], start, end)
             if hi <= lo:
                 continue
-            part = F.conv2d(_input_planes(x, second, source), kernel, stride=stride[1:],
-                            padding=padding[1:], dilation=dilation[1:])
+            part = _conv2d(_input_planes(x, second, source), kernel, stride[1:], padding[1:], dilation[1:])
             total[:, :, lo-start:hi-start].add_(_volume(part, batch, hi-lo))
         if bias is not None:
             total.add_(bias.view(1, -1, 1, 1, 1))
@@ -176,9 +229,8 @@ def _reduced_backward(ctx, x, weight, second, grad_output, stride, padding, dila
             for k, lo, hi, source in work:
                 image = _input_planes(x, second, source)
                 gradient = _planes(grad_output, slice(lo, hi))
-                gi, gw, _ = torch.ops.aten.convolution_backward.default(
-                    gradient, image, planes[k], None, list(stride[1:]), list(padding[1:]),
-                    list(dilation[1:]), False, [0, 0], 1, (need_image, dw is not None, False))
+                gi, gw = _conv2d_backward(gradient, image, planes[k], stride[1:], padding[1:],
+                                          dilation[1:], (need_image, dw is not None, False))
                 if need_image:
                     shifted = slice(source.start - first, source.stop - first, source.step)
                     total[:, :, shifted].add_(_volume(gi, batch, hi-lo))

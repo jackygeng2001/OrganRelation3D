@@ -7,7 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = {
-    'brats': ('brain_tumor', 'depth_sliced_conv', 'brats_overfit', 'brats_diagnose', 'brats_pilot', 'brats_folds', 'brats_crop', 'hierarchy_loss', 'brats_cache', 'conv_precision', 'mixed_precision'),
+    'brats': ('brain_tumor', 'depth_sliced_conv', 'brats_overfit', 'brats_diagnose', 'brats_pilot', 'brats_folds', 'brats_crop', 'hierarchy_loss', 'brats_cache', 'conv_precision', 'mixed_precision', 'augmentation'),
     'tensor': ('backbone', 'coarse_nodes', 'dynamic_relation', 'node_to_space',
                'segmentor', 'joint_loss'),
     'data': ('metadata', 'candidate_estimates', 'fidelity'),

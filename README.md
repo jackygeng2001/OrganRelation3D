@@ -64,7 +64,7 @@ python scripts/brats.py check --device cuda:0 --cohort brats2023_gli \
 
 不要把旧 MONAI/CT 的显存数字用于此新编码器和全分辨率关系查询。布局选项不能证明所有中间算子/solver 都是 NDHWC。
 
-若 ROCm 的 NDHWC Conv3d 使用低 workspace 但很慢的 naive solver，可在 `check` 或 `train` 显式增加 `--convolution-backend depth_sliced`。默认仍为 `native`。该选项把每个原 Conv3d 的深度核展开为 NCHW Conv2d 求和，每次最多处理 4 个输出深度平面，保留跨平面贡献、边界 padding、stride/dilation 和完整输出；1³ 卷积执行等价线性映射。它不是 2D 分割、patch 输入或 activation checkpointing，权重、初始化、FP32 和 loss 不变。CPU/ROCm 已做输出及梯度容差验证；NVIDIA 尚未实测。首次调用可能包含 MIOpen 算法选择，稳定耗时应预热后测量。
+若 ROCm 的 NDHWC Conv3d 使用低 workspace 但很慢的 naive solver，可在 `check` 或 `train` 显式增加 `--convolution-backend depth_sliced`。默认仍为 `native`。该选项把每个原 Conv3d 的深度核展开为 NCHW Conv2d 求和，每次最多处理 4 个输出深度平面，保留跨平面贡献、边界 padding、stride/dilation 和完整输出；1³ 卷积执行等价线性映射。它不是 2D 分割、patch 输入或 activation checkpointing，权重、初始化、FP32 和 loss 不变。CPU/ROCm 已做输出及梯度容差验证；NVIDIA 尚未实测。首次调用可能包含 MIOpen 算法选择，稳定耗时应预热后测量。平面内空洞 'same' 卷积（双感受野 context 分支）拆成交错子图上的普通卷积执行（数学等价，只是求和次序不同），避开 MIOpen 的 naive 空洞内核，真实病例训练步约快 3 倍；runtime identity 记 `convolution_dilation=interleaved_v1`。
 
 该执行方式及 depth chunk 写入 check JSON 和训练 runtime identity；resume 必须使用相同选项，不放宽旧 checkpoint 身份校验。算子临时内存有界不代表所有 backend workspace 有固定上限，真实整卷仍需检查峰值。正式训练吞吐还包括 optimizer、读取、监测和保存，不能用单次 forward/backward 代替。
 

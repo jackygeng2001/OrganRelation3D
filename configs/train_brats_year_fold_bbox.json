@@ -3,10 +3,10 @@
   "mode": "brats_regions",
   "status": "year_specific_fold_protocol_brain_box_crop_hierarchy_loss_not_final_paper_protocol",
   "model": {
-    "relation_channels": 8,
+    "relation_channels": 64,
     "rounds": 2,
-    "attention_channels": 4,
-    "content_channels": 6,
+    "attention_channels": 32,
+    "content_channels": 32,
     "epsilon": 1e-06,
     "gamma_init": 0.1,
     "conv_bias": true,
@@ -14,7 +14,7 @@
     "fusion_bias": true,
     "align_corners": false
   },
-  "model_choice_note": "Document fixes encoder 32/64/128/256, GN8, LeakyReLU .01, decoder d=32/Cg=32/MLP64, eta=1e-3. Unspecified deep relation dimensions/K/epsilon/gamma use legacy development values; GRU retains tested explicit reset-before-linear equations. These are engineering choices pending experiment agreement.",
+  "model_choice_note": "Document fixes encoder 32/64/128/256, GN8, LeakyReLU .01, decoder d=32/Cg=32/MLP64, eta=1e-3. User-approved 2026-11-06 for this box protocol (the document gives no values): relation MLP width Cr=64 (=C/4; its input is 2C+7=519), K=2 rounds (three fully connected nodes exchange directly in one round), deep writeback da=Cg=32 to match the decoder's d=32/Cg=32. 8,387,120 parameters. epsilon=1e-6 and gamma_init=0.1 keep the development values; GRU retains tested explicit reset-before-linear equations. Development choices, not tuned.",
   "loss": {
     "epsilon": 1e-06,
     "lambda_c": 0.5,

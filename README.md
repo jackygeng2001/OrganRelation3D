@@ -20,7 +20,7 @@
 | `scripts/brats.py` | inspect / 无更新 check / 单病例 overfit / 受控 train |
 | `configs/brats_regions.json` | 显式开发配置，不是正式实验方案 |
 
-新方法固定编码器 32/64/128/256、GN8/LeakyReLU；配置下共 8,330,296 参数。深层 Cr/K/da/Cg=8/2/4/6 等未写死在方法中的选择暂沿用工程值，详见 METHOD_SPEC。没有替换为 micro 模型。
+新方法固定编码器 32/64/128/256、GN8/LeakyReLU；实现检查配置下共 8,330,296 参数，深层 Cr/K/da/Cg=8/2/4/6 沿用工程值；整脑外接框协议配置（`train_brats_year_fold_bbox*.json`）改用 2026-11-06 用户批准的 64/2/32/32，共 8,387,120 参数。均为文档未写死的开发选择，详见 METHOD_SPEC。没有替换为 micro 模型。
 
 ## 环境与 CPU 验证
 

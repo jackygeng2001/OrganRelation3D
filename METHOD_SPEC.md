@@ -130,7 +130,7 @@ Omega_I 为输入体素网格（使用 spatial_crop 时即框内体素，与 BCE
 
 `configs/brats_regions.json` 是实现检查配置，**不是正式实验协议**。文档固定的编码器和解码器尺寸已完整实现；不是缩通道的 micro 替身。
 
-尚未由修订文档给定的 deep Cr/K/da/Cg 暂沿用旧工程值 8/2/4/6，epsilon=1e-6，lambda_c=.5，gamma_init=.1；conv/coarse/deep fusion bias=true、align_corners=false、beta_init=0、tau=.5 均明确记录。标准层初始化保留 PyTorch 默认。模型参数量在这些显式设置下为 8,330,296。
+尚未由修订文档给定的 deep Cr/K/da/Cg 暂沿用旧工程值 8/2/4/6，epsilon=1e-6，lambda_c=.5，gamma_init=.1；conv/coarse/deep fusion bias=true、align_corners=false、beta_init=0、tau=.5 均明确记录。标准层初始化保留 PyTorch 默认。模型参数量在这些显式设置下为 8,330,296。整脑外接框协议的三份配置（`configs/train_brats_year_fold_bbox{,_conv_bf16,_amp_bf16}.json`）改用 2026-11-06 用户批准的 Cr/K/da/Cg=64/2/32/32：修订文档只规定 K 为正整数、未给 Cr/da/Cg 数值；边门控 MLP 输入为 2C+7=519 维，Cr=64=C/4；三节点完全图一轮即可两两直接交互，K=2 为交互一次再修正一次；深层回写 da=Cg=32 与文档给定的解码器 d=Cg=32 对齐。参数量 8,387,120（+0.7%），新增计算只在节点与最深层网格。epsilon、lambda_c、gamma_init、lambda_hier=1.0、beta_init、tau 不变。其余配置保持 8/2/4/6 以维持历史 run 可追溯。
 
 MRI 在原配准网格按各文件 scaling 读取；逐模态非零体素 z-score（std 下限 1e-8），原零值保持零；默认不空间裁剪，裁剪仅按上述 spatial_crop 显式开启。该强度选择、seed=20260925、AdamW 3e-4/weight_decay=0、batch=1、channels_last_3d 是开发选择，不声称来自论文或已是最优配置。没有 augmentation、checkpointing 或 scheduler；默认没有 AMP。
 

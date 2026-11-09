@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import torch
 
-import test_training as fixtures
+import support as fixtures
 from test_brain_tumor import Cases
 from organ_relation.data.brats import make_pilot_partition, validate_partition
 from organ_relation.losses import RegionJointLoss

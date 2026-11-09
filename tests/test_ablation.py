@@ -6,7 +6,7 @@ import unittest
 import torch
 from torch.nn import functional as F
 
-import test_training as fixtures
+import support as fixtures
 from test_brain_tumor import Cases, config
 from organ_relation.losses import RegionJointLoss
 from organ_relation.models.brain_tumor import (BrainTumorConfig, BrainTumorSegmentor, DualReceptiveField,

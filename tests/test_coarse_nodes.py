@@ -16,8 +16,7 @@ except ModuleNotFoundError as exc:
     TORCH_AVAILABLE = False
 else:
     TORCH_AVAILABLE = True
-    from organ_relation.models.backbone import Encoder3D
-    from organ_relation.models.backbone_config import BackboneConfig
+    from organ_relation.models.brain_tumor import BrainEncoder
     from organ_relation.models.coarse_head import CoarseHead, CoarsePrediction
     from organ_relation.models.space_to_node import (
         CENTROID_AXES, ORGAN_LABEL_IDS, OrganNodes, SpaceToNode,
@@ -286,17 +285,16 @@ class CoarseNodeTests(unittest.TestCase):
                 self.assertTrue((gradient[:, 1:].flatten(2).abs().sum(-1) > 0).all())
 
     def test_encoder_coarse_nodes_gradient_and_parameter_coverage(self):
-        raw = json.loads((ROOT / 'configs/backbone_micro.json').read_text(encoding='utf-8'))['model']
-        encoder = Encoder3D(BackboneConfig(**raw))
-        head = CoarseHead(raw['channels'][-1], bias=True)
-        image = torch.randn(2, 1, 9, 10, 11, requires_grad=True)
-        encoded = encoder(image)
-        f = encoded.deepest
+        encoder = BrainEncoder(bias=True)  # 当前项目的编码器；最深层 256 通道
+        channels = BrainEncoder.channels[-1]
+        head = CoarseHead(channels, bias=True)
+        image = torch.randn(2, 4, 9, 10, 11, requires_grad=True)
+        f = encoder(image)[-1]
         prediction = head(f)
         for t in (f, prediction.logits, prediction.probabilities):
             t.retain_grad()
         nodes = SpaceToNode(epsilon=1e-6)(f, prediction.probabilities)
-        self.assertEqual(nodes.z0.shape, (2, 15, raw['channels'][-1]))
+        self.assertEqual(nodes.z0.shape, (2, 15, channels))
         # Synthetic differentiation probe, NOT the method's training loss.
         probe = sum((value * torch.randn_like(value)).sum() for value in nodes)
         probe.backward()

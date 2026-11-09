@@ -18,8 +18,7 @@ except ModuleNotFoundError as exc:
 else:
     TORCH_AVAILABLE = True
     from organ_relation.models.node_to_space import NodeToSpace, NodeToSpaceResult
-    from organ_relation.models.backbone import Encoder3D
-    from organ_relation.models.backbone_config import BackboneConfig
+    from organ_relation.models.brain_tumor import BrainEncoder
     from organ_relation.models.coarse_head import CoarseHead
     from organ_relation.models.space_to_node import SpaceToNode
     from organ_relation.models.dynamic_relation import DynamicRelation
@@ -288,17 +287,16 @@ class NodeToSpaceTests(unittest.TestCase):
             torch.testing.assert_close(t, old, rtol=0, atol=0)
 
     def test_accepted_module_chain_uses_original_features_and_updated_nodes(self):
-        config = BackboneConfig(**json.loads((ROOT / 'configs/backbone_micro.json').read_text(encoding='utf-8'))['model'])
-        encoder = Encoder3D(config).double()
-        channels = config.channels[-1]
+        encoder = BrainEncoder(bias=True).double()  # 当前项目的编码器；最深层 256 通道
+        channels = BrainEncoder.channels[-1]
         head = CoarseHead(channels, bias=True).double()
         relation = DynamicRelation(channels, relation_channels=3, rounds=2).double()
         with torch.no_grad():
             relation.relation_hidden.weight.fill_(.01)
             relation.relation_hidden.bias.fill_(.5)
         writeback = self.model(channels=channels, da=3, cg=2)
-        image = torch.randn(2, 1, 9, 10, 11, dtype=torch.float64, requires_grad=True)
-        f = encoder(image).deepest
+        image = torch.randn(2, 4, 9, 10, 11, dtype=torch.float64, requires_grad=True)
+        f = encoder(image)[-1]
         before = f.clone()
         coarse = head(f)
         nodes = SpaceToNode(epsilon=.01)(f, coarse.probabilities)

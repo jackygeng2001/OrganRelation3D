@@ -14,7 +14,7 @@ import nibabel as nib
 import numpy as np
 import torch
 
-import test_training as fixtures
+import support as fixtures
 from organ_relation.data.brats import BraTSDataset, MODALITIES, index_cases
 
 CROP = dict(kind='nonzero_bbox', margin=0, multiple_of=4)

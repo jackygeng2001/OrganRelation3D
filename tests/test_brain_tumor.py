@@ -17,7 +17,7 @@ import torch
 from torch.nn import functional as F
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-import test_training as fixtures
+import support as fixtures
 from organ_relation.models.brain_tumor import (BrainTumorConfig,BrainTumorSegmentor,DualReceptiveField,
                                              ChannelsLastGroupNorm,ProjectedRegionQuery,ProjectThenUpsample,scale_descriptor,unit)
 from organ_relation.models.space_to_node import SpaceToNode,OrganNodes

@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-import test_training as fixtures
+import support as fixtures
 from test_brain_tumor import Cases
 from test_brats_pilot import script
 from organ_relation.data.brats import BraTSDataset, index_cases, make_folds, validate_partition

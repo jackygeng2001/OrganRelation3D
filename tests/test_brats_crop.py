@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-import test_training as fixtures
+import support as fixtures
 from organ_relation.data.brats import (BraTSDataset, MODALITIES, expand_box, index_cases,
                                        nonzero_bbox, validate_spatial_crop)
 from organ_relation.training.brain_tumor import region_dice

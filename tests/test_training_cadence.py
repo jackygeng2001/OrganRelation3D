@@ -1,4 +1,4 @@
-"""Independent step saves/presentation with exact mid-epoch CPU recovery."""
+"""按步保存与控制台节奏独立于 epoch 协议，epoch 中途断点可精确恢复（CPU）。"""
 import io
 import unittest
 from unittest.mock import MagicMock, patch
@@ -6,14 +6,26 @@ from unittest.mock import MagicMock, patch
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-import test_training as fixtures
-from test_development import TinyReference
-from test_training_v2 import config
+import support as fixtures
 from test_monitoring import Terminal, train_row
+from organ_relation.losses import RegionJointLoss
+from organ_relation.models.brain_tumor import BrainTumorConfig, BrainTumorSegmentor
 from organ_relation.training.console import TrainingConsole
 from organ_relation.training.engine import Trainer, validate_options
-from organ_relation.training.monai_reference import MonaiReferenceLoss
 from organ_relation.training.state import seed_all, load_checkpoint, capture_rng
+
+MAIN_CONFIG = 'configs/train_brats_year_fold_bbox_amp_bf16.json'
+EARLY = dict(min_epochs=20, patience_epochs=20, min_delta=0.001, monitor='dev_mean_region_hard_dice')
+
+
+def options(intervals=True):
+    """与正式五折配置相同的节奏字段：每 epoch 保存、每 5 epoch 验证，另每 5 步保存/打印。"""
+    opt = fixtures.training_options(cadence_unit='epoch', max_steps=None, max_epochs=500, checkpoint_every=1,
+                                    validation_every=5, validation_role='internal_dev', early_stopping=dict(EARLY),
+                                    checkpoint_every_steps=5, console_every_steps=5)
+    if not intervals:
+        opt.pop('checkpoint_every_steps'); opt.pop('console_every_steps')
+    return opt
 
 
 class CadenceTests(unittest.TestCase):
@@ -21,12 +33,10 @@ class CadenceTests(unittest.TestCase):
         self.f = fixtures.TrainingTests(); self.f.setUp(); self.addCleanup(self.f.doCleanups)
         self.root = self.f.root
 
-    def trainer(self, name, *, resume=False, count=160, intervals=True):
-        cfg = config(); options = cfg['training']
-        if not intervals:
-            options.pop('checkpoint_every_steps'); options.pop('console_every_steps')
-        seed_all(options['seed'])
-        model = TinyReference()
+    def trainer(self, name, *, resume=False, count=20, intervals=True):
+        cfg = fixtures.config(); opt = options(intervals)
+        seed_all(opt['seed'])
+        model = BrainTumorSegmentor(BrainTumorConfig(**cfg['model']))
         optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0, foreach=False, fused=False)
         class Cases(fixtures.RandomCases):
             def __len__(self): return count
@@ -34,11 +44,11 @@ class CadenceTests(unittest.TestCase):
         class Dev(Cases):
             def __len__(self): return 40
         path = self.root / name
-        identity = dict(mode=cfg['mode'], training=options, model='tiny', loss=cfg['loss'],
-                        optimizer=cfg['optimizer'], preprocessing='synthetic', provenance='test',
+        identity = dict(mode='brats_regions', model=cfg['model'], loss=cfg['loss'], threshold=.5, training=opt,
+                        optimizer='AdamW', preprocessing=cfg['preprocessing'], provenance='test',
                         data={'manifest_hash': 'synthetic'})
-        return Trainer(model, MonaiReferenceLoss(cfg['loss']), optimizer, Cases(), [f't{i}' for i in range(count)],
-            device='cpu', options=options, identity=identity, run_dir=path,
+        return Trainer(model, RegionJointLoss(**cfg['loss']), optimizer, Cases(), [f't{i}' for i in range(count)],
+            device='cpu', options=opt, identity=identity, run_dir=path,
             validation_dataset=Dev(), validation_case_ids=[f'v{i}' for i in range(40)],
             resume=path/'last.ckpt' if resume else None, tensorboard=True,
             console=TrainingConsole(stream=io.StringIO()))
@@ -52,13 +62,11 @@ class CadenceTests(unittest.TestCase):
             self.f.assert_nested_equal(a[key], b[key])
 
     def test_config_fields_independent_positive_and_validation_unchanged(self):
-        for gated in (False, True):
-            opt = config(gated)['training']; validate_options(opt)
-            self.assertEqual(opt['checkpoint_every_steps'], 5)
-            self.assertEqual(opt['console_every_steps'], 5)
+        for opt in (options(), fixtures.json.loads((fixtures.ROOT / MAIN_CONFIG).read_text())['training']):
+            validate_options(opt)
             self.assertEqual(opt['cadence_unit'], 'epoch')
             self.assertEqual(opt['checkpoint_every'], 1)
-            self.assertEqual(opt['validation_every'], 5)
+            self.assertEqual(opt['checkpoint_every_steps'], opt['console_every_steps'])
             for key in ('checkpoint_every_steps', 'console_every_steps'):
                 for bad in (0, -1, True, 2.5, None):
                     with self.subTest(key=key, bad=bad), self.assertRaises(ValueError):
@@ -104,7 +112,9 @@ class CadenceTests(unittest.TestCase):
                 self.assertEqual(x[key], y[key])
         self.assertFalse(any(r['phase'] == 'internal_dev' for r in self.f.rows(again.run_dir)))
         events = EventAccumulator(str(again.board.directory)).Reload()
-        self.assertEqual(events.Tags()['scalars'], [])  # No step-level TensorBoard additions.
+        # BraTS 每步写训练标量；断点续训后步号唯一连续，且尚未到验证节奏，没有验证标量。
+        self.assertEqual([e.step for e in events.Scalars('Train/Total_Loss')], list(range(1, 13)))
+        self.assertFalse(any(tag.startswith('Val/') for tag in events.Tags()['scalars']))
 
     def test_step_saves_and_console_do_not_change_training(self):
         legacy = self.trainer('epoch_only', intervals=False)
@@ -123,49 +133,39 @@ class CadenceTests(unittest.TestCase):
         self.assertFalse((trainer.run_dir/'best-dev.ckpt').exists())
         self.assertEqual(trainer.development_state['validation_history'], [])
 
-    def test_epoch3_cursor47_resumes_next_case_without_reshuffle(self):
-        first = self.trainer('cursor47'); self.f.quiet_run(first, stop_after=367)
+    def test_epoch3_cursor7_resumes_next_case_without_reshuffle(self):
+        first = self.trainer('cursor7'); self.f.quiet_run(first, stop_after=47)
         ck = self.checkpoint(first)
-        self.assertEqual((ck['progress']['epoch'], ck['progress']['cursor']), (2, 47))
-        next_case = first.case_ids[ck['progress']['order'][47]]
-        resumed = self.trainer('cursor47', resume=True)
+        self.assertEqual((ck['progress']['epoch'], ck['progress']['cursor']), (2, 7))
+        next_case = first.case_ids[ck['progress']['order'][7]]
+        resumed = self.trainer('cursor7', resume=True)
         self.f.assert_nested_equal(ck['progress'], resumed.state)
         self.f.assert_nested_equal(ck['sampler_generator'], resumed.sampler_generator.get_state())
         self.f.quiet_run(resumed, stop_after=1)
         row = self.f.rows(resumed.run_dir)[-1]
-        self.assertEqual((row['epoch'], row['global_step'], row['case_id']), (3, 368, next_case))
+        self.assertEqual((row['epoch'], row['global_step'], row['case_id']), (3, 48, next_case))
         self.assertEqual(resumed.state['order'], ck['progress']['order'])
 
-    def test_console_every_five_steps_fields_gamma_and_baseline_no_fake_data(self):
+    def test_console_every_five_steps_fields_and_no_fake_data(self):
         for tty in (False, True):
-            for gated in (False, True):
-                with self.subTest(tty=tty, gated=gated):
-                    stream = Terminal(tty); console = TrainingConsole(stream=stream)
-                    with patch.object(console, '_bar', return_value=MagicMock()):
-                        console.start({}, config()['training'], list(range(160)), 80000, 500,
-                                      dict(epoch=0, global_step=0, cursor=0))
-                        console.begin_step(1, 0)
-                        for step in range(1, 11):
-                            row = train_row(step); row['epoch'] = 1
-                            row['total_loss'] = float(step)
-                            row['final']['segmentation'] = 3.1
-                            if gated:
-                                row['coarse']['segmentation'] = 2.05
-                                row['relation_scale'] = dict(gamma=.0973, scaled_writeback_to_feature_norm=.142)
-                            else:
-                                row.pop('coarse')
-                            console.train_step(row)
-                        console.close()
-                    text = stream.getvalue()
-                    self.assertEqual(text.count('[Train summary]'), 2)
-                    for value in ('5 / 80000', '10 / 80000', '5 / 160', '10 / 160',
-                                  'Mean Loss (5)', '3.0000', '8.0000', 'Final Loss', 'LR', 'GPU Peak', 'Step Mean', 'Train ETA'):
-                        self.assertIn(value, text)
-                    self.assertEqual('Gamma' in text, gated)
-                    self.assertEqual('Writeback/F' in text, gated)
-                    self.assertEqual('Coarse Loss' in text, gated)
-                    if gated:
-                        self.assertIn('0.0973', text); self.assertIn('0.142', text)
+            with self.subTest(tty=tty):
+                stream = Terminal(tty); console = TrainingConsole(stream=stream)
+                with patch.object(console, '_bar', return_value=MagicMock()):
+                    console.start({}, options(), list(range(160)), 80000, 500, dict(epoch=0, global_step=0, cursor=0))
+                    console.begin_step(1, 0)
+                    for step in range(1, 11):
+                        row = train_row(step); row['epoch'] = 1
+                        row['total_loss'] = float(step)
+                        row['final']['segmentation'] = 3.1
+                        row['coarse']['segmentation'] = 2.05
+                        console.train_step(row)
+                    console.close()
+                text = stream.getvalue()
+                self.assertEqual(text.count('[Train summary]'), 2)
+                for value in ('5 / 80000', '10 / 80000', '5 / 160', '10 / 160', 'Mean Loss (5)', '3.0000', '8.0000',
+                              'Final Loss', 'Coarse Loss', '2.0500', 'LR', 'GPU Peak', 'Step Mean', 'Train ETA'):
+                    self.assertIn(value, text)
+                self.assertNotIn('Gamma', text)
 
 
 if __name__ == '__main__': unittest.main()

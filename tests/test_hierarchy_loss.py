@@ -7,7 +7,7 @@ import torch
 from torch.nn import functional as F
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-import test_training as fixtures
+import support as fixtures
 from test_brain_tumor import Cases, config
 from organ_relation.losses import (JointLossResult, RegionJointLoss, RegionLossResult,
                                    hierarchy_violation, region_targets)

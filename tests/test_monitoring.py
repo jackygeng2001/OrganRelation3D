@@ -1,4 +1,4 @@
-"""Real TensorBoard event files and observer-neutral CPU training acceptance."""
+"""真实 TensorBoard 事件文件与控制台输出；观测层失败或开关不改变训练轨迹（CPU）。"""
 import contextlib
 import io
 import json
@@ -8,10 +8,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-import test_training as training_fixtures
+import support as training_fixtures
 from organ_relation.training.console import TrainingConsole, columns, duration
 from organ_relation.training.state import load_checkpoint, save_checkpoint, capture_rng
-from organ_relation.training.tensorboard import TensorBoardObserver, ORGAN_NAMES, scalar_values
+from organ_relation.training.tensorboard import TensorBoardObserver, scalar_values
 
 
 class Terminal(io.StringIO):
@@ -23,20 +23,28 @@ class Terminal(io.StringIO):
         return self.tty
 
 
+CASE = 'Brats18_CBICA_AAA_1'
+
+
+def branch(bce, dice):
+    return {'bce': bce, 'dice_loss': dice, 'segmentation': bce + dice}
+
+
 def train_row(step=1):
-    return dict(phase='train', global_step=step, epoch=step, total_epochs=100, total_steps=100,
-        case_id='amos_0109', total_loss=3.284, lr=3e-4, shape=[10, 11, 12],
-        coarse={'ce': 2., 'dice_loss': .8}, final={'ce': 1.5, 'dice_loss': .7},
-        soft_dice_per_organ=[.3] * 15, step_seconds=60.,
+    return dict(phase='train', mode='brats_regions', global_step=step, epoch=step, total_epochs=100, total_steps=100,
+        case_id=CASE, total_loss=3.284, lr=3e-4, shape=[10, 11, 12],
+        coarse=branch(.2, .8), final=branch(.15, .7), soft_dice_per_organ=[.3, .2, .1], step_seconds=60.,
         memory={'peak_allocated_bytes': 8 * 2**30, 'peak_reserved_bytes': 9 * 2**30},
         progress={'eta_seconds': 3600., 'rolling_seconds': 60.},
         diagnostics={'encoder': {'gradient_norm': .25, 'finite': True, 'update_norm': .01}})
 
 
 def validation_row(step=1, phase='train_monitor'):
-    return dict(phase=phase, global_step=step, epoch=step,
-        metrics={'mean_case_dice': .7, 'organs': [dict(label=i, mean_dice=.7 if i == 1 else None)
-                                                for i in range(1, 16)]})
+    case = {name: dict(bce=.1, dice_loss=.3, loss=.4, soft_dice=[.7, .6, .5]) for name in ('final', 'coarse')}
+    return dict(phase=phase, mode='brats_regions', global_step=step, epoch=step,
+        metrics={'mean_case_dice': .7, 'organs': [dict(label=i + 1, name=n, mean_dice=.7 if n == 'WT' else None)
+                                                for i, n in enumerate(('WT', 'TC', 'ET'))]},
+        region_diagnostic_cases={CASE: case})
 
 
 class MonitoringTests(unittest.TestCase):
@@ -49,12 +57,12 @@ class MonitoringTests(unittest.TestCase):
     def events(self, directory):
         return EventAccumulator(str(directory), size_guidance={'scalars': 0}).Reload()
 
-    def test_100_to_200_extension_exact_trajectory_rng_and_unique_tensorboard_steps(self):
-        options = dict(max_steps=200, checkpoint_every=25, diagnostics_every=25, validation_every=25)
+    def test_20_to_40_extension_exact_trajectory_rng_and_unique_tensorboard_steps(self):
+        options = dict(max_steps=40, checkpoint_every=5, diagnostics_every=5, validation_every=5)
         whole = self.fixture.trainer(self.root / 'whole', validation=True, options=options)
         self.fixture.quiet_run(whole)
         expected = load_checkpoint(whole.run_dir / 'last.ckpt', whole.identity)
-        options['max_steps'] = 100
+        options['max_steps'] = 20
         first = self.fixture.trainer(self.root / 'extended', validation=True, options=options)
         first.board = TensorBoardObserver(first.run_dir)
         self.fixture.quiet_run(first)
@@ -66,10 +74,10 @@ class MonitoringTests(unittest.TestCase):
         original_run = (first.run_dir / 'run.json').read_bytes()
         original_log = first.log.path.read_bytes()
         resumed = self.fixture.trainer(first.run_dir, resume=True, validation=True,
-                                       options=options, extend_to=200)
+                                       options=options, extend_to=40)
         self.assertEqual(resumed.run_id, first.run_id)
-        self.assertEqual(resumed.total, 200)
-        self.assertEqual(resumed.options['max_steps'], 100)
+        self.assertEqual(resumed.total, 40)
+        self.assertEqual(resumed.options['max_steps'], 20)
         self.assertEqual(len(resumed.clock.samples), 0)
         self.fixture.assert_nested_equal(middle['model'], resumed.model.state_dict())
         self.fixture.assert_nested_equal(middle['optimizer'], resumed.optimizer.state_dict())
@@ -91,35 +99,35 @@ class MonitoringTests(unittest.TestCase):
                         'soft_dice_per_organ', 'metrics', 'diagnostics'):
                 self.assertEqual(a.get(key), b.get(key), key)
         training = [r for r in rows if r['phase'] == 'train']
-        self.assertEqual([r['global_step'] for r in training], list(range(1, 201)))
-        self.assertEqual(training[100]['total_steps'], 200)
-        self.assertEqual(training[100]['progress']['status'], 'warming up')
-        self.assertAlmostEqual(training[105]['progress']['eta_seconds'],
-                               training[105]['progress']['rolling_seconds'] * 94)
+        self.assertEqual([r['global_step'] for r in training], list(range(1, 41)))
+        self.assertEqual(training[20]['total_steps'], 40)
+        self.assertEqual(training[20]['progress']['status'], 'warming up')
+        self.assertAlmostEqual(training[25]['progress']['eta_seconds'],
+                               training[25]['progress']['rolling_seconds'] * 14)
         self.assertEqual(training[-1]['progress']['eta_seconds'], 0)
         history = actual['horizon']
-        self.assertEqual((history['original_total_steps'], history['total_steps']), (100, 200))
+        self.assertEqual((history['original_total_steps'], history['total_steps']), (20, 40))
         self.assertEqual(len(history['extensions']), 1)
         event = history['extensions'][0]
-        self.assertEqual((event['at_global_step'], event['previous_total_steps'], event['total_steps']), (100, 100, 200))
+        self.assertEqual((event['at_global_step'], event['previous_total_steps'], event['total_steps']), (20, 20, 40))
         self.assertEqual(event['previous_provenance'], first.identity['provenance'])
         self.assertEqual(event['execution_provenance'], resumed.identity['provenance'])
         self.assertEqual(len(event['parent_checkpoint_sha256']), 64)
         self.assertFalse(resumed.board.failed)
         events = self.events(resumed.board.directory)
-        self.assertEqual([e.step for e in events.Scalars('Train/Total_Loss')], list(range(1, 201)))
-        self.assertEqual([e.step for e in events.Scalars('Monitor/HardDice_Mean')], list(range(25, 201, 25)))
+        self.assertEqual([e.step for e in events.Scalars('Train/Total_Loss')], list(range(1, 41)))
+        self.assertEqual([e.step for e in events.Scalars('Monitor/HardDice_Mean')], list(range(5, 41, 5)))
 
     def start_console(self, stream, *, resume=False, cases=1):
         console = TrainingConsole(stream=stream)
-        identity = dict(model={'backbone': {'channels': [8, 16, 32]}},
-                        preprocessing={'candidate': 'B', 'spacing_candidates': {'B': [2, 2, 3]}},
+        identity = dict(model=training_fixtures.config()['model'],
+                        preprocessing={'spatial_crop': {'kind': 'nonzero_bbox', 'margin': 0, 'multiple_of': 8}},
                         optimizer={'name': 'AdamW', 'lr': 3e-4},
                         environment={'gpu_name': 'RX 7900 XTX'}, runtime={'dtype': 'float32'})
         options = training_fixtures.config()['training']
-        console.start(identity, options, ['amos_0109'] * cases, 100, 100,
+        console.start(identity, options, [CASE] * cases, 100, 100,
                       dict(global_step=25 if resume else 0, epoch=25 if resume else 0),
-                      resume='run/last.ckpt' if resume else None, next_case='amos_0109')
+                      resume='run/last.ckpt' if resume else None, next_case=CASE)
         return console
 
     def test_two_columns_have_fixed_colons_and_values(self):
@@ -148,12 +156,12 @@ class MonitoringTests(unittest.TestCase):
         console = self.start_console(stream, resume=True)
         console.train_step(train_row(26))
         console.validation_start(1, 'train_monitor')
-        console.validation_case('amos_0109', {'eta_seconds': 0})
+        console.validation_case(CASE, {'eta_seconds': 0})
         console.validation_end()
         console.validation_summary(validation_row(26))
         console.close()
         text = stream.getvalue()
-        for value in ('[RESUME]', '25 / 100', 'Next Case  : amos_0109', 'Monitor Dice', '0.7000'):
+        for value in ('[RESUME]', '25 / 100', f'Next Case  : {CASE}', 'Monitor Dice', '0.7000', 'nonzero_bbox'):
             self.assertIn(value, text)
         for value in ('Val Dice', 'gradient_norm', 'pending_validation', 'eta_seconds', "{'", '\r'):
             self.assertNotIn(value, text)
@@ -187,7 +195,7 @@ class MonitoringTests(unittest.TestCase):
                                 (5160, '1h 26m'), (165600, '1d 22h')]:
             self.assertEqual(duration(value), expected)
 
-    def test_real_tensorboard_scalar_mapping_and_stable_organ_names(self):
+    def test_real_tensorboard_scalar_mapping_uses_region_names(self):
         observer = TensorBoardObserver(self.root)
         observer.start(0, self.root / 'unused')
         observer.record(train_row())
@@ -195,24 +203,22 @@ class MonitoringTests(unittest.TestCase):
         observer.record(validation_row(2, 'internal_dev'))
         observer.close()
         events = self.events(observer.directory)
-        expected = scalar_values(train_row())
-        for tag, value in expected.items():
-            self.assertAlmostEqual(events.Scalars(tag)[0].value, value, places=6)
-        self.assertEqual(events.Scalars('GradNorm/Encoder')[0].value, .25)
+        for row in (train_row(), validation_row(), validation_row(2, 'internal_dev')):
+            for tag, value in scalar_values(row).items():
+                self.assertAlmostEqual(events.Scalars(tag)[0].value, value, places=6)
+        self.assertAlmostEqual(events.Scalars('Train/final/bce')[0].value, .15)
         self.assertAlmostEqual(events.Scalars('Monitor/HardDice_Mean')[0].value, .7)
-        self.assertEqual(len(events.Scalars('MonitorDice/Spleen')), 1)
-        self.assertNotIn('MonitorDice/RightKidney', events.Tags()['scalars'])
-        self.assertEqual(len(ORGAN_NAMES), 15)
-        self.assertEqual(ORGAN_NAMES[10:12], ('RightAdrenal', 'LeftAdrenal'))
-        self.assertEqual(ORGAN_NAMES[14], 'ProstateOrUterus')
+        self.assertEqual(len(events.Scalars('Monitor/HardDice/WT')), 1)
+        self.assertNotIn('Monitor/HardDice/TC', events.Tags()['scalars'])  # 全为空的区域不写入
+        self.assertEqual(len(events.Scalars('Val/HardDice/WT')), 1)
+        self.assertTrue(all(name in ('WT', 'TC', 'ET') for tag in events.Tags()['scalars'] if 'SoftDice/' in tag
+                            for name in [tag.rsplit('/', 1)[1]]))
         for kind in ('images', 'histograms', 'tensors'):
             self.assertFalse(events.Tags()[kind])
 
-    def test_train_rows_do_not_emit_per_organ_hard_dice(self):
+    def test_train_rows_do_not_emit_validation_tags(self):
         tags = scalar_values(train_row())
-        self.assertFalse(any('Monitor' in t or 'Val' in t for t in tags))
-        row = train_row(); row['memory'] = dict(peak_allocated_bytes=None, peak_reserved_bytes=None)
-        self.assertFalse(any('GPU_Peak' in t for t in scalar_values(row)))
+        self.assertFalse(any(t.startswith(('Monitor/', 'Val/')) for t in tags))
 
     def test_purge_replays_committed_k_removes_future_and_uncommitted_same_step_val(self):
         log = self.root / 'metrics.jsonl'
@@ -383,14 +389,6 @@ class MonitoringTests(unittest.TestCase):
         writer.close.assert_called_once()
         self.fixture.assert_nested_equal(before, capture_rng(trainer.device))
         self.assertFalse((trainer.run_dir / 'last.ckpt').exists())
-
-    def test_overfit_config_only_changes_run_length_and_monitor_save_frequency(self):
-        path = training_fixtures.ROOT / 'configs/train_single_case_overfit.json'
-        actual = json.loads(path.read_text())
-        expected = training_fixtures.config()
-        expected['purpose'] = actual['purpose']
-        expected['training'].update(max_steps=100, checkpoint_every=25, validation_every=25, diagnostics_every=25)
-        self.assertEqual(actual, expected)
 
     def test_tensorboard_cli_imports_and_exposes_standard_event_loader(self):
         result = subprocess.run([sys.executable, '-B', '-m', 'tensorboard.main', '--help'],

@@ -1,4 +1,4 @@
-"""CPU acceptance for transactional training and independent case recovery."""
+"""训练引擎的事务性与可恢复性：精确续训、日志尾部回收、延长训练、checkpoint 校验、原子写入与逐病例验证记录。"""
 import contextlib
 import copy
 import importlib.util
@@ -6,105 +6,26 @@ import io
 import json
 from pathlib import Path
 import random
-import shutil
-import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src'))
 import numpy as np
 import torch
-from torch import nn
-from organ_relation.data.full_scan import FullScanSample
-from organ_relation.data.splits import (create_development, load_split, select_cases,
-                                       training_manifest, validate_artifact, write_split)
+
+import support
+from support import ROOT, RandomCases, config, training_options
 from organ_relation.evaluation.progress import CaseLedger
-from organ_relation.losses import JointLoss
-from organ_relation.metrics import hard_dice, summarize_dice
-from organ_relation.models.segmentor import SegmentorOutput
 from organ_relation.training.engine import Trainer, validate_options
 from organ_relation.training.progress import ProgressClock
 from organ_relation.training.state import (ScalarLog, atomic_bytes, atomic_json, capture_rng,
     digest, load_checkpoint, save_checkpoint, seed_all)
-from test_full_scan import synthetic_pair
 
 
-def config():
-    return json.loads((ROOT / 'configs/train_sanity.json').read_text())
+class TrainingTests(support.TrainingTests):
 
 
-class RandomCases(torch.utils.data.Dataset):
-    """Variable full volumes consume all three CPU RNGs to expose bad restore."""
-    def __len__(self):
-        return 3
-
-    def __getitem__(self, index):
-        shape = (2 + index, 3, 4)
-        image = torch.rand(1, *shape) + random.random() + float(np.random.random())
-        label = torch.arange(np.prod(shape)).reshape(shape).long() % 16
-        return FullScanSample(image, label, {})
 
 
-class TinyModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = nn.Conv3d(1, 3, 1)
-        self.coarse_head = nn.Conv3d(3, 16, 1)
-        self.decoder = nn.Conv3d(3, 16, 1)
-
-    def forward(self, image):
-        feature = torch.tanh(self.encoder(image))
-        return SegmentorOutput(self.coarse_head(feature), self.decoder(feature))
-
-
-class TrainingTests(unittest.TestCase):
-    def setUp(self):
-        torch.set_num_threads(1)
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-
-    def trainer(self, directory, *, resume=False, validation=False, options=None, identity=None, extend_to=None):
-        seed_all(712)
-        model = TinyModel().to(memory_format=torch.channels_last_3d)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0, foreach=False, fused=False)
-        opts = config()['training']
-        opts.update(max_steps=7, validation_every=2 if validation else 0)
-        if options:
-            opts.update(options)
-        ident = identity or dict(training=opts, model='tiny', optimizer='AdamW',
-                                 preprocessing='synthetic', provenance='test', data={'manifest_hash': 'test'})
-        dataset = RandomCases()
-        return Trainer(model, JointLoss(epsilon=1e-6, lambda_c=.5, align_corners=False),
-            optimizer, dataset, ['one', 'two', 'three'], device='cpu', options=opts,
-            identity=ident, run_dir=directory, validation_dataset=dataset if validation else None,
-            validation_case_ids=['one', 'two', 'three'] if validation else [],
-            resume=directory / 'last.ckpt' if resume else None, extend_to=extend_to)
-
-    def quiet_run(self, trainer, **kwargs):
-        with contextlib.redirect_stdout(io.StringIO()):
-            return trainer.run(**kwargs)
-
-    def assert_nested_equal(self, a, b):
-        if torch.is_tensor(a):
-            self.assertTrue(torch.equal(a, b))
-        elif isinstance(a, np.ndarray):
-            np.testing.assert_array_equal(a, b)
-        elif isinstance(a, dict):
-            self.assertEqual(a.keys(), b.keys())
-            for k in a:
-                self.assert_nested_equal(a[k], b[k])
-        elif isinstance(a, (list, tuple)):
-            self.assertEqual(len(a), len(b))
-            for x, y in zip(a, b):
-                self.assert_nested_equal(x, y)
-        else:
-            self.assertEqual(a, b)
-
-    def rows(self, directory):
-        return [json.loads(line) for line in (directory / 'metrics.jsonl').read_text().splitlines()]
 
     def compare_resume(self, k, validation=False):
         whole = self.trainer(self.root / 'whole', validation=validation)
@@ -205,7 +126,8 @@ class TrainingTests(unittest.TestCase):
                    ('runtime', {'device': 'changed'}), ('environment', {'torch': 'changed'})]
         for key, value in changes:
             identity = copy.deepcopy(trainer.identity); identity[key] = value
-            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            # 模型/损失被训练器入口的 BraTS 身份检查更早拒绝，其余字段由 checkpoint 身份比较拒绝。
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'identity mismatch|must match strict identity'):
                 self.trainer(directory, resume=True, options={'max_steps': 100}, identity=identity, extend_to=200)
         for key, value in [('max_steps', 200), ('max_epochs', 200), ('seed', 99),
                            ('memory_format', 'contiguous'), ('validation_every', 1)]:
@@ -296,59 +218,14 @@ class TrainingTests(unittest.TestCase):
         rows = self.rows(trainer.run_dir)
         self.assertEqual([r['global_step'] for r in rows if r['phase'] == 'train_monitor'], [2, 4, 6])
 
-    def test_extension_legacy_source_upgrade_is_narrow_and_normal_resume_stays_strict(self):
-        from organ_relation.training.extension import check_extension_identity, LEGACY_COMMIT
-        old = dict(provenance=dict(git=dict(commit=LEGACY_COMMIT, dirty=False),
-            source_hashes={'scripts/train.py': 'old', 'src/organ_relation/losses.py': 'frozen'}),
-            model='fixed', training={'max_steps': 100})
-        new = copy.deepcopy(old)
-        new['provenance']['git']['commit'] = 'new'
-        new['provenance']['source_hashes'].update({'scripts/train.py': 'new',
-            'src/organ_relation/training/extension.py': 'added'})
-        with patch('organ_relation.training.extension.LEGACY_SOURCES', digest(old['provenance']['source_hashes'])):
-            check_extension_identity(old, new)
-            for key in ('model', 'training'):
-                bad = copy.deepcopy(new); bad[key] = 'changed'
-                with self.assertRaisesRegex(ValueError, 'identity mismatch'):
-                    check_extension_identity(old, bad)
-            for path in ('src/organ_relation/losses.py', 'new_unreviewed.py'):
-                bad = copy.deepcopy(new); bad['provenance']['source_hashes'][path] = 'changed'
-                with self.assertRaisesRegex(ValueError, 'source mismatch'):
-                    check_extension_identity(old, bad)
-            bad = copy.deepcopy(new); bad['provenance']['git']['dirty'] = True
-            with self.assertRaisesRegex(ValueError, 'dirty checkout'):
-                check_extension_identity(old, bad)
-        trainer = self.trainer(self.root / 'run'); self.quiet_run(trainer, stop_after=1)
-        identity = copy.deepcopy(trainer.identity); identity['provenance'] = new['provenance']
-        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
-            load_checkpoint(trainer.run_dir / 'last.ckpt', identity)
-        with self.assertRaisesRegex(ValueError, 'provenance mismatch'):
-            load_checkpoint(trainer.run_dir / 'last.ckpt', identity, extension=True)
-
-        # A reviewed source upgrade keeps run.json/ledger identity anchored to
-        # the origin, while later ordinary resumes require the new provenance.
-        old_identity = copy.deepcopy(trainer.identity)
-        old_identity['provenance'] = old['provenance']
-        legacy = self.trainer(self.root / 'legacy', identity=old_identity)
-        self.quiet_run(legacy, stop_after=2)
-        original_run = (legacy.run_dir / 'run.json').read_bytes()
-        current_identity = copy.deepcopy(old_identity); current_identity['provenance'] = new['provenance']
-        with patch('organ_relation.training.extension.LEGACY_SOURCES', digest(old['provenance']['source_hashes'])):
-            upgraded = self.trainer(legacy.run_dir, resume=True, identity=current_identity, extend_to=9)
-            self.quiet_run(upgraded, stop_after=1)
-        self.assertEqual((legacy.run_dir / 'run.json').read_bytes(), original_run)
-        normal = self.trainer(legacy.run_dir, resume=True, identity=current_identity)
-        self.assertEqual(normal.total, 9)
-        self.quiet_run(normal)
-        self.assertEqual(normal.state['global_step'], 9)
-        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
-            self.trainer(legacy.run_dir, resume=True, identity=old_identity)
 
     def test_extension_cli_requires_resume_before_loading_data(self):
-        spec = importlib.util.spec_from_file_location('extension_cli', ROOT / 'scripts/train.py')
+        spec = importlib.util.spec_from_file_location('extension_cli', ROOT / 'scripts/brats.py')
         cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
-        with patch.object(cli, 'read_json', side_effect=AssertionError('config loaded')), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(['--config', 'unused', '--data-root', 'unused', '--extend-to', '200']), 2)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):  # 配置文件不存在：若先读配置会报另一种错误
+            self.assertEqual(cli.main(['train', '--config', 'unused', '--extend-to', '200']), 2)
+        self.assertIn('--extend-to requires training --resume', stderr.getvalue())
 
     def test_incomplete_corrupt_and_invalid_progress_checkpoints_rejected(self):
         trainer = self.trainer(self.root / 'run')
@@ -452,31 +329,7 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(train.estimate(0, 0)['eta_seconds'], 0)
         self.assertEqual(ProgressClock().estimate(0)['status'], 'complete')
 
-    def test_hard_dice_empty_and_false_positive_rules(self):
-        gt = torch.tensor([1, 1, 2, 0, 0]).reshape(1, 1, 5)
-        pred = torch.tensor([1, 0, 0, 3, 0]).reshape_as(gt)
-        result = hard_dice(pred, gt)
-        self.assertAlmostEqual(result['organs'][0]['dice'], 2/3)
-        self.assertEqual(result['organs'][1]['dice'], 0)
-        self.assertEqual(result['organs'][2]['dice'], 0)
-        self.assertEqual(result['organs'][2]['false_positive_voxels'], 1)
-        self.assertIsNone(result['organs'][3]['dice'])
-        self.assertEqual(len(result['organs']), 15)
-        self.assertAlmostEqual(result['mean_dice'], 2/9)
 
-    def test_metrics_are_per_case_not_volume_weighted_and_no_test_gt_assumption(self):
-        one = torch.ones(1, 1, 1, dtype=torch.int64)
-        many = torch.ones(1, 1, 100, dtype=torch.int64)
-        summary = summarize_dice([hard_dice(one, one), hard_dice(torch.zeros_like(many), many)])
-        self.assertEqual(summary['mean_case_dice'], .5)
-        self.assertEqual(summary['organs'][0]['valid_cases'], 2)
-        self.assertEqual(summary['organs'][1]['valid_cases'], 0)
-        self.assertIsNone(summary['nsd'])
-        with self.assertRaisesRegex(ValueError, 'requires a label'):
-            hard_dice(one, None)
-        for bad in (one.float(), one * 16, one[0]):
-            with self.assertRaises(ValueError):
-                hard_dice(bad, one)
 
     def test_case_ledger_valid_missing_corrupt_and_changed_data(self):
         ledger = CaseLedger(self.root / 'eval', {'model': 'a', 'preprocessing': 'B', 'manifest': 'x'})
@@ -510,102 +363,9 @@ class TrainingTests(unittest.TestCase):
         self.assertIsNone(ledger.read('test-image-only', {'label': None}))
         restarted = CaseLedger(ledger.directory, ledger.identity)
         self.assertIsNone(restarted.read('test-image-only', {'label': None}))
-        with patch('organ_relation.metrics.hard_dice', side_effect=AssertionError('no GT')):
+        with patch('organ_relation.training.brain_tumor.region_dice', side_effect=AssertionError('no GT')):
             restarted.commit('test-image-only', {'label': None}, {'prediction': [1, 2, 0]})
             self.assertEqual(restarted.read('test-image-only', {'label': None})['prediction'], [1, 2, 0])
-
-    def manifest(self):
-        records = [dict(case_id=f'amos_{i:04}', image=f'imagesTr/amos_{i:04}.nii.gz',
-            label=f'labelsTr/amos_{i:04}.nii.gz', original_filename=f'amos_{i:04}.nii.gz',
-            source='official_training', modality='CT', verified=True) for i in range(1, 201)]
-        for source, case, folder, label in [('official_validation', 'va', 'imagesVa', 'labelsVa/va.nii.gz'),
-                                           ('official_test', 'ts', 'imagesTs', None)]:
-            records.append(dict(case_id=case, image=f'{folder}/{case}.nii.gz', label=label,
-                original_filename=f'{case}.nii.gz', source=source, modality='CT', verified=True))
-        return {'records': records, 'source_manifest_sha256': 'test'}
-
-    def test_frozen_split_repeatability_hash_and_no_overwrite(self):
-        before = capture_rng(torch.device('cpu'))
-        a = create_development(self.manifest(), 17, 160)
-        self.assert_nested_equal(before, capture_rng(torch.device('cpu')))
-        self.assertEqual(a, create_development(self.manifest(), 17, 160))
-        self.assertEqual((len(a['development']['train']), len(a['development']['internal_dev'])), (160, 40))
-        path = self.root / 'split.json'; write_split(path, a)
-        self.assertEqual(load_split(path), a)
-        with self.assertRaisesRegex(ValueError, 'overwrite'):
-            write_split(path, a)
-        a['development']['seed'] += 1
-        with self.assertRaisesRegex(ValueError, 'hash'):
-            validate_artifact(a)
-
-    def test_roles_prevent_leakage_and_final_requires_full_pool(self):
-        artifact = create_development(self.manifest(), 17, 160)
-        self.assertEqual(len(select_cases(artifact, 'final_train')), 200)
-        self.assertEqual(select_cases(artifact, 'official_test')[0]['label'], None)
-        self.assertEqual(select_cases(artifact, 'official_validation')[0]['case_id'], 'va')
-        for case in ('va', 'ts', artifact['development']['internal_dev'][0]):
-            with self.assertRaisesRegex(ValueError, 'violates role'):
-                select_cases(artifact, 'development_train', [case])
-        with self.assertRaisesRegex(ValueError, 'complete official'):
-            select_cases(artifact, 'final_train', limit=2)
-
-    def test_split_rejects_overlap_unverified_test_labels_and_absolute_paths(self):
-        artifact = create_development(self.manifest(), 17, 160)
-        for key, value in [('verified', False), ('image', 'C:/data/image.nii.gz'), ('modality', 'MRI')]:
-            bad = copy.deepcopy(artifact); bad['manifest']['records'][0][key] = value
-            with self.assertRaises(ValueError):
-                validate_artifact(bad)
-        bad = copy.deepcopy(artifact); bad['manifest']['records'][-1]['label'] = 'fake.nii.gz'
-        with self.assertRaisesRegex(ValueError, 'image-only'):
-            validate_artifact(bad)
-        bad = copy.deepcopy(artifact); bad['development']['internal_dev'][0] = bad['development']['train'][0]
-        with self.assertRaisesRegex(ValueError, 'partition'):
-            validate_artifact(bad)
-
-    def test_cli_synthetic_nifti_complete_segmentor_loss_update_and_resume(self):
-        spec = importlib.util.spec_from_file_location('training_cli', ROOT / 'scripts/train.py')
-        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
-        data = self.root / 'data'; data.mkdir(); synthetic_pair(data, shape=(12, 12, 12))
-        for folder in ('imagesTr', 'labelsTr'):
-            shutil.copyfile(data / folder / 'amos_0001.nii.gz', data / folder / 'amos_0002.nii.gz')
-        atomic_json(data / 'dataset.json', {'training': [dict(image=f'imagesTr/amos_{i:04}.nii.gz',
-                    label=f'labelsTr/amos_{i:04}.nii.gz') for i in (1, 2)]})
-        selection = json.loads((ROOT / 'configs/ct_stats.json').read_text())
-        artifact = create_development(training_manifest(data, selection), 17, 1)
-        split_path = self.root / 'split.json'; write_split(split_path, artifact)
-        cfg = config()
-        for key, name in [('model_config', 'segmentor_micro.json'), ('baseline_config', 'baseline.json'),
-                          ('selection_config', 'ct_stats.json')]:
-            cfg[key] = str(ROOT / 'configs' / name)
-        cfg['runtime'].update(backend='cpu', device='cpu', cpu_threads=1)
-        cfg['training'].update(max_steps=2, validation_every=1)
-        cfg_path = self.root / 'config.json'; atomic_json(cfg_path, cfg)
-        run = self.root / 'run'
-        argv = ['--config', str(cfg_path), '--data-root', str(data), '--split', str(split_path),
-                '--run-dir', str(run), '--cpu-synthetic']
-        originals = {p: p.read_bytes() for p in data.rglob('*') if p.is_file()}
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(argv + ['--stop-after', '1']), 0)
-            self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt')]), 0)
-        rows = [r for r in self.rows(run) if r['phase'] == 'train']
-        self.assertEqual([r['global_step'] for r in rows], [1, 2])
-        self.assertEqual(rows[0]['shape'], [12, 9, 9])
-        for row in rows:
-            self.assertEqual(set(row['diagnostics']), {'encoder', 'coarse_head', 'relation', 'node_to_space', 'fusion', 'decoder'})
-            for name, stats in row['diagnostics'].items():
-                self.assertTrue(stats['finite'], name)
-                self.assertGreater(stats['gradient_norm'], 0, name)
-                self.assertGreater(stats['update_norm'], 0, name)
-        for path, raw in originals.items():
-            self.assertEqual(path.read_bytes(), raw)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(argv + ['--resume', str(run / 'last.ckpt'), '--extend-to', '3']), 0)
-        rows = [r for r in self.rows(run) if r['phase'] == 'train']
-        self.assertEqual([r['global_step'] for r in rows], [1, 2, 3])
-        self.assertEqual(rows[-1]['total_steps'], 3)
-        self.assertEqual(json.loads(cfg_path.read_text())['training']['max_steps'], 2)
-        with patch.object(cli, 'git_state', return_value={'commit': None}), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(argv), 2)
 
 
 if __name__ == '__main__':

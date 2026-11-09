@@ -51,13 +51,13 @@ class ConfigTests(unittest.TestCase):
                 BrainTumorConfig(**dict(cfg, variant=bad))
 
     def test_each_ablation_config_differs_from_the_main_arm_in_one_item(self):
-        main = json.loads((fixtures.ROOT / 'configs/train_brats_year_fold_bbox_amp_bf16.json').read_text())
+        main = json.loads((fixtures.ROOT / 'configs/experiments/main.json').read_text())
         science = lambda c: {k: v for k, v in c.items() if k != 'status' and not k.endswith('_note')}
         expected = {'no_relation': ('model', 'variant', 'no_relation'), 'drf_backbone': ('model', 'variant', 'drf_backbone'),
                     'unet': ('model', 'variant', 'unet'), 'no_hier': ('loss', 'lambda_hier', 0.0)}
         for name, (section, key, value) in expected.items():
             with self.subTest(arm=name):
-                arm = json.loads((fixtures.ROOT / f'configs/train_brats_year_fold_bbox_amp_bf16_{name}.json').read_text())
+                arm = json.loads((fixtures.ROOT / f'configs/experiments/{name}.json').read_text())
                 wanted = copy.deepcopy(science(main))
                 wanted[section][key] = value
                 self.assertEqual(science(arm), wanted)

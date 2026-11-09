@@ -32,7 +32,7 @@ from organ_relation.training.state import seed_all,digest,load_checkpoint
 
 
 def config():
-    return json.loads((fixtures.ROOT/'configs/brats_regions.json').read_text())
+    return json.loads((fixtures.ROOT/'configs/development/implementation_check.json').read_text())
 
 
 class Cases(torch.utils.data.Dataset):

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "mode": "brats_regions",
-  "status": "year_specific_fold_protocol_brain_box_crop_hierarchy_loss_bf16_mixed_precision_not_final_paper_protocol_ablation_unet",
+  "status": "year_specific_fold_protocol_brain_box_crop_hierarchy_loss_bf16_conv_not_final_paper_protocol",
   "model": {
     "relation_channels": 64,
     "rounds": 2,
@@ -12,11 +12,9 @@
     "conv_bias": true,
     "coarse_bias": true,
     "fusion_bias": true,
-    "align_corners": false,
-    "variant": "unet"
+    "align_corners": false
   },
   "model_choice_note": "Document fixes encoder 32/64/128/256, GN8, LeakyReLU .01, decoder d=32/Cg=32/MLP64, eta=1e-3. User-approved 2026-11-06 for this box protocol (the document gives no values): relation MLP width Cr=64 (=C/4; its input is 2C+7=519), K=2 rounds (three fully connected nodes exchange directly in one round), deep writeback da=Cg=32 to match the decoder's d=32/Cg=32. 8,387,120 parameters. epsilon=1e-6 and gamma_init=0.1 keep the development values; GRU retains tested explicit reset-before-linear equations. Development choices, not tuned.",
-  "ablation_note": "User-approved 2026-11-09 tier-1 ablation of train_brats_year_fold_bbox_amp_bf16.json: identical data, folds, crop, augmentation, bf16 mixed precision, optimizer, seed, epochs and early stopping; only the item below differs. Development comparison, not a frozen paper protocol. model.variant=unet: as drf_backbone, but each encoder stage is a stride-2 unit followed by one ordinary 3x3x3 unit (classic two-conv U-Net level) instead of the dual-receptive-field block. Coarse head kept as auxiliary deep supervision only; identical objective. Node/relation fields are unused. 5,305,350 parameters.",
   "loss": {
     "epsilon": 1e-06,
     "lambda_c": 0.5,
@@ -68,7 +66,7 @@
       "min_delta": 0.001,
       "monitor": "dev_mean_region_hard_dice"
     },
-    "mixed_precision": "bfloat16",
+    "convolution_compute_dtype": "bfloat16",
     "augmentation": {
       "kind": "flip_intensity_v1",
       "flip_probability": 0.5,
@@ -79,6 +77,6 @@
   "protocol_note": "Whole-brain-box year-specific patient folds, no stratification; full internal-dev every epoch. Cap 500 epochs, minimum 20, patience 20 epochs, accumulated Dice improvement >=0.001. Development choices, not an optimal/frozen paper protocol; official unlabeled validation not used for early stopping.",
   "preprocessing_note": "User-approved 2026-11-05: one whole-brain forward per case on the image-only box of nonzero voxels across T1/T1ce/T2/FLAIR, grown to a multiple of 8 inside the volume. Z-score statistics are unchanged (all nonzero voxels lie inside). Loading stops if any labeled tumor voxel would fall outside; the BraTS2018 training partition passed this audit (285/285). Not a patch or sliding window. Node c/s are relative to the box; BCE averages over box voxels.",
   "loss_note": "Hierarchy revision (层级一致性修订版.docx, eqs. 32-33): L = Lseg(final) + lambda_c*Lseg(coarse) + lambda_hier*Lhier(final). The document fixes lambda_hier >= 0 but gives no value; 1.0 is the development value the user agreed to on 2026-11-05; it is not tuned or stated in the paper.",
-  "precision_note": "Comparison arm for whole-network mixed precision: encoder/decoder volumes, their 3x3x3 convolutions and pointwise projections run in bfloat16 with FP32 accumulation (each output rounded once). FP32: parameters and AdamW, GroupNorm statistics and normalization arithmetic, coarse head, Space-to-Node, relation rounds, deep writeback/fusion, scale weights, decoder score bias and gates, and the logits given to the loss. No loss scaling (bfloat16 keeps the FP32 exponent range). Requires --convolution-backend depth_sliced. Identical to train_brats_year_fold_bbox.json otherwise.",
+  "precision_note": "Comparison arm for reduced precision: only the depth_sliced 3x3x3 kernels multiply in bfloat16; outputs, gradients, parameters, GroupNorm, pointwise projections, nodes/relations, decoder attention and the loss stay FP32. Requires --convolution-backend depth_sliced. Measured on 7900 XTX: training step 3.47 s vs 3.64 s FP32 (about 5% faster). Identical to development/year_fold_bbox_fp32.json otherwise.",
   "augmentation_note": "User-approved 2026-11-06: light training-only augmentation, training cases only (dev/inference never). Each spatial axis mirrored with p=0.5 (image and label together); per modality, nonzero voxels scaled by U(0.9,1.1) and shifted by U(-0.1,0.1) z-score units, zero voxels stay zero. Draws are seeded by (seed, global step): exact on resume, no other RNG consumed, logged per step. No rotation/elastic/noise. Development choice."
 }

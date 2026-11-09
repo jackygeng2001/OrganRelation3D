@@ -26,7 +26,7 @@ from organ_relation.training.state import seed_all
 
 def config():
     """实现检查配置（小模型宽度），只用于 CPU 测试。"""
-    return json.loads((ROOT / 'configs/brats_regions.json').read_text())
+    return json.loads((ROOT / 'configs/development/implementation_check.json').read_text())
 
 
 def training_options(**changes):

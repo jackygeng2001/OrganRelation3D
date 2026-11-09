@@ -21,7 +21,7 @@ CROP = dict(kind='nonzero_bbox', margin=0, multiple_of=4)
 
 
 def preprocessing(**extra):
-    base = json.loads((fixtures.ROOT / 'configs/brats_regions.json').read_text())['preprocessing']
+    base = json.loads((fixtures.ROOT / 'configs/development/implementation_check.json').read_text())['preprocessing']
     return dict(base, **extra)
 
 

@@ -46,7 +46,7 @@ class DiagnoseTests(unittest.TestCase):
         json.dumps(empty,allow_nan=False)
 
     def fixture(self):
-        cfg=json.loads((ROOT/'configs/brats_regions.json').read_text())
+        cfg=json.loads((ROOT/'configs/development/implementation_check.json').read_text())
         source=self.root/'data';case='BraTS-GLI-00000-000';folder=source/case;folder.mkdir(parents=True)
         shape=(9,7,5)
         for role in ('t1n','t1c','t2w','t2f','seg'):

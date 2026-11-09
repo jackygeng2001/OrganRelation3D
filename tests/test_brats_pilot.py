@@ -29,7 +29,7 @@ class BraTSPilotTests(unittest.TestCase):
     def setUp(self):
         self.fixture = fixtures.TrainingTests();self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.cfg = json.loads((fixtures.ROOT/'configs/train_brats_patient_pilot.json').read_text())
+        self.cfg = json.loads((fixtures.ROOT/'configs/development/patient_pilot.json').read_text())
         self.manifest = dict(cohort='brats2023_gli', source='read-only.zip', records=[
             dict(case_id=f'case-{p}-{t}', subject_id=f'patient-{p}', files={'seg':'unopened'})
             for p in range(8) for t in range(2)])
@@ -74,7 +74,7 @@ class BraTSPilotTests(unittest.TestCase):
             make_pilot_partition(dict(self.manifest, cohort='brats2024_gli_post'), **self.kwargs)
 
     def test_config_and_training_plan_preserve_science_and_full_source_identity(self):
-        original = json.loads((fixtures.ROOT/'configs/train_brats_single_case_overfit.json').read_text())
+        original = json.loads((fixtures.ROOT/'configs/development/single_case_overfit.json').read_text())
         for key in original.keys()-{'training','status'}:
             self.assertEqual(original[key], self.cfg[key])
         self.assertEqual(self.cfg['training'], dict(original['training'],

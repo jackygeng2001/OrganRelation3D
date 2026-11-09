@@ -36,7 +36,7 @@ class FixedDevCases(Cases):
 class BraTSFoldTests(unittest.TestCase):
     def setUp(self):
         self.f = fixtures.TrainingTests(); self.f.setUp(); self.addCleanup(self.f.doCleanups)
-        self.cfg = json.loads((fixtures.ROOT/'configs/train_brats_year_fold.json').read_text())
+        self.cfg = json.loads((fixtures.ROOT/'configs/development/year_fold_fp32.json').read_text())
 
     def source(self, extension='.nii', alias=False):
         folder=self.f.root/('raw'+extension); folder.mkdir()
@@ -99,7 +99,7 @@ class BraTSFoldTests(unittest.TestCase):
             self.assertEqual(cli.main(args),2);self.assertEqual(before,[p.read_bytes() for p in sorted(out.iterdir())])
 
     def test_config_science_unchanged_and_epoch_horizon_is_explicit(self):
-        pilot=json.loads((fixtures.ROOT/'configs/train_brats_patient_pilot.json').read_text())
+        pilot=json.loads((fixtures.ROOT/'configs/development/patient_pilot.json').read_text())
         for key in ('model','loss','threshold','preprocessing','optimizer'):self.assertEqual(self.cfg[key],pilot[key])
         self.assertEqual(self.cfg['training']['max_epochs'],500)
         m=dict(cohort='brats2018',records=[dict(case_id=str(i),subject_id=str(i)) for i in range(5)])

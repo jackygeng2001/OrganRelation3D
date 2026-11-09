@@ -30,7 +30,7 @@ class BraTSOverfitTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         spec = importlib.util.spec_from_file_location('overfit_cli',fixtures.ROOT/'scripts/brats.py')
         self.cli = importlib.util.module_from_spec(spec);spec.loader.exec_module(self.cli)
-        self.cfg = json.loads((fixtures.ROOT/'configs/train_brats_single_case_overfit.json').read_text())
+        self.cfg = json.loads((fixtures.ROOT/'configs/development/single_case_overfit.json').read_text())
         self.manifest = dict(records=[dict(case_id='one',subject_id='patient1'),
                                      dict(case_id='two',subject_id='patient1'),
                                      dict(case_id='three',subject_id='patient2')])
@@ -38,7 +38,7 @@ class BraTSOverfitTests(unittest.TestCase):
                                     run_dir=self.fixture.root/'run',max_steps=100)
 
     def test_config_keeps_scientific_settings_and_explicit_monitor_schedule(self):
-        original = json.loads((fixtures.ROOT/'configs/brats_regions.json').read_text())
+        original = json.loads((fixtures.ROOT/'configs/development/implementation_check.json').read_text())
         for key in ('model','loss','preprocessing','optimizer','threshold','model_choice_note'):
             self.assertEqual(original[key],self.cfg[key])
         expected = dict(original['training'],diagnostics_every=5,validation_role='train_monitor',
@@ -71,7 +71,7 @@ class BraTSOverfitTests(unittest.TestCase):
                 self.cli.training_plan(self.args,self.manifest,cfg)
 
     def test_train_still_requires_exhaustive_patient_disjoint_split(self):
-        cfg = json.loads((fixtures.ROOT/'configs/brats_regions.json').read_text())
+        cfg = json.loads((fixtures.ROOT/'configs/development/implementation_check.json').read_text())
         args = copy.copy(self.args);args.action='train'
         with self.assertRaises(ValueError):
             self.cli.training_plan(args,self.manifest,cfg)

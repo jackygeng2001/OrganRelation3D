@@ -18,7 +18,7 @@ CROP = dict(kind='nonzero_bbox', margin=0, multiple_of=1)
 
 
 def preprocessing():
-    return json.loads((fixtures.ROOT / 'configs/brats_regions.json').read_text())['preprocessing']
+    return json.loads((fixtures.ROOT / 'configs/development/implementation_check.json').read_text())['preprocessing']
 
 
 class BoxTests(unittest.TestCase):

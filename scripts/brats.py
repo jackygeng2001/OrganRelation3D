@@ -15,7 +15,7 @@ sys.path.insert(0,str(ROOT/'src'))
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=('inspect','check','overfit','train'))
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/brats_regions.json')
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/development/implementation_check.json')
     parser.add_argument('--source',type=Path,help='One cohort archive or extracted directory, read-only')
     parser.add_argument('--source-partition', choices=('all','training'), default='all',
                         help='Explicit legacy training subtree; excludes official unlabeled validation')

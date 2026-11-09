@@ -1,232 +1,167 @@
-# OrganRelation3D
+# OrganRelation3D：基于动态区域关系推理的脑肿瘤多标签分割
 
-当前方向：完整四模态 MRI 的脑肿瘤 WT/TC/ET 多标签分割，依据《脑肿瘤分割方法_修订版.docx》及其 2026-11-05 层级一致性修订版（只新增损失式 32–33，见 METHOD_SPEC）。仓库和 Python 包名 `organ_relation` 保留。
+**简体中文** | English（待补充）
 
-新的双感受野编码器 → 三节点动态关系 → 深层残差回写 → 关系尺度自适应解码器。三个区域独立 sigmoid，无标签参与建图，完整 volume 一次前向。**当前完成代码与 CPU 验证，尚未验证完整 MRI 在 AMD 24GB 上的显存或训练效果。**
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-%23EE4C2C.svg?logo=PyTorch&logoColor=white)](https://pytorch.org/)
+![Dataset](https://img.shields.io/badge/Dataset-BraTS%202018-success)
+![Backend](https://img.shields.io/badge/GPU-ROCm%20%7C%20CUDA-orange)
 
-- [当前方法、公式及待冻结选项](METHOD_SPEC.md)
-- [开发约束](AGENTS.md)
-- [历史 AMOS 使用说明](docs/legacy_amos_usage.md) / [历史方法](docs/legacy_amos_method.md)
+## 项目简介
 
-## 代码入口
+本项目研究多模态 MRI 脑肿瘤分割中的**区域关系建模**。BraTS 要求同时分割三个相互嵌套的区域：全肿瘤（WT）、肿瘤核心（TC）和增强肿瘤（ET）。多数方法把它们当成三个独立的输出；本方法则把三个区域各自表示成一个"节点"，让节点之间通过动态学习的有向边交换信息，再把关系推理的结果写回特征图并指导解码。
 
-| 路径 | 职责 |
-|---|---|
-| `src/organ_relation/models/brain_tumor.py` | 新编码器、完整模型、关系尺度解码器 |
-| `src/organ_relation/models/{coarse_head,space_to_node,dynamic_relation,node_to_space,residual_fusion}.py` | 复用的关系模块，旧默认保留 |
-| `src/organ_relation/losses.py` | 新 RegionJointLoss 与历史损失隔离 |
-| `src/organ_relation/data/brats.py` | 四模态完整 MRI、显式标签语义、患者分组检查 |
-| `src/organ_relation/training/brain_tumor.py` | 三重叠区域监测与 TensorBoard 标量 |
-| `scripts/brats.py` | inspect / 无更新 check / 单病例 overfit / 受控 train |
-| `configs/brats_regions.json` | 显式开发配置，不是正式实验方案 |
+模型以 T1、T1ce、T2、FLAIR 四个模态为输入，**整个脑体积一次前向**（不切 patch、不滑窗），输出三个可重叠的区域概率。代码完全基于标准 PyTorch 实现，同时支持 AMD ROCm 与 NVIDIA CUDA。
 
-新方法固定编码器 32/64/128/256、GN8/LeakyReLU；实现检查配置下共 8,330,296 参数，深层 Cr/K/da/Cg=8/2/4/6 沿用工程值；整脑外接框协议配置（`train_brats_year_fold_bbox*.json`）改用 2026-11-06 用户批准的 64/2/32/32，共 8,387,120 参数。均为文档未写死的开发选择，详见 METHOD_SPEC。外接框协议配置另开启轻量训练增强 `training.augmentation`（三轴随机翻转 + 各模态非零体素亮度缩放/偏移，仅训练病例，续训逐步复现）。没有替换为 micro 模型。
+**当前进度（2026 年 11 月）**：BraTS2018 训练集 285 例的五折交叉验证主实验已完成，五折平均 Dice 为 **0.814**（WT 0.895 / TC 0.837 / ET 0.709）。第一档消融与基线实验（去掉关系推理、去掉层级一致性损失、双感受野主干、3D U-Net）正在进行。
 
-## 环境与 CPU 验证
+## 亮点
 
-使用已有 `organrelation3d` 环境，不安装或替换 PyTorch/ROCm/NumPy。新模型依赖现有 torch/NumPy/NiBabel；TensorBoard/tqdm 用于原训练引擎。旧 MONAI 回归仍依赖既有 MONAI。跨设备说明见 [environments](environments/amd-rocm.md)。
+- **区域关系推理**：WT/TC/ET 三个节点、六条有向边，边权由节点特征和几何信息（质心、体积、置信度）动态计算，多轮消息传递后写回最深层特征。
+- **关系驱动的尺度自适应解码**：由关系推理结果决定每个区域在各个解码尺度上使用多少区域信息。
+- **层级一致性约束**：在损失中软约束 ET ⊆ TC ⊆ WT 的嵌套关系。
+- **整例训练的工程优化**：深度切片卷积、空洞卷积的等价交错执行、整网 bf16 混合精度与整脑外接框裁剪，在 RX 7900 XTX 上把每轮训练从 44 分钟降到约 4.4 分钟，显存峰值约减半。
+- **严格可恢复**：checkpoint 保存模型、优化器、全部随机状态、病例顺序与日志位置，续跑前严格核对配置与代码版本；中断后**用同一条命令即可续跑**（CPU 测试中续跑轨迹与不中断逐位一致）。
+- **消融只改配置**：每个消融实验与主实验只差一项设置，由测试自动核对。
+
+## 方法概览
+
+| 模块 | 作用 |
+| --- | --- |
+| 双感受野编码器 | 四级编码（32/64/128/256 通道），每级并联普通卷积与空洞卷积，并按两路特征及其差异学习融合权重 |
+| 空间到节点 | 由最深层的粗预测得到三个区域的软掩码，把特征聚合成 WT/TC/ET 三个节点，并附带质心、体积、置信度 |
+| 动态关系推理 | 三节点完全图上进行 K 轮消息传递，边权每轮重新计算，GRU 更新节点 |
+| 深层回写 | 节点通过注意力写回最深层特征图：F' = F + γ·φ(G) |
+| 尺度自适应解码器 | 在三个跳连尺度上用节点查询注入区域信息，尺度权重由关系推理结果决定 |
+| 联合损失 | 最终输出与粗预测的 BCE + Dice，加上最终输出的层级一致性项 |
+
+公式级的实现说明见 [METHOD_SPEC.md](./METHOD_SPEC.md)。
+
+## 实验结果
+
+BraTS2018 训练集 285 例，按患者随机分成五折；每折 228 例训练、57 例验证，训练至早停。下表为各折最佳轮的验证集 Dice 平均值 ± 标准差：
+
+| 指标 | 平均 | WT | TC | ET |
+| --- | ---: | ---: | ---: | ---: |
+| 最佳轮 | 0.814 ± 0.015 | 0.895 ± 0.010 | 0.837 ± 0.026 | 0.709 ± 0.044 |
+| 最后 5 轮平均 | 0.805 ± 0.015 | 0.891 | 0.822 | 0.702 |
+
+验证集同时用于早停和选取最佳轮，因此"最佳轮"略偏乐观，"最后 5 轮平均"更保守。计分采用逐病例 Dice，真实与预测都为空的区域不计入，未做任何后处理。完整配置、逐折结果、困难病例分析和消融进展见 [EXPERIMENTS.md](./EXPERIMENTS.md)。
+
+## 环境配置
+
+本项目已在以下环境运行：
+
+| 操作系统 | GPU | 后端 | 版本 | 状态 |
+| --- | --- | --- | --- | --- |
+| Ubuntu 24.04 | AMD Radeon RX 7900 XTX 24G | ROCm 7.2 | PyTorch 2.11.0+rocm7.2，Python 3.11 | 主实验环境 |
+| Windows 11 | NVIDIA RTX 5060 8G | CUDA 12.8 | PyTorch 2.8.0+cu128 | 辅助环境，正式训练待验证 |
+
+整例训练的显存峰值约 5–6 GiB（BraTS2018 最大病例，整网 bf16 混合精度）。
+
+### 1. 克隆仓库
 
 ```bash
+git clone https://github.com/jackygeng2001/OrganRelation3D.git
+cd OrganRelation3D
+```
+
+### 2. 创建 conda 环境
+
+```bash
+conda create -n organrelation3d python=3.11 -y
 conda activate organrelation3d
+```
+
+### 3. 安装 PyTorch
+
+按设备选择**其中一种**：
+
+- AMD ROCm：
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
+```
+
+- NVIDIA CUDA：
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+### 4. 安装其余依赖并运行测试
+
+```bash
+pip install -r requirements.txt
 python scripts/run_tests.py --suite all
-python scripts/brats.py check --device cpu
 ```
 
-`check` 默认小尺寸合成输入，执行完整实际架构的 forward/loss/backward，输出 shape、参数量、耗时和梯度状态，不创建 run、不 optimizer.step。CPU 测试不是 GPU 显存验收。
+测试全部在 CPU 上用合成数据运行，覆盖公式、梯度、混合精度、续训和消融变体；有任何跳过都算失败。
 
-## 先确认数据来源
+## 数据准备
 
-当前下载的三个 ZIP 是 **2023 GLI + 2024 GLI 主集/追加集**，不是三年独立任务。2024 是术后任务、含 RC，当前三区域代码拒绝用其训练。不能将 RC=4 错映为旧术前 ET=4。所给实验论文分别评估 2018/2019/2020，不支持直接把当前三个压缩包混合。
+本项目使用 **BraTS 2018** 训练集（285 例，含 HGG 与 LGG），需自行从官方渠道申请下载。
 
-只读 ZIP 中央目录即可盘点，不展开体素、不解压原数据：
+1. 把下载的压缩包放到 `datasets/BraTS2018/raw/brats2018.zip`。原始数据只读，程序不会解压或修改它。
+2. 生成按患者划分的五折（固定种子，结果可复现）：
 
 ```bash
-python scripts/brats.py inspect --cohort brats2023_gli \
-  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip"
+python scripts/brats_folds.py --cohort brats2018 --source datasets/BraTS2018/raw/brats2018.zip --seed 20260925 --output-dir configs/brats2018_folds
 ```
 
-完整 MRI loader 保留原配准网格，按每文件 scaling 读取，T1/T1ce/T2/FLAIR 逐模态非零 z-score，零值保留零；默认不裁剪、不重采样、不增加 padding。显式 `preprocessing.spatial_crop` 可只送四模态非零体素的整脑外接框（`configs/train_brats_year_fold_bbox.json`，仅由图像决定，肿瘤体素落框外即报错），先用 `scripts/brats_crop_audit.py` 只读核验；`scripts/brats_benchmark.py` 在真实病例上对不同输入/卷积后端测速，不创建 run。该强度方案是显式开发配置，待实验协议确认。
-
-可选执行选项 `--data-cache DIR`（check/overfit/train）把 loader 的最终输出逐例存为 `.npy`（图像 float32、标签 uint8、元数据 JSON），之后逐位相同地读回（BraTS2018 裁剪框每例约 55 MB，读取约 0.05 s，ZIP 约 0.69 s）。缓存键含 cohort、标签编码、各源文件 ZIP size/CRC32（目录为 size/mtime）、预处理设置与 `data/brats.py` 的 SHA256，任一变化自动生成新条目；条目先写临时文件再原子改名，形状/键不符即报错。缓存目录不得位于原始数据内，建议仓库 `cache/`（已 git 忽略）。用了缓存的 run 在 runtime identity 记 `data_cache=brats_npy_v1`，续训须保持一致。预构建：`scripts/brats_cache.py --config ... --source ... --cohort ... --data-cache cache/npy`。
-
-两种显式降精度选项，二选一，均需 `--convolution-backend depth_sliced`：`training.convolution_compute_dtype=bfloat16`（`configs/train_brats_year_fold_bbox_conv_bf16.json`）只让 3×3×3 卷积乘加用 bfloat16，其余全部 FP32；`training.mixed_precision=bfloat16`（`configs/train_brats_year_fold_bbox_amp_bf16.json`）为整网混合精度，体数据存 bf16，GroupNorm 统计量、节点/关系、深层回写、门控与损失保持 FP32，峰值显存约减半。真实病例梯度相对 FP32 误差分别约 0.5% 与 0.7%。float16 会使梯度下溢，训练入口拒绝。`scripts/brats_compare_runs.py RUN_A RUN_B [RUN_C ...]` 只读逐轮对比各臂 dev Dice 与步时。细节与对照要求见 METHOD_SPEC。文件 shape/affine 不匹配即停止，不偷偷配准。
-
-## AMD 无更新检查
-
-经用户确认病例后，指定一个实际 `CASE_ID`，只做一次 forward/loss/backward；不创建训练 run、不更新参数。必须按真实病例完整网格执行，OOM 即停止。
+3. 预先生成预处理缓存（可选，约 16 GB，能显著加快训练）：
 
 ```bash
-PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
-python scripts/brats.py check --device cuda:0 --cohort brats2023_gli \
-  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
-  --case CASE_ID
+python scripts/brats_cache.py --config configs/experiments/main.json --cohort brats2018 --source-partition training --source datasets/BraTS2018/raw/brats2018.zip --data-cache cache/npy
 ```
 
-不要把旧 MONAI/CT 的显存数字用于此新编码器和全分辨率关系查询。布局选项不能证明所有中间算子/solver 都是 NDHWC。
-
-若 ROCm 的 NDHWC Conv3d 使用低 workspace 但很慢的 naive solver，可在 `check` 或 `train` 显式增加 `--convolution-backend depth_sliced`。默认仍为 `native`。该选项把每个原 Conv3d 的深度核展开为 NCHW Conv2d 求和，每次最多处理 4 个输出深度平面，保留跨平面贡献、边界 padding、stride/dilation 和完整输出；1³ 卷积执行等价线性映射。它不是 2D 分割、patch 输入或 activation checkpointing，权重、初始化、FP32 和 loss 不变。CPU/ROCm 已做输出及梯度容差验证；NVIDIA 尚未实测。首次调用可能包含 MIOpen 算法选择，稳定耗时应预热后测量。平面内空洞 'same' 卷积（双感受野 context 分支）拆成交错子图上的普通卷积执行（数学等价，只是求和次序不同），避开 MIOpen 的 naive 空洞内核，真实病例训练步约快 3 倍；runtime identity 记 `convolution_dilation=interleaved_v1`。
-
-该执行方式及 depth chunk 写入 check JSON 和训练 runtime identity；resume 必须使用相同选项，不放宽旧 checkpoint 身份校验。算子临时内存有界不代表所有 backend workspace 有固定上限，真实整卷仍需检查峰值。正式训练吞吐还包括 optimizer、读取、监测和保存，不能用单次 forward/backward 代替。
-
-`depth_sliced` 的解码融合卷积直接接收 decoded/enhanced 两个原特征，仅在至多 4 个深度平面的 Conv2d 输入内按原通道顺序拼接。避免保存整幅拼接副本，反向分别返回两个输入的梯度；不修改原卷积权重、跨切面贡献或后续 GN/激活。`native` 仍使用原整幅 cat。此工程更新不绕过源码身份校验；无 checkpoint 的失败 run 不能 resume，应保留旧目录并使用新目录重试。
-
-遇到 OOM 时，在同一条 `check` 命令后加 `--profile-memory` 再做一次定位。
-该选项仅用于无参数更新的 check，复用已有算子/模块 profiler，分别观察 forward、loss、backward。
-stdout 输出失败阶段、活动模块/ATen 算子、输入输出 shape/stride/实际布局、最后成功模块、
-各阶段 allocated/reserved 峰值及最大算子增量峰值。OOM 现场在模型局部变量展开前采样，
-不重试、不清缓存、不手动释放激活、不改 dtype/公式；退出后移除所有 hooks。
-不同阶段的峰值经过合并，不能将嵌套模块时间/峰值相加；诊断时间包含同步开销，不能作为训练速度。
-backward 的算子能定位到 ATen 和形状，但不声称反查到了精确的前向模块或 MIOpen 内部算法。
-逐算子同步会显著放大分段反向的诊断耗时；定位后使用不带 `--profile-memory` 的普通 `check` 验证完整反向和实际总耗时。当前脑肿瘤实现通过线性投影结合顺序、私有激活缓冲复用与全局 GroupNorm 的分段解析反向减少临时内存，不改变完整扫描、模型参数、FP32 或 loss；分段仅限制逐元素梯度临时张量，不是 patch segmentation。
-
-## 可恢复训练能力与实验边界
-
-新 `brats_regions` 模式复用现有 Trainer：AdamW、原子 checkpoint、RNG/病例顺序恢复、ETA、JSONL、TensorBoard。final/coarse BCE、DiceLoss、soft Dice 与内部 WT/TC/ET hard Dice 使用正确三通道语义。独立阈值预测不做层级修正，监测记录违反数。旧 AMOS 功能和已有配置保留为历史入口。
-
-正式数据划分、HD95/官方评估规则、训练周期及实验分组尚未决定。旧诊断配置保持显式 step horizon；独立的年份折配置支持 epoch horizon 与三区域早停，不套用 AMOS 数据划分。普通训练必须提供患者互斥且穷尽的 split JSON：`manifest_hash` 为 inspect 输出的 manifest hash，`train`/`dev` 为病例 ID 列表；同一患者的多次扫描不得跨集合。下述显式 pilot 使用 train/dev/unused 三部分完整覆盖来源，普通划分校验不放宽。目录名/年份不等于无患者重复，跨队列实验还需核验。
-
-完成协议和 AMD preflight 后才能使用以下参数形式（不是现在启动实验的指令）：
-
-```
-python scripts/brats.py train --source SOURCE --cohort brats2023_gli \
-  --split AGREED_SPLIT.json --max-steps AGREED_STEPS --device cuda:0 --run-dir RUN_DIR
-```
-
-恢复时保留所有参数，追加 `--resume RUN_DIR/last.ckpt`。模型、损失、预处理、阈值、优化器、运行条件、完整 split/manifest、源码身份必须一致。`--stop-after` 仅在完整 optimizer step 边界停止，不改计划。旧 AMOS checkpoint 不能迁移成此模型；原迁移开关仍仅允许其审计过的历史版本。
-
-单病例学习诊断使用独立 `overfit` 动作和 `configs/train_brats_single_case_overfit.json`：必须给 `--case`、禁止 `--split`，仅选择该病例训练并做 `train_monitor`，明确不是独立验证。科学设置与 `brats_regions.json` 相同；每 5 步检查梯度/参数更新、保存 checkpoint 并输出摘要，每 25 步监测三区域 hard/soft Dice 与预测体积。
+4. 复制本机配置模板，并按需要修改路径和设备：
 
 ```bash
-PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
-python scripts/brats.py overfit --config configs/train_brats_single_case_overfit.json \
-  --device cuda:0 --convolution-backend depth_sliced --cohort brats2023_gli \
-  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
-  --case BraTS-GLI-00000-000 --max-steps 100 \
-  --run-dir runs/brats2023_1case_100 --stop-after 5
+cp configs/machine.example.json configs/machine.local.json
 ```
 
-先核对 5 步真实 optimizer 更新、显存与耗时；通过后保持同一配置和源码，删除 `--stop-after 5`，追加 `--resume runs/brats2023_1case_100/last.ckpt` 续到 100。两次都保留 `--max-steps 100`，不重新开始 run，不把 max_steps 从 5 改为 100，不需要 extension。该 GPU 连续训练须实际运行验收，不能用已有无更新检查代替。
+本机配置记录数据、划分、缓存、输出目录、设备和启动环境变量，不提交到 git。NVIDIA 显卡请把其中的 `environment` 改为 `{}`；AMD 显卡保留 `PYTORCH_MIOPEN_SUGGEST_NHWC=1`。
 
-原始数据、runs、权重、缓存与诊断输出不进入 Git。新增提交采用 Conventional Commits，不重写历史。
+## 训练与评估
 
-## 只读 checkpoint 概率诊断
-
-`scripts/brats_diagnose.py` 从可信 checkpoint 旁的 `run.json` 读取原始 run 身份，并使用 checkpoint 的执行配置、完整 source manifest 和执行选项；验证 checkpoint 校验和、run 身份、当前数据指纹及 `src/` 源码。唯一跨源码例外是下述已审计 extension 升级，输出明确区分全部一致与 extension-only 兼容；模型/数据/loss/engine 仍必须一致。新诊断脚本可以不同于训练时的入口，但不放宽普通 resume。仅一次完整 image-only、FP32、eval/inference-mode 前向，不创建 optimizer，不反向，不修改 run/checkpoint。输出到终端；可选 PNG 只允许新文件、禁止写入原 run/source。
+### 运行一个实验的五折
 
 ```bash
-PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
-python scripts/brats_diagnose.py \
-  --checkpoint runs/brats2023_1case_100_v2/last.ckpt \
-  --case BraTS-GLI-00000-000 --device cuda:0 \
-  --overlay /tmp/brats_step100_overlay.png
+python scripts/run_experiment.py configs/experiments/main.json
 ```
 
-source 默认沿用 checkpoint 路径，不需重复配置模型/预处理/backend。final/coarse 分别报告 WT/TC/ET 的 hard Dice、预测/GT/TP/FP/FN、GT 内外概率均值、P05/P50/P95、概率总量及区域外低于阈值的概率分布；coarse 先插值 logits 到原网格。区域外指各自 GT 区域之外，不能把 TC/ET 的区域外全部叫作正常组织。按可比字段核对同 step 监测记录，差异只记录，不在输出统计之前做全字典相等断言。CPU 统计与 GPU 原记录的浮点归约允许容差。
+`configs/experiments/` 下每个文件是一个实验：`main.json` 为完整方法，`no_relation.json`、`no_hier.json`、`drf_backbone.json`、`unet.json` 为消融与基线。训练结果写入 `runs/<数据集>_<实验名>_fold<k>/`。
 
-PNG 使用 Pillow（当前 AMD 已安装；可省略 `--overlay` 不渲染），每行独立展示一个区域：完整 FLAIR 切片、GT、final/coarse 的 TP/FP/FN 和 final 概率图。GT 最大截面只用于前向结束后的展示选片；无标签引导训练裁剪。显示为原数组 D 切片，不宣称标准放射学左右方向。默认不保存影像体积，不生成额外报告文件。
+训练中断后，**再次执行同一条命令即可续跑**：已早停结束的折自动跳过，未完成的折从断点继续。只想跑部分折时加 `--folds 0 1`，只想查看将要执行的命令时加 `--dry-run`。
 
-## 显式延长 BraTS 单病例训练
+### 训练前检查显存
 
-`--resume ... --extend-to 500` 调用现有 Trainer 的 horizon 机制；仍保留原 `--max-steps 100`，其余配置不变。新总步数必须同时大于旧计划和已完成步数，不改变 max_epochs。原 run_id/run.json、optimizer、RNG、病例顺序及日志连续；checkpoint 在读取下一病例之前原子记录原计划、新计划、父 checkpoint SHA256 和执行 provenance。TensorBoard 从原目录续写，ETA 按新总步数计算。
-
-仅允许干净 `633da43204d1cc6a88185ee4c372b1618e2285f1`、源码指纹 `779cb7d48e6712e3f02e4354d289ea3394abce06177e031cdd260b922816a946` 的 BraTS single-case overfit 跨本次版本升级。白名单仅含 `scripts/brats.py`、`scripts/brats_diagnose.py`、`scripts/run_tests.py` 和 `training/extension.py`；模型、loss、数据、训练引擎、全部科学/运行/环境 identity 保持严格一致。普通 resume 不放宽，也不修改旧 AMOS 的迁移规则。
+用最大病例做一次前向和反向，不更新参数：
 
 ```bash
-PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
-python scripts/brats.py overfit --config configs/train_brats_single_case_overfit.json \
-  --device cuda:0 --convolution-backend depth_sliced --cohort brats2023_gli \
-  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
-  --case BraTS-GLI-00000-000 --max-steps 100 \
-  --run-dir runs/brats2023_1case_100_v2 \
-  --resume runs/brats2023_1case_100_v2/last.ckpt --extend-to 500
+python scripts/brats.py check --config configs/experiments/main.json --device cuda:0 --convolution-backend depth_sliced --cohort brats2018 --source-partition training --source datasets/BraTS2018/raw/brats2018.zip --data-cache cache/npy --case Brats18_TCIA13_653_1
 ```
 
-500 是总步数，从 step 100 再训练 400 步。首次 extension 已提交后如中断，保留所有参数并去掉 `--extend-to 500` 普通恢复，horizon 会从 checkpoint 自动读取；不要把 `--max-steps` 改为 500。源码再次变化时，普通恢复仍严格拒绝。
+### 查看结果
 
-## BraTS2023 小规模患者独立 pilot
-
-`configs/train_brats_patient_pilot.json` 沿用已测试单病例的完整模型、loss、预处理、AdamW、seed、FP32 和运行设置；只将 observer 改为 `internal_dev`，每 80 steps 验证。新 run 从头初始化，**不加载单病例 checkpoint**。本轮计划 16 名患者训练、4 名患者验证，800 steps=50 epochs；每 5 epochs 验证全部 4 例，每 5 steps 保存与检查梯度。800 是 pilot 预算，不是正式训练的固定轮数；没有新增 early stopping。
-
-先只读归档元数据生成本地划分（已存在时拒绝覆盖）。根据 seed+患者 ID 的 SHA256 排序选择患者，每人取病例 ID 字典序最小的一次扫描；不依据标签、病灶大小或模型表现挑选。排除已用于单病例过拟合的整个患者。完整 manifest 指纹以及所有未使用扫描均记录，加载时重新验证选择规则；其余时间点不能跨 train/dev。患者识别沿用归档 ID，不声称影像级去重或独立外部测试。
+- 训练曲线（训练损失、验证 Dice 等）：
 
 ```bash
-python scripts/brats_pilot_split.py \
-  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
-  --output configs/brats2023_pilot_16_4.local.json \
-  --train-subjects 16 --dev-subjects 4 --seed 20260925 \
-  --exclude-subject BraTS-GLI-00000
+tensorboard --logdir runs
 ```
 
-先运行同一计划下的前 5 步，核对不同病例的显存、梯度和读盘耗时；OOM 时停止，不自动改模型。GPU 由用户运行。
+- 逐轮对比多个实验的验证 Dice 与训练速度：
 
 ```bash
-PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
-python scripts/brats.py train --config configs/train_brats_patient_pilot.json \
-  --device cuda:0 --convolution-backend depth_sliced --cohort brats2023_gli \
-  --source "$HOME/下载/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" \
-  --split configs/brats2023_pilot_16_4.local.json --max-steps 800 \
-  --run-dir runs/brats2023_pilot_16_4_v1 --stop-after 5
+python scripts/brats_compare_runs.py runs/<实验A>_fold0 runs/<实验B>_fold0
 ```
 
-前 5 步通过后，保持以上参数，删除 `--stop-after 5` 并添加 `--resume runs/brats2023_pilot_16_4_v1/last.ckpt`，续到 800。后续中断同样恢复；不改变 max_steps 或源码。JSONL/TensorBoard 中 `internal_dev` 是未参与梯度更新的患者，不能与单病例 `train_monitor` 分数直接比较。用此 pilot 观察验证趋势和耗时，再制定正式协议；4 例不足以确定最优超参数或可靠的正式停止轮数。旧 checkpoint 的严格源码恢复校验仍保留，旧实验需要其原始版本。
+每个运行目录中的 `metrics.jsonl` 是完整的逐步日志，`validation/` 保存每次验证的逐病例结果，`best-dev.ckpt` 与 `last.ckpt` 分别为最佳轮与最新的 checkpoint。
 
-## BraTS2018–2020 年份独立训练
+## 相关文档
 
-`index_cases`/`BraTSDataset` 支持只读 `.nii` 和 `.nii.gz`（目录或 ZIP）。包含
-官方无标签验证子目录的旧年份完整包，训练必须显式指定 `--source-partition training`；
-此选项只选择命名明确的旧年份 training 子目录，不靠“有没有标签”静默过滤病例。
-默认 `all` 保持严格完整病例检查。2020 Kaggle 镜像中仅
-`BraTS20_Training_355/W39_1998.09.19_Segm.nii` 被精确识别为该病例的标签；
-不改原文件，不猜测其他特殊文件名，同时出现标准标签与别名会报重复错误。
-
-使用 `scripts/brats_folds.py` 从训练部分生成五个患者互斥的本地划分。种子
-20260925，排序患者后独立 Python RNG 打乱、轮转分配五折，无标签/肿瘤体积筛选或
-分层。每例恰好作为一次 dev；同患者多时间点属于同一折。划分绑定完整 manifest
-哈希、源路径和文件元数据，不能覆盖旧划分。三年患者重叠，须分别实验，不混池随机划分。
-
-```bash
-python scripts/brats_folds.py --cohort brats2018 \
-  --source "$HOME/projects/OrganRelation3D/datasets/BraTS2018/raw/brats2018.zip" \
-  --seed 20260925 --output-dir configs/brats2018_folds
-```
-
-独立 `configs/train_brats_year_fold.json` 保留现有 MRI 模型、loss、预处理、FP32、
-AdamW 3e-4、seed、batch=1。开发协议：最多500轮，至少20轮，每轮验证**全部**内部
-验证病例；以 final WT/TC/ET 病例内平均、再病例间平均的 hard Dice 为早停指标，
-沿用 both-empty=null。相对最近有效提升基准，累计提升达到0.001才重置计数；连续
-20轮未达此阈值停止。计数从首次验证后开始，最少轮数只限制停止时点。
-原始最高分（即使提升不足0.001）仍保存 `best-dev.ckpt`；`last.ckpt` 用于续训。
-早停状态、逐轮汇总、验证历史随完整 RNG/optimizer/病例顺序保存并严格恢复。
-不允许 `--extend-to` 绕过早停，也不允许 `--max-steps` 覆盖这个 epoch 配置。
-这些是首轮开发选择，不是论文最终/最优协议；内部 dev 同时用于早停和选最佳权重，
-不能把该分数称为独立测试结果。官方无标签 validation 不用于早停。
-
-每25 steps及每轮边界保存 checkpoint，每轮末检查梯度/更新；每个训练 step 记录
-loss，逐轮聚合三区域 soft Dice，验证记录 final/coarse hard/soft Dice。TensorBoard
-标签使用 WT/TC/ET 和 BCE。ETA 是到500轮上限的训练时间，**不预测早停轮数**，且
-不含验证/保存时间。每例始终单次整脑前向，无patch/sliding-window；仅显式 spatial_crop 时送整脑外接框。
-
-```bash
-PYTORCH_MIOPEN_SUGGEST_NHWC=1 MIOPEN_ENABLE_LOGGING=0 \
-python scripts/brats.py train --config configs/train_brats_year_fold.json \
-  --device cuda:0 --convolution-backend depth_sliced \
-  --cohort brats2018 --source-partition training \
-  --source "$HOME/projects/OrganRelation3D/datasets/BraTS2018/raw/brats2018.zip" \
-  --split configs/brats2018_folds/brats2018_fold_0.local.json \
-  --run-dir runs/brats2018_fold0
-```
-
-恢复使用完全相同命令并加 `--resume runs/brats2018_fold0/last.ckpt`，保留原代码版本、
-源文件和运行环境。旧 step 模式 run 不迁移成此新协议，也不放宽历史源码身份校验。
-
-`--auto-resume`（代替 `--resume`）让同一条命令可反复执行：`<run-dir>/last.ckpt` 存在则严格续训（校验不变）；
-目录不存在或为空则新开；若在第一个 checkpoint 之前被中断（目录里只有 run.json/日志、没有任何 `.ckpt`，
-且实验身份 mode/model/loss/threshold/preprocessing/training/optimizer/data 一致），该目录改名为
-`<run-dir>.aborted-<UTC时间>` 保留（不删除），再从第 0 步按同一种子重新开始；其他情况一律拒绝且不改动目录。
-已早停结束的 run 续训即刻结束。实验进行中不要更新代码：续训仍严格校验代码版本。
-
-第一档消融（2026-11-09 用户批准）在整网混合精度外接框协议上各改一项，其余与
-`train_brats_year_fold_bbox_amp_bf16.json` 完全相同：`_no_relation`（建节点但不做关系推理，
-z(K)=z(0)）、`_drf_backbone`（双感受野编码器 + 普通 U-Net 解码器）、`_unet`（普通两卷积
-编码器 + 普通解码器）、`_no_hier`（λ_hier=0）。各变体保留粗预测头作辅助深监督，目标函数相同。
-用法与主臂相同，只换 `--config` 和 `--run-dir`；定义与参数量见 METHOD_SPEC。
+- [EXPERIMENTS.md](./EXPERIMENTS.md)：实验报告及日志，记录全部实验配置、进度与结果
+- [METHOD_SPEC.md](./METHOD_SPEC.md)：方法实现规格，逐公式说明实现与工程等价变换
+- [environments/](./environments)：各设备环境的详细说明
+- [AGENTS.md](./AGENTS.md)：AI 协作开发规范

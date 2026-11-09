@@ -25,7 +25,6 @@ Thumbs.db
 # Data, patient volumes, checkpoints, caches and generated reports
 /data/
 /datasets/
-/amos22/
 *.nii
 *.nii.gz
 *.hdr

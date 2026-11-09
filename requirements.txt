@@ -1,0 +1,7 @@
+# PyTorch 请按设备单独安装（ROCm 或 CUDA 版本，见 README），这里不列出，避免 pip 把 GPU 版本换掉。
+# 已测试版本：numpy 2.3.5、nibabel 5.3.2、tensorboard 2.20.0、tqdm 4.67.1、pillow 12.x（AMD 主环境）。
+numpy>=2.0
+nibabel>=5.0
+tensorboard>=2.17
+tqdm>=4.66
+pillow>=10.0

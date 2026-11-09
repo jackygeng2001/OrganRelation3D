@@ -1,0 +1,14 @@
+{
+  "device": "cuda:0",
+  "convolution_backend": "depth_sliced",
+  "cohort": "brats2018",
+  "source_partition": "training",
+  "source": "datasets/BraTS2018/raw/brats2018.zip",
+  "data_cache": "cache/npy",
+  "split_template": "configs/brats2018_folds/brats2018_fold_{fold}.local.json",
+  "runs_dir": "runs",
+  "environment": {
+    "PYTORCH_MIOPEN_SUGGEST_NHWC": "1",
+    "MIOPEN_ENABLE_LOGGING": "0"
+  }
+}

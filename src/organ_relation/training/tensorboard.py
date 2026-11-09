@@ -5,80 +5,10 @@ import sys
 import time
 
 
-# METHOD_SPEC labels 1..15; no dependency on exploratory imaging code.
-ORGAN_NAMES = ('Spleen', 'RightKidney', 'LeftKidney', 'Gallbladder', 'Esophagus',
-               'Liver', 'Stomach', 'Aorta', 'InferiorVenaCava', 'Pancreas',
-               'RightAdrenal', 'LeftAdrenal', 'Duodenum', 'Bladder', 'ProstateOrUterus')
-MODULE_NAMES = dict(encoder='Encoder', coarse_head='CoarseHead', relation='Relation',
-                    node_to_space='NodeToSpace', fusion='Fusion', decoder='Decoder', network='MONAI_UNet')
-
-
 def scalar_values(row):
     """Translate scalar log rows only; never touch live model tensors."""
-    if row.get('mode') == 'brats_regions':
-        from .brain_tumor import region_scalars
-        return region_scalars(row)
-    if row.get('observation_profile') in ('development_v1', 'development_v2'):
-        from .development import development_scalars
-        return development_scalars(row)
-    if row['phase'] == 'train':
-        values = {'Train/Total_Loss': row['total_loss'],
-                  'Train/Final_CE': row['final']['ce'],
-                  'Train/Final_DiceLoss': row['final']['dice_loss'],
-                  'Train/SoftDice_Mean': sum(row['soft_dice_per_organ']) / 15,
-                  'Optimizer/LR': row['lr'], 'System/Step_Time': row['step_seconds']}
-        if 'coarse' in row:
-            values.update({'Train/Coarse_CE': row['coarse']['ce'],
-                           'Train/Coarse_DiceLoss': row['coarse']['dice_loss']})
-        if row.get('mode') in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
-            for name, value in zip(ORGAN_NAMES, row['soft_dice_per_organ']):
-                values['TrainSoftDice/' + name] = value
-        for name in ('allocated', 'reserved'):
-            value = row['memory'][f'peak_{name}_bytes']
-            if value is not None:
-                values[f'System/GPU_Peak_{name.title()}_GiB'] = value / 2**30
-        for name, stats in (row['diagnostics'] or {}).items():
-            if name in MODULE_NAMES:
-                values['GradNorm/' + MODULE_NAMES[name]] = stats['gradient_norm']
-        if row.get('relation_scale'):
-            from .development import relation_scalars
-            values.update(relation_scalars(row['relation_scale']))
-        return values
-    if row['phase'] in ('train_monitor', 'internal_dev'):
-        prefix = 'Monitor' if row['phase'] == 'train_monitor' else 'Val'
-        metrics = row['metrics']
-        values = {f'{prefix}/HardDice_Mean': metrics['mean_case_dice']}
-        if row.get('diagnostic_cases'):
-            cases = row['diagnostic_cases'].values()
-            values[f'{prefix}/FinalSoftDice_Mean'] = sum(c['final_soft_dice'] for c in cases) / len(cases)
-        if row.get('mode') in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux') and row.get('diagnostic_cases'):
-            cases = list(row['diagnostic_cases'].values())
-            for key in ('total_loss', 'ce_loss', 'dice_loss', 'predicted_foreground_voxels',
-                        'foreground_true_positive_voxels', 'gt_foreground_voxels',
-                        'gt_foreground_true_class_mean_probability', 'gt_foreground_background_mean_probability'):
-                present = [c[key] for c in cases if c[key] is not None]
-                if present:
-                    values[f'{prefix}/' + key] = sum(present) / len(present)
-            for i, name in enumerate(ORGAN_NAMES):
-                values[f'{prefix}SoftDice/' + name] = sum(c['soft_dice_per_organ'][i] for c in cases) / len(cases)
-        if row.get('mode') in ('monai_relation_unet', 'monai_coarse_aux') and row.get('diagnostic_cases'):
-            coarse = [c['coarse'] for c in row['diagnostic_cases'].values()]
-            for key in ('total_loss', 'ce_loss', 'dice_loss', 'final_soft_dice'):
-                values[f'{prefix}Coarse/' + key] = sum(c[key] for c in coarse) / len(coarse)
-            present = [c['hard_metrics']['mean_dice'] for c in coarse if c['hard_metrics']['mean_dice'] is not None]
-            if present:
-                values[f'{prefix}Coarse/HardDice_Mean'] = sum(present) / len(present)
-            if row.get('mode') == 'monai_coarse_aux':
-                for i, name in enumerate(ORGAN_NAMES):
-                    values[f'{prefix}CoarseSoftDice/' + name] = sum(c['soft_dice_per_organ'][i] for c in coarse) / len(coarse)
-                    present = [c['hard_metrics']['organs'][i]['dice'] for c in coarse
-                               if c['hard_metrics']['organs'][i]['dice'] is not None]
-                    if present:
-                        values[f'{prefix}CoarseDice/' + name] = sum(present) / len(present)
-        for organ in metrics['organs']:
-            values[f'{prefix}Dice/{ORGAN_NAMES[organ["label"]-1]}'] = organ['mean_dice']
-        return {k: v for k, v in values.items() if v is not None}
-    return {}
+    from .brain_tumor import region_scalars  # 所有 BraTS 日志行都由三区域映射处理
+    return region_scalars(row)
 
 
 class TensorBoardObserver:

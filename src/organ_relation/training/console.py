@@ -1,7 +1,6 @@
 """Presentation of committed scalar rows; no model, RNG or ETA calculations."""
 from functools import wraps
 from collections import deque
-import json
 import statistics
 import shutil
 import sys
@@ -35,14 +34,6 @@ def columns(rows, title=None):
     lines.extend(cell(left) + '   ' + cell(right) for left, right in rows)
     lines.append(lines[0])
     return '\n'.join(lines)
-
-
-def short_run_summary(rows):
-    later = [r['step_seconds'] for r in rows[1:]]
-    return dict(optimizer_steps=len(rows), step_1_seconds=rows[0]['step_seconds'],
-                steps_2_to_5_mean_seconds=statistics.mean(later) if later else None,
-                steps_2_to_5_median_seconds=statistics.median(later) if later else None,
-                scope='short engineering run; variable case shapes; not a benchmark')
 
 
 def _presentation(method):
@@ -98,10 +89,9 @@ class TrainingConsole:
         model, prep = identity.get('model', {}), identity.get('preprocessing', {})
         model = model if isinstance(model, dict) else {}
         prep = prep if isinstance(prep, dict) else {}
-        channels = model.get('backbone', {}).get('channels', model.get('channels', []))
-        candidate = prep.get('candidate', '?')
-        spacing = prep.get('spacing_candidates', {}).get(candidate)
-        spacing_text = ' x '.join(f'{v:g}' for v in spacing) + ' mm' if spacing else '?'
+        crop = (prep.get('spatial_crop') or {}).get('kind', 'none')
+        precision = options.get('mixed_precision') or options.get('convolution_compute_dtype') or 'FP32'
+        precision = {'bfloat16': 'bf16'}.get(precision, precision)
         optimizer = identity.get('optimizer', {})
         optimizer = optimizer if isinstance(optimizer, dict) else {}
         env = identity.get('environment', {})
@@ -110,17 +100,16 @@ class TrainingConsole:
         checkpoint_text = (f"{options['checkpoint_every_steps']} steps + epoch end"
                            if options.get('checkpoint_every_steps') else f"every {options['checkpoint_every']} {cadence}")
         self._write(columns([
-            (('Model', f'{len(channels)}-stage {channels}' if channels else 'configured model'),
+            (('Model', f"BraTS {model.get('variant') or 'full method'}"),
              ('Device', env.get('gpu_name') or runtime.get('device', 'CPU'))),
-            (('Spacing', f'{candidate} ({spacing_text})'),
-             ('Precision', {'float32': 'FP32'}.get(runtime.get('dtype', 'float32'), runtime.get('dtype')))),
+            (('Crop', crop), ('Precision', precision)),
             (('Train Cases', len(cases)), ('Optimizer', optimizer.get('name', 'configured'))),
             (('LR', f"{optimizer['lr']:.2e}" if 'lr' in optimizer else '?'), ('Batch Size', options['batch_size'])),
             (('Max Steps', total), ('Resume', 'Checkpoint' if resume else 'Fresh run')),
             (('Checkpoint', checkpoint_text),
              ('Monitor' if options['validation_role'] == 'train_monitor' else 'Validation',
               f"every {options['validation_every']} {cadence}" if options['validation_every'] else 'off')),
-        ], 'External MONAI reference' if identity.get('mode') == 'monai_reference_unet' else 'OrganRelation3D'))
+        ], 'OrganRelation3D'))
         if resume:
             self._write('[RESUME]\n' + f' Checkpoint : {resume}\n'
                         f' Epoch      : {min(state["epoch"]+1, epochs)} / {epochs}\n'
@@ -164,10 +153,6 @@ class TrainingConsole:
             (('Final Loss', f"{row['final']['segmentation']:.4f}"),
              ('Coarse Loss', f"{row['coarse']['segmentation']:.4f}") if 'coarse' in row else None),
         ]
-        if row.get('relation_scale'):
-            r = row['relation_scale']  # Gamma and norm ratio from the same loss-producing forward.
-            pairs.append((('Gamma', f"{r['gamma']:.6g}"),
-                          ('Writeback/F', f"{r['scaled_writeback_to_feature_norm']:.6g}")))
         pairs.extend([
             (('LR', f"{row['lr']:.2e}"), ('GPU Peak', f'{peak/2**30:.2f} GiB' if peak is not None else 'n/a (CPU)')),
             (('Step Mean', f'{recent:.1f}s' if recent is not None else 'warming up'),
@@ -222,36 +207,9 @@ class TrainingConsole:
         self._summary(row['metrics'], row['phase'])
 
     @_presentation
-    def epoch_summary(self, row):
-        s = row['epoch_metrics']
-        hard = s['final']['hard']['mean_case_dice']
-        pairs = [(('Epoch', f"{row['epoch']} / {self.epochs}"), ('Step', f"{row['global_step']} / {self.total}")),
-                 (('Train Total', f"{s['total_loss']:.4f}"), ('Final Loss', f"{s['final']['loss']:.4f}")),
-                 (('Train Dice', f'{hard:.4f}' if hard is not None else 'n/a'),
-                  ('Coarse Loss', f"{s['coarse']['loss']:.4f}") if 'coarse' in s else None)]
-        if row.get('relation_scale'):
-            r = row['relation_scale']
-            pairs.append((('Gamma', f"{r['gamma']:.6g}"), ('Writeback/F', f"{r['scaled_writeback_to_feature_norm']:.6g}")))
-        pairs.append((('Train ETA', duration(self.last['progress']['eta_seconds'])), ('LR', f"{self.last['lr']:.2e}")))
-        self._write(columns(pairs))
-        self.last_summary_step = row['global_step']
-
-    @_presentation
     def early_stop(self, state):
         self._write(f"[Early stop] epoch={state['last_validation_epoch']} best={state['best_metric']:.6f} "
                     f"best_epoch={state['best_epoch']} non_improving_validations={state['no_improvement_count']}")
-
-    @_presentation
-    def short_step(self, row):
-        record = dict(step=row['global_step'], case_id=row['case_id'], total_loss=row['total_loss'],
-                      final_loss=row['final']['segmentation'], coarse_loss=row.get('coarse', {}).get('segmentation'),
-                      relation_scale=row.get('relation_scale'), gamma_after_step=row.get('gamma_after_step'),
-                      step_seconds=row['step_seconds'], memory=row['memory'], eta=row['progress'])
-        self._write('[Short step] ' + json.dumps(record))
-
-    @_presentation
-    def short_summary(self, row):
-        self._write('[Short run summary] ' + json.dumps(row))
 
     @_presentation
     def finish(self):

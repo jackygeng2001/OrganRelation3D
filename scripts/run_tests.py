@@ -7,27 +7,27 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = {
-    'brats': ('brain_tumor', 'depth_sliced_conv', 'brats_overfit', 'brats_diagnose', 'brats_pilot', 'brats_folds', 'brats_crop', 'hierarchy_loss', 'brats_cache', 'conv_precision', 'mixed_precision', 'augmentation', 'ablation', 'auto_resume'),
-    'tensor': ('backbone', 'coarse_nodes', 'dynamic_relation', 'node_to_space',
-               'segmentor', 'joint_loss'),
-    'data': ('metadata', 'candidate_estimates', 'fidelity'),
-    'fullscan': ('full_scan', 'full_scan_probe'),
-    'monai': ('monai_reference', 'monai_relation', 'monai_coarse_aux', 'development', 'relation_scale', 'training_v2', 'training_cadence', 'resume_migration'),
-    'training': ('training', 'monitoring', 'backbone_only', 'balanced_ce', 'foreground_macro_ce'),
+    # 模型、损失与数值执行：公式、梯度、混合精度、消融变体
+    'model': ('brain_tumor', 'coarse_nodes', 'dynamic_relation', 'node_to_space', 'hierarchy_loss',
+              'depth_sliced_conv', 'conv_precision', 'mixed_precision', 'ablation'),
+    # 数据：读取、裁剪、缓存、五折划分、增强
+    'data': ('brats_crop', 'brats_cache', 'brats_folds', 'brats_pilot', 'augmentation'),
+    # 训练引擎：续训、checkpoint、观测层、epoch 协议、入口
+    'training': ('training', 'monitoring', 'epoch_protocol', 'training_cadence', 'auto_resume',
+                 'brats_overfit', 'brats_diagnose'),
 }
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=(*SUITES, 'metadata', 'all'), required=True)
+    parser.add_argument('--suite', choices=(*SUITES, 'all'), required=True)
     args = parser.parse_args(argv)
     # Do not let a new test file silently disappear from the declared suites.
     declared = {f'test_{name}.py' for names in SUITES.values() for name in names}
     discovered = {p.name for p in (ROOT / 'tests').glob('test_*.py')}
     if declared != discovered:
         parser.error(f'update SUITES to match test files: {sorted(declared ^ discovered)}')
-    names = (sum(SUITES.values(), ()) if args.suite == 'all' else
-             SUITES['data'][:2] if args.suite == 'metadata' else SUITES[args.suite])
+    names = sum(SUITES.values(), ()) if args.suite == 'all' else SUITES[args.suite]
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()
     for name in names:

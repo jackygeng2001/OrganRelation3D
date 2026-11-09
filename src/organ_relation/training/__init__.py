@@ -1,1 +1,1 @@
-"""Resumable single-scan training; no model or method definitions."""
+"""可严格续训的单病例串行训练；不包含模型或方法定义。"""

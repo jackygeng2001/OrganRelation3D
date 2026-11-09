@@ -26,8 +26,12 @@ from .depth_sliced_conv import DepthSlicedConv3d
 from .group_norm import ChannelsLastGroupNorm
 from .node_to_space import NodeToSpace
 from .residual_fusion import ResidualFusion
-from .segmentor import SegmentorOutput
 from .space_to_node import SpaceToNode
+
+
+class SegmentorOutput(NamedTuple):
+    coarse_logits: torch.Tensor  # [B,3,Df,Hf,Wf] 最深层粗预测，未上采样
+    final_logits: torch.Tensor  # [B,3,D,H,W] 最终预测，未经 sigmoid
 
 
 @dataclass(frozen=True)

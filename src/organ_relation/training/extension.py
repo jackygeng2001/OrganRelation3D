@@ -8,13 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 
-from .state import digest, identity_with_ce_weights
-
-
-LEGACY_COMMIT = '88ea4fc9fd8bc2aa3ede2c3fe87b343c386e6941'
-LEGACY_SOURCES = 'dca57430d67e2636fad9a20fe9ca3cb0b8ee3573e744665d9cf8a23c332ce19d'
-EXTENSION_FILES = {'scripts/train.py', 'src/organ_relation/training/engine.py',
-                   'src/organ_relation/training/state.py', 'src/organ_relation/training/extension.py'}
+from .state import digest
 
 # Audited whole-volume BraTS overfit release. Only CLI/diagnostic wiring and
 # this explicit allowlist may differ; engine/model/loss/data remain identical.
@@ -29,14 +23,15 @@ def check_extension_identity(saved, current):
     # in checkpoint.horizon; users cannot smuggle config changes through it.
     old, new = copy.deepcopy(saved), copy.deepcopy(current)
     previous, execution = old.pop('provenance'), new.pop('provenance')
-    if identity_with_ce_weights(old) != identity_with_ce_weights(new):
+    if old != new:
         raise ValueError('extension identity mismatch: only explicit horizon increase is allowed')
     if previous == execution:
         return
-    brats_upgrade = (saved.get('mode') == 'brats_regions'
-                     and saved.get('data', {}).get('selection', {}).get('kind') == 'single_case_overfit')
-    commit, sources, allowed = ((BRATS_COMMIT, BRATS_SOURCES, BRATS_EXTENSION_FILES) if brats_upgrade
-                                else (LEGACY_COMMIT, LEGACY_SOURCES, EXTENSION_FILES))
+    # 唯一允许跨源码版本延长的是经审计的 BraTS 单病例过拟合版本。
+    if not (saved.get('mode') == 'brats_regions'
+            and saved.get('data', {}).get('selection', {}).get('kind') == 'single_case_overfit'):
+        raise ValueError('extension provenance mismatch: unsupported source upgrade or dirty checkout')
+    commit, sources, allowed = BRATS_COMMIT, BRATS_SOURCES, BRATS_EXTENSION_FILES
     if (not isinstance(previous, dict) or not isinstance(execution, dict)
             or previous.get('git') != dict(commit=commit, dirty=False)
             or digest(previous.get('source_hashes')) != sources
@@ -52,11 +47,6 @@ def check_extension_identity(saved, current):
 
 def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume):
     """Pure validation/planning. No RNG use, checkpoint writes or config edits."""
-    if checkpoint and checkpoint.get('engineering_resume_migration'):
-        if extend_to is not None:
-            raise ValueError('engineering migration cannot combine with extension')
-        from .resume_migration import horizon_checkpoint_view
-        checkpoint = horizon_checkpoint_view(checkpoint, identity, case_count)
     if extend_to is not None and options.get('early_stopping'):
         raise ValueError('early-stopped/max-epoch protocol cannot be bypassed by horizon extension')
     original = min(v for v in (options['max_steps'],
@@ -75,7 +65,7 @@ def resolve_horizon(options, case_count, checkpoint, extend_to, identity, resume
     origin_science, execution_science = copy.deepcopy(origin), copy.deepcopy(identity)
     previous_provenance = origin_science.pop('provenance')
     execution_science.pop('provenance')
-    if identity_with_ce_weights(origin_science) != identity_with_ce_weights(execution_science):
+    if origin_science != execution_science:
         raise ValueError('original run identity mismatch outside provenance')
     for event in horizon['extensions']:
         at, target = event['at_global_step'], event['total_steps']

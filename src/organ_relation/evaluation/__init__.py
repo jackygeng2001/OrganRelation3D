@@ -1,1 +1,1 @@
-"""Case-level evaluation infrastructure; challenge export is not implemented."""
+"""验证阶段的逐病例记录（可断点复用）。"""

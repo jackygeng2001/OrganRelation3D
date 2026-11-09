@@ -1,2 +1,0 @@
-# Optional external reference only. Install with --no-deps in the existing backend environment.
-monai==1.6.0

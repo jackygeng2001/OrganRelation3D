@@ -1,1 +1,1 @@
-"""Neural modules and explicit configs. Import individual modules; no eager torch import."""
+"""模型模块；按需单独导入，不在包初始化时导入 torch。"""

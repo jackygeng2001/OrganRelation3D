@@ -23,22 +23,6 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
-def identity_with_ce_weights(identity):
-    """Comparison-only defaults; never rewrite stored identity or its hashes.
-
-    Absent CE weights mean 50:50, absent foreground reduction means voxel_mean.
-    All other fields, including source provenance, retain strict equality.
-    """
-    from ..losses import resolve_ce_weights, validate_foreground_reduction
-    result = dict(identity)
-    bg, fg = resolve_ce_weights(result.get('ce_background_weight', 0.5),
-                                result.get('ce_foreground_weight', 0.5))
-    result.update(ce_background_weight=bg, ce_foreground_weight=fg)
-    result['foreground_ce_reduction'] = validate_foreground_reduction(
-        result.get('foreground_ce_reduction', 'voxel_mean'), result.get('ce_reduction_mode', 'voxel_mean'))
-    return result
-
-
 def atomic_bytes(path, content):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +76,7 @@ def save_checkpoint(path, state):
     atomic_bytes(path, MAGIC + hashlib.sha256(payload).digest() + payload)
 
 
-def load_checkpoint(path, identity, *, extension=False, engineering_migration=False):
+def load_checkpoint(path, identity, *, extension=False):
     raw = Path(path).read_bytes()
     start = len(MAGIC)
     if not raw.startswith(MAGIC) or len(raw) <= start + 32:
@@ -106,12 +90,7 @@ def load_checkpoint(path, identity, *, extension=False, engineering_migration=Fa
                 'progress', 'rng', 'sampler_generator', 'loader_generator', 'log'}
     if not isinstance(state, dict) or not required <= state.keys() or state['schema_version'] != 1:
         raise ValueError('incomplete checkpoint state')
-    if engineering_migration:
-        if extension:
-            raise ValueError('engineering migration cannot combine with extension')
-        from .resume_migration import check_source_checkpoint
-        check_source_checkpoint(state, identity)
-    elif identity_with_ce_weights(state['identity']) != identity_with_ce_weights(identity):
+    if state['identity'] != identity:
         if extension:
             from .extension import check_extension_identity
             check_extension_identity(state['identity'], identity)

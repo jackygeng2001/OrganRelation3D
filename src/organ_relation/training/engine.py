@@ -1,4 +1,4 @@
-"""One serial full-scan loop for smoke, overfit, pilot and final training."""
+"""BraTS 三区域整例训练循环：串行、可严格续训，覆盖过拟合、pilot 与五折正式训练。"""
 from __future__ import annotations
 
 import hashlib
@@ -13,24 +13,20 @@ from torch.utils.data import DataLoader
 
 from ..data import augmentation as augment
 from ..evaluation.progress import CaseLedger
-from ..metrics import METRIC_PROTOCOL, hard_dice, summarize_dice
-from ..losses import (JointLoss, SegmentationLoss, foreground_background_ce_means,
-                      foreground_class_ce_means, resolve_ce_weights)
 from .console import TrainingConsole
 from .progress import ProgressClock
 from .extension import resolve_horizon
 from .state import (ScalarLog, atomic_json, capture_rng, digest, load_checkpoint,
                     restore_rng, save_checkpoint)
 from .tensorboard import TensorBoardObserver
-from .development import (cadence_due, summarize_branches, validation_branches,
-                          validate_early_stopping, new_early_state, advance_early_stopping)
-from .monai_relation import observed_forward
-from .brain_tumor import (region_training_branches, region_validation_branches,
+from .development import cadence_due, validate_early_stopping, new_early_state, advance_early_stopping
+from . import brain_tumor as regions  # 验证打分经模块属性调用，测试可以替换它
+from .brain_tumor import (PROTOCOL, region_training_branches, region_validation_branches,
                           summarize_region_branches)
 
 
 def validate_options(options):
-    if options.get('loss_observation', 'legacy') not in ('legacy', 'monitor_only'):
+    if options.get('loss_observation', 'legacy') != 'legacy':
         raise ValueError('invalid loss_observation')
     if options.get('cadence_unit', 'step') not in ('step', 'epoch'):
         raise ValueError('invalid cadence_unit')
@@ -76,10 +72,6 @@ def weights_hash(model):
 
 
 def diagnostic_parameter_groups(model):
-    from ..models.monai_relation import MonaiRelationUNet
-    from ..models.monai_coarse_aux import MonaiCoarseAuxUNet
-    if isinstance(model, (MonaiRelationUNet, MonaiCoarseAuxUNet)):
-        return model.diagnostic_parameter_groups()
     return {name: [(f'{name}.{n}', p) for n, p in module.named_parameters()]
             for name, module in model.named_children()}
 
@@ -99,138 +91,30 @@ def gradient_diagnostics(model):
     return result
 
 
-def foreground_ce_diagnostics(voxel_loss, indices, criterion):
-    """Single-case monitor statistics; never retain tensors in logs."""
-    means, macro, count = foreground_class_ce_means(voxel_loss, indices)
-    values = means[0].detach().cpu().tolist()
-    return dict(foreground_ce_reduction=criterion.foreground_ce_reduction,
-                present_foreground_class_count=count[0].item(),
-                per_class_ce_mean=[v if math.isfinite(v) else None for v in values],
-                CE_fg_macro=macro[0].item() if torch.isfinite(macro[0]) else None), macro
-
-
-def final_diagnostic_metrics(logits, label, criterion, hard_metrics):
-    """Single-case monitor only. TP requires the correct foreground CLASS.
-
-    Probability means are restricted to GT foreground for observation only;
-    they never enter model.forward or alter the supervised loss.
-    """
-    soft_dice = criterion(logits, label).final.dice_per_class[0].mean().item()
-    probabilities = logits.softmax(dim=1)
-    foreground = label > 0
-    count = foreground.sum().item()
-    true_probability = probabilities.gather(1, label.unsqueeze(1)).squeeze(1)
-    voxel_loss = -torch.log(true_probability.flatten(1) + criterion.epsilon)
-    bg, fg = foreground_background_ce_means(
-        voxel_loss, foreground.flatten(1))
-    fg_stats, macro = foreground_ce_diagnostics(voxel_loss, label.flatten(1), criterion)
-    selected_fg = macro if criterion.foreground_ce_reduction == 'class_macro_mean' else fg
-    bg_mean = bg[0].item() if torch.isfinite(bg[0]) else None
-    fg_mean = fg[0].item() if torch.isfinite(fg[0]) else None
-    return dict(**fg_stats, final_soft_dice=soft_dice,
-                ce_reduction_mode=criterion.ce_reduction_mode,
-                ce_background_weight=criterion.ce_background_weight,
-                ce_foreground_weight=criterion.ce_foreground_weight,
-                CE_bg_mean=bg_mean, CE_fg_mean=fg_mean,
-                balanced_ce=(0.5 * bg[0] + 0.5 * fg[0]).item() if bg_mean is not None and fg_mean is not None else None,
-                weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * selected_fg[0]).item()
-                if bg_mean is not None and fg_mean is not None else None,
-                predicted_foreground_voxels=sum(o['predicted_voxels'] for o in hard_metrics['organs']),
-                foreground_true_positive_voxels=sum(o['true_positive'] for o in hard_metrics['organs']),
-                gt_foreground_voxels=count,
-                gt_foreground_true_class_mean_probability=true_probability[foreground].mean().item() if count else None,
-                gt_foreground_background_mean_probability=probabilities[:, 0][foreground].mean().item() if count else None)
-
-
-def joint_ce_diagnostic_metrics(output, label, criterion):
-    """Single-case scalar monitor; process branches sequentially to bound memory."""
-    def branch(logits):
-        matched = logits.softmax(1).gather(1, label.unsqueeze(1)).squeeze(1)
-        voxel_loss = -torch.log(matched.flatten(1) + criterion.epsilon)
-        bg, fg = foreground_background_ce_means(
-            voxel_loss, label.flatten(1) > 0)
-        fg_stats, macro = foreground_ce_diagnostics(voxel_loss, label.flatten(1), criterion)
-        selected_fg = macro if criterion.foreground_ce_reduction == 'class_macro_mean' else fg
-        return dict(**fg_stats, CE_bg_mean=bg[0].item(), CE_fg_mean=fg[0].item(),
-                    ce_background_weight=criterion.ce_background_weight,
-                    ce_foreground_weight=criterion.ce_foreground_weight,
-                    weighted_ce=(criterion.ce_background_weight * bg[0] + criterion.ce_foreground_weight * selected_fg[0]).item(),
-                    balanced_ce=(0.5 * bg[0] + 0.5 * fg[0]).item())
-
-    coarse = branch(torch.nn.functional.interpolate(
-        output.coarse_logits, size=tuple(label.shape[1:]), mode='trilinear',
-        align_corners=criterion.align_corners))
-    final = branch(output.final_logits)
-    return dict(coarse=coarse, final=final)
-
-
 class Trainer:
     def __init__(self, model, criterion, optimizer, dataset, case_ids, *, device,
                  options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None,
-                 console=None, tensorboard=False, extend_to=None, engineering_resume_migration=False):
+                 console=None, tensorboard=False, extend_to=None):
         validate_options(options)
-        if engineering_resume_migration and (resume is None or extend_to is not None):
-            raise ValueError('engineering migration requires --resume and no extension')
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
-        self.mode = identity.get('mode', 'organ_relation_joint')
+        self.mode = identity.get('mode')
+        if self.mode != 'brats_regions':
+            raise ValueError('training is defined only for BraTS region volumes (mode brats_regions)')
         self.augmentation = options.get('augmentation')
-        if self.augmentation is not None and self.mode != 'brats_regions':
-            raise ValueError('training augmentation is defined only for BraTS region volumes')
-        if self.mode == 'brats_regions':
-            from ..models.brain_tumor import BrainTumorSegmentor
-            from ..losses import RegionJointLoss
-            expected_loss = (dict(epsilon=criterion.epsilon,lambda_c=criterion.lambda_c,align_corners=criterion.align_corners)
-                             if isinstance(criterion, RegionJointLoss) else None)
-            if expected_loss is not None and criterion.lambda_hier is not None:
-                expected_loss['lambda_hier'] = criterion.lambda_hier  # Eq. (33); absent keeps legacy identity.
-            if (not isinstance(model, BrainTumorSegmentor) or not isinstance(criterion, RegionJointLoss)
-                    or model.config.to_dict() != identity.get('model')
-                    or identity.get('loss') != expected_loss
-                    or not 0 < identity.get('threshold',0) < 1):
-                raise ValueError('brain model/loss/threshold must match strict identity')
-            self.ce_reduction_mode, self.foreground_ce_reduction, self.ce_weights = 'region_probability_bce', 'not_applicable', {}
-        elif self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
-            from .monai_reference import MonaiReferenceLoss
-            from .monai_relation import MonaiRelationLoss
-            expected = MonaiReferenceLoss if self.mode == 'monai_reference_unet' else MonaiRelationLoss
-            if not isinstance(criterion, expected) or criterion.constructor != identity.get('loss'):
-                raise ValueError('MONAI criterion must match reference identity')
-            if any(k in identity for k in ('ce_reduction_mode', 'foreground_ce_reduction',
-                                           'ce_background_weight', 'ce_foreground_weight')):
-                raise ValueError('MONAI reference cannot use custom CE options')
-            if self.mode == 'monai_relation_unet':
-                from ..models.monai_relation import MonaiRelationUNet
-                if (not isinstance(model, MonaiRelationUNet) or not model.relation_enabled
-                        or model.relation_config != identity.get('relation')
-                        or identity.get('relation_enabled') is not True
-                        or identity.get('coarse_supervision') != dict(lambda_c=criterion.lambda_c, align_corners=criterion.align_corners)):
-                    raise ValueError('MONAI relation model/loss must match identity')
-            if self.mode == 'monai_coarse_aux':
-                from ..models.monai_coarse_aux import MonaiCoarseAuxUNet
-                if (not isinstance(model, MonaiCoarseAuxUNet)
-                        or model.coarse_config != identity.get('coarse_head')
-                        or any(key in identity for key in ('relation', 'relation_enabled'))
-                        or identity.get('coarse_supervision') != dict(lambda_c=criterion.lambda_c, align_corners=criterion.align_corners)):
-                    raise ValueError('MONAI coarse-only model/loss must match identity')
-            self.ce_reduction_mode = 'monai_cross_entropy'
-            self.foreground_ce_reduction = 'voxel_mean'
-            self.ce_weights = {}
-        else:
-            expected_loss = {'organ_relation_joint': JointLoss, 'backbone_only_final': SegmentationLoss}.get(self.mode)
-            if expected_loss is None or not isinstance(criterion, expected_loss):
-                raise ValueError('unsupported or mismatched model/loss mode')
-            self.ce_reduction_mode = getattr(criterion, 'ce_reduction_mode', 'voxel_mean')
-            if identity.get('ce_reduction_mode', 'voxel_mean') != self.ce_reduction_mode:
-                raise ValueError('criterion ce_reduction_mode must match checkpoint/run identity')
-            self.foreground_ce_reduction = criterion.foreground_ce_reduction
-            if identity.get('foreground_ce_reduction', 'voxel_mean') != self.foreground_ce_reduction:
-                raise ValueError('criterion foreground_ce_reduction must match checkpoint/run identity')
-            bg, fg = resolve_ce_weights(identity.get('ce_background_weight', 0.5),
-                                        identity.get('ce_foreground_weight', 0.5))
-            self.ce_weights = dict(ce_background_weight=bg, ce_foreground_weight=fg)
-            if (criterion.ce_background_weight, criterion.ce_foreground_weight) != (bg, fg):
-                raise ValueError('criterion CE weights must match checkpoint/run identity')
+        from ..models.brain_tumor import BrainTumorSegmentor
+        from ..losses import RegionJointLoss
+        expected_loss = (dict(epsilon=criterion.epsilon,lambda_c=criterion.lambda_c,align_corners=criterion.align_corners)
+                         if isinstance(criterion, RegionJointLoss) else None)
+        if expected_loss is not None and criterion.lambda_hier is not None:
+            expected_loss['lambda_hier'] = criterion.lambda_hier  # Eq. (33); absent keeps legacy identity.
+        if (not isinstance(model, BrainTumorSegmentor) or not isinstance(criterion, RegionJointLoss)
+                or model.config.to_dict() != identity.get('model')
+                or identity.get('loss') != expected_loss
+                or not 0 < identity.get('threshold',0) < 1):
+            raise ValueError('brain model/loss/threshold must match strict identity')
+        # 以下三个日志字段沿用历史格式，保证新旧 run 的日志可直接对比。
+        self.ce_reduction_mode, self.foreground_ce_reduction = 'region_probability_bce', 'not_applicable'
         if extend_to is not None and (resume is None or type(extend_to) is not int or extend_to < 1):
             raise ValueError('--extend-to requires --resume and a positive integer total')
         if not case_ids or len(dataset) != len(case_ids) or len(set(case_ids)) != len(case_ids):
@@ -244,18 +128,9 @@ class Trainer:
         self.validation_dataset, self.validation_case_ids = validation_dataset, list(validation_case_ids)
         self.device, self.options, self.identity = torch.device(device), options, identity
         self.epoch_mode = options.get('cadence_unit') == 'epoch'
-        self.scalar_only = options.get('loss_observation') == 'monitor_only'
-        self.observation_profile = 'development_v2' if self.scalar_only else 'development_v1'
-        if self.scalar_only and (not self.epoch_mode or self.mode not in ('monai_reference_unet', 'monai_relation_unet')):
-            raise ValueError('monitor-only optimization requires epoch MONAI A/C')
-        if self.epoch_mode and self.mode not in ('monai_reference_unet', 'monai_relation_unet', 'brats_regions'):
-            raise ValueError('epoch observation requires MONAI A/C or BraTS regions')
-        if options.get('early_stopping'):
-            expected_monitor = ('dev_mean_region_hard_dice' if self.mode == 'brats_regions'
-                                else 'dev_mean_foreground_hard_dice')
-            if options['early_stopping']['monitor'] != expected_monitor:
-                raise ValueError('early stopping monitor does not match model region semantics')
-        self.summarize_epoch = summarize_region_branches if self.mode == 'brats_regions' else summarize_branches
+        self.observation_profile = 'development_v1'
+        if options.get('early_stopping') and options['early_stopping']['monitor'] != 'dev_mean_region_hard_dice':
+            raise ValueError('early stopping monitor does not match model region semantics')
         self.run_dir = Path(run_dir)
         self.console = console if console is not None else TrainingConsole(enabled=False)
         self.board = TensorBoardObserver(self.run_dir, enabled=tensorboard)
@@ -266,13 +141,7 @@ class Trainer:
         self.state = dict(global_step=0, epoch=0, order=[], cursor=0, pending_validation=False)
         if not resume and self.run_dir.exists() and any(self.run_dir.iterdir()):
             raise ValueError('new run directory must be empty; use --resume')
-        checkpoint = load_checkpoint(resume, identity, extension=extend_to is not None,
-                                     engineering_migration=engineering_resume_migration) if resume else None
-        if engineering_resume_migration:
-            from .resume_migration import migrate_checkpoint
-            checkpoint = migrate_checkpoint(checkpoint, identity, resume)
-        self.migration_pending = engineering_resume_migration
-        self.migration_record = checkpoint.get('engineering_resume_migration') if checkpoint else None
+        checkpoint = load_checkpoint(resume, identity, extension=extend_to is not None) if resume else None
         self.horizon = resolve_horizon(options, len(dataset), checkpoint, extend_to, identity, resume)
         self.total = self.horizon['total_steps']
         self.epochs = math.ceil(self.total / len(dataset))
@@ -365,8 +234,6 @@ class Trainer:
             sampler_generator=self.sampler_generator.get_state(),
             loader_generator=self.loader_generator.get_state(),
             log=self.log.position(self.state['global_step']))
-        if self.migration_record:
-            payload['engineering_resume_migration'] = self.migration_record
         if self.epoch_mode:
             payload['development_state'] = self.development_state
             if self.early_state is not None:
@@ -383,7 +250,7 @@ class Trainer:
         step = self.state['global_step']
         ledger = CaseLedger(self.run_dir / 'validation' / f'step_{step:08d}', dict(
             run_id=self.run_id, model_hash=weights_hash(self.model),
-            run_identity_hash=digest(self.origin_identity), metric_protocol='brats_regions_threshold_both_empty_null_v1' if self.mode == 'brats_regions' else METRIC_PROTOCOL,
+            run_identity_hash=digest(self.origin_identity), metric_protocol=PROTOCOL,
             preprocessing_hash=digest(self.identity['preprocessing']),
             manifest_hash=self.identity['data']['manifest_hash'],
             split_hash=self.identity['data'].get('split_hash'),
@@ -403,28 +270,9 @@ class Trainer:
                     started = time.perf_counter()
                     with torch.no_grad():
                         image, label = self._batch(self.validation_dataset, index, validation=True)
-                        output, relation_stats = observed_forward(self.model, image)
-                        if self.mode == 'brats_regions':
-                            from .brain_tumor import region_dice, region_diagnostics
-                            record = region_dice(output.final_logits,label,self.identity['threshold'])
-                            record['region_diagnostic'] = region_diagnostics(output,label,self.criterion,self.identity['threshold'])
-                        else:
-                            record = hard_dice(output.final_logits.argmax(1)[0], label[0])
-                        if relation_stats:
-                            record['relation_scale'] = relation_stats
-                        if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
-                            from .monai_reference import reference_diagnostics
-                            if self.mode in ('monai_relation_unet', 'monai_coarse_aux'):
-                                from .monai_relation import relation_diagnostics
-                                record['diagnostic'] = relation_diagnostics(output, label, self.criterion, record)
-                            else:
-                                record['diagnostic'] = reference_diagnostics(
-                                    output.final_logits, label, self.criterion, record)
-                        elif self.mode == 'backbone_only_final':
-                            record['diagnostic'] = final_diagnostic_metrics(
-                                output.final_logits, label, self.criterion, record)
-                        elif self.ce_reduction_mode == 'foreground_background_balanced':
-                            record['ce_branches'] = joint_ce_diagnostic_metrics(output, label, self.criterion)
+                        output = self.model(image)
+                        record = regions.region_dice(output.final_logits,label,self.identity['threshold'])
+                        record['region_diagnostic'] = regions.region_diagnostics(output,label,self.criterion,self.identity['threshold'])
                         del image, label, output
                     ledger.commit(case, data_identity, record)
                     self._sync()
@@ -436,29 +284,16 @@ class Trainer:
             self.model.train()
             restore_rng(training_rng, self.device)
             self.console.validation_end()
-        from .brain_tumor import summarize_regions
-        summary = summarize_regions(records) if self.mode == 'brats_regions' else summarize_dice(records)
+        summary = regions.summarize_regions(records)
         row = dict(run_id=self.run_id, phase=self.options['validation_role'],
                    global_step=step, epoch=self.state['epoch'], metrics=summary)
         row['mode'] = self.mode
-        if self.mode == 'brats_regions':
-            row['region_diagnostic_cases'] = {case:record['region_diagnostic'] for case,record in zip(self.validation_case_ids,records)}
+        row['region_diagnostic_cases'] = {case:record['region_diagnostic'] for case,record in zip(self.validation_case_ids,records)}
         row['ce_reduction_mode'] = self.ce_reduction_mode
         row['foreground_ce_reduction'] = self.foreground_ce_reduction
-        row.update(self.ce_weights)
-        if any('relation_scale' in record for record in records):
-            row['relation_scale_cases'] = {case: record['relation_scale']
-                for case, record in zip(self.validation_case_ids, records)}
-        if self.mode in ('backbone_only_final', 'monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
-            row['diagnostic_cases'] = {case: record['diagnostic']
-                                       for case, record in zip(self.validation_case_ids, records)}
-        elif self.ce_reduction_mode == 'foreground_background_balanced':
-            row['ce_diagnostic_cases'] = {case: record['ce_branches']
-                                          for case, record in zip(self.validation_case_ids, records)}
         if self.epoch_mode:
             row['observation_profile'] = self.observation_profile
-            branches = region_validation_branches if self.mode == 'brats_regions' else validation_branches
-            row['epoch_metrics'] = self.summarize_epoch([branches(r) for r in records])
+            row['epoch_metrics'] = summarize_region_branches([region_validation_branches(r) for r in records])
             score = row['metrics']['mean_case_dice']
             best = self.development_state['best_dev']
             improved = score is not None and (best is None or score > best['score'])
@@ -507,31 +342,13 @@ class Trainer:
     def run(self, *, stop_after=None):
         """Observers start after state restoration and close on every exit path."""
         try:
-            if self.migration_pending:
-                # Commit the identity/audit transaction at the restored optimizer
-                # boundary BEFORE observers, pending validation or any new case.
-                self.checkpoint(save_best=False)
-                self.migration_pending = False
             if self.extension_pending:
                 # Persist the new horizon at the already-completed optimizer
                 # boundary before observers, pending validation or another step.
                 self.checkpoint()
                 self.extension_pending = False
             self._start_observers()
-            start_step = self.state['global_step']
-            self.report_steps = self.scalar_only and stop_after == 5
             result = self._run(stop_after=stop_after)
-            if self.report_steps:
-                from .console import short_run_summary
-                with self.log.path.open(encoding='utf-8') as stream:
-                    rows = [row for line in stream if (row := json.loads(line))['phase'] == 'train'
-                            and row['global_step'] > start_step]
-                if rows:
-                    summary = dict(run_id=self.run_id, phase='short_run_summary', global_step=self.state['global_step'],
-                                   **short_run_summary(rows))
-                    self.log.append(summary)
-                    self.checkpoint()
-                    self.console.short_summary(summary)
             self.console.finish()
             return result
         finally:
@@ -566,10 +383,8 @@ class Trainer:
                 image, label = augment.apply(image, label, augmentation)
                 if self.options['memory_format'] == 'channels_last_3d':
                     image = image.contiguous(memory_format=torch.channels_last_3d)
-            output, relation_stats = observed_forward(self.model, image)  # No supervision enters forward.
-            loss_function = self.criterion.objective if self.scalar_only else self.criterion
-            loss = (loss_function(output.coarse_logits, output.final_logits, label)
-                    if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux', 'brats_regions') else loss_function(output.final_logits, label))
+            output = self.model(image)  # No supervision enters forward.
+            loss = self.criterion(output.coarse_logits, output.final_logits, label)
             loss.total.backward()
             epoch_complete = self.state['cursor'] + 1 == len(self.dataset)
             check = cadence_due(self.options, 'diagnostics_every', step, epoch, epoch_complete)
@@ -589,60 +404,27 @@ class Trainer:
             row = dict(run_id=self.run_id, phase='train', epoch=epoch, total_epochs=self.epochs,
                        global_step=step, total_steps=self.total, case_id=case,
                        shape=list(image.shape[2:]), lr=lr, total_loss=loss.total.detach().item(),
-                       final=({'segmentation': loss.final.detach().item()} if self.scalar_only else
-                              {k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')}),
+                       final={k: getattr(loss.final, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')},
                        diagnostics=diagnostics)
-            if not self.scalar_only:
-                row['soft_dice_per_organ'] = loss.final.dice_per_class.detach().cpu()[0].tolist()
-            if relation_stats:
-                row['relation_scale'] = relation_stats  # Same forward's gamma, before optimizer.step.
-                if self.scalar_only:
-                    row['gamma_after_step'] = self.model.bottleneck.fusion.relation_scale.detach().item()
-            if self.mode in ('monai_reference_unet', 'monai_relation_unet', 'monai_coarse_aux'):
-                from ..models.monai_reference import padding_geometry
-                row['geometry'] = padding_geometry(image.shape[2:])
+            row['soft_dice_per_organ'] = loss.final.dice_per_class.detach().cpu()[0].tolist()  # 依次为 WT/TC/ET（字段名沿用历史格式）
             row['mode'] = self.mode
             if augmentation is not None:
                 row['augmentation'] = augmentation
             row['ce_reduction_mode'] = self.ce_reduction_mode
             row['foreground_ce_reduction'] = self.foreground_ce_reduction
-            row.update(self.ce_weights)
-            if self.mode in ('organ_relation_joint', 'monai_relation_unet', 'monai_coarse_aux', 'brats_regions'):
-                row['coarse'] = ({'segmentation': loss.coarse.detach().item()} if self.scalar_only else
-                                {k: getattr(loss.coarse, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')})
-            if self.mode == 'brats_regions':
-                for branch in ('final','coarse'):
-                    row[branch]['bce'] = row[branch].pop('ce')
-                if getattr(loss, 'hierarchy', None) is not None:  # Eq. (32), before lambda_hier.
-                    row['hierarchy'] = loss.hierarchy.detach().item()
+            row['coarse'] = {k: getattr(loss.coarse, k).detach().item() for k in ('ce', 'dice_loss', 'segmentation')}
+            for branch in ('final','coarse'):
+                row[branch]['bce'] = row[branch].pop('ce')
+            if getattr(loss, 'hierarchy', None) is not None:  # Eq. (32), before lambda_hier.
+                row['hierarchy'] = loss.hierarchy.detach().item()
             if self.epoch_mode:
                 # Observe this same forward, before freeing it; no extra model
                 # call or stochastic sampling. Store only case scalar records.
-                if self.mode == 'brats_regions':
-                    branches = region_training_branches(loss)
-                else:
-                    with torch.no_grad():
-                        branches = dict(total_loss=row['total_loss'], final=dict(
-                            loss=row['final']['segmentation'],
-                            hard=hard_dice(output.final_logits.argmax(1)[0], label[0])))
-                        if not self.scalar_only:
-                            branches['final']['soft_per_organ'] = row['soft_dice_per_organ']
-                        if self.mode == 'monai_relation_unet':
-                            branches['coarse'] = dict(loss=row['coarse']['segmentation'])
-                            if not self.scalar_only:
-                                coarse = self.criterion.align_coarse(output.coarse_logits, label)
-                                branches['coarse'].update(soft_per_organ=loss.coarse.dice_per_class[0].detach().cpu().tolist(),
-                                    hard=hard_dice(coarse.argmax(1)[0], label[0]))
-                                del coarse
-                        if self.scalar_only and relation_stats:
-                            branches['relation_scale'] = dict(relation_stats)
-                            branches['gamma_after_step'] = row['gamma_after_step']
+                branches = region_training_branches(loss)
                 row['branch_metrics'] = branches
                 row['observation_profile'] = self.observation_profile
                 self.development_state['epoch_cases'].append(branches)
             del image, label, output, loss, before
-            if self.scalar_only:
-                self.optimizer.zero_grad(set_to_none=True)
             self._sync()
             elapsed = time.perf_counter() - started
             row.update(step_seconds=elapsed, memory=self._memory())
@@ -658,21 +440,12 @@ class Trainer:
             self.log.append(row)
             self.board.record(row)
             self.console.train_step(row)
-            if self.report_steps:
-                self.console.short_step(row)
             if self.epoch_mode and epoch_complete:
                 summary = dict(run_id=self.run_id, phase='train_epoch', epoch=epoch, global_step=step,
                     mode=self.mode, observation_profile=self.observation_profile,
-                    epoch_metrics=self.summarize_epoch(self.development_state['epoch_cases']))
-                if self.scalar_only and relation_stats:
-                    cases = self.development_state['epoch_cases']
-                    summary['relation_scale'] = dict(gamma=row['gamma_after_step'],
-                        **{key: sum(c['relation_scale'][key] for c in cases)/len(cases) for key in
-                           ('writeback_to_feature_norm', 'scaled_writeback_to_feature_norm')})
+                    epoch_metrics=summarize_region_branches(self.development_state['epoch_cases']))
                 self.log.append(summary)
                 self.board.record(summary)
-                if self.scalar_only:
-                    self.console.epoch_summary(summary)
                 self.development_state['epoch_cases'] = []
             due = cadence_due(self.options, 'validation_every', step, epoch, epoch_complete)
             self.state['pending_validation'] = due
@@ -684,7 +457,7 @@ class Trainer:
             if due:
                 self._validation()
             if self.state['cursor'] == 0 or not remaining:
-                self.console.epoch_end(monitored=due or (self.scalar_only and epoch_complete))
+                self.console.epoch_end(monitored=due)
             if invocation_done:
                 break
         return dict(self.state)

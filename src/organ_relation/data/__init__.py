@@ -1,1 +1,1 @@
-"""CPU metadata and exploratory fidelity tools; no training dataset yet."""
+"""BraTS MRI 读取、预处理缓存与训练期数据增强。"""

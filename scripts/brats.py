@@ -289,6 +289,8 @@ def execute(args):
     dev_data=BraTSDataset(dict(manifest,records=dev),**config['preprocessing'],cache_dir=args.data_cache)
     if args.data_cache is not None:  # Bitwise-identical data; recorded so a run never switches silently.
         execution['data_cache'] = 'brats_npy_v1'
+    # 后台预读下一例（逐位相同的数据与随机数，只为让 GPU 少等读盘）；记入身份，续跑不能悄悄切换。
+    execution['data_prefetch'] = 'next_case_thread_v1'
     identity=dict(mode='brats_regions',model=config['model'],loss=config['loss'],threshold=config['threshold'],
         preprocessing=config['preprocessing'],training=options,optimizer=dict(name='AdamW',**config['optimizer']),
         data=data_identity,
@@ -318,7 +320,7 @@ def execute(args):
     Trainer(model,criterion,optimizer,train_data,[r['case_id'] for r in train],device=device,
         options=options,identity=identity,run_dir=args.run_dir,validation_dataset=dev_data,
         validation_case_ids=[r['case_id'] for r in dev],resume=resume,tensorboard=True,
-        console=TrainingConsole(),extend_to=args.extend_to).run(stop_after=args.stop_after)
+        console=TrainingConsole(),extend_to=args.extend_to,prefetch=True).run(stop_after=args.stop_after)
 
 
 if __name__=='__main__':

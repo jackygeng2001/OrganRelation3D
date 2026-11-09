@@ -1,6 +1,7 @@
 """BraTS 三区域整例训练循环：串行、可严格续训，覆盖过拟合、pilot 与五折正式训练。"""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -23,6 +24,80 @@ from .development import cadence_due, validate_early_stopping, new_early_state, 
 from . import brain_tumor as regions  # 验证打分经模块属性调用，测试可以替换它
 from .brain_tumor import (PROTOCOL, region_training_branches, region_validation_branches,
                           summarize_region_branches)
+
+
+def prefetch_safe(dataset):
+    """预读只用于"读一例是纯函数、不消耗任何随机数"的数据集：BraTSDataset，或显式声明 prefetch_safe 的数据集。"""
+    from ..data.brats import BraTSDataset
+    return isinstance(dataset, BraTSDataset) or getattr(dataset, 'prefetch_safe', False) is True
+
+
+class _Prefetched(torch.utils.data.Dataset):
+    """把已预读的一例交给读取器；读取器照常创建，随机数消耗与现读时相同。"""
+
+    def __init__(self, index, sample):
+        self.index, self.sample = index, sample
+
+    def __getitem__(self, index):
+        if index != self.index:
+            raise IndexError('prefetched sample requested for another index')
+        return self.sample
+
+
+def _collate_one(items):
+    # batch=1：等价于默认 collate 的 stack（数值、形状、连续性相同），但不复制，保留锁页内存。
+    (sample,) = items
+    return sample._replace(image=sample.image.unsqueeze(0), label=sample.label.unsqueeze(0))
+
+
+class NextCase:
+    """单槽预读：GPU 计算当前这一例时，后台线程提前读出下一例。
+
+    只提前做"读出这一例"这件纯函数的工作；何时取用、读取器随机数、送入模型的数值都与不预读时逐位相同，
+    checkpoint 不含任何预读状态。后台读取出错时，错误在主线程取用这一例时原样抛出。
+    """
+
+    def __init__(self, *, pin_memory):
+        self.pin_memory = pin_memory
+        self.pool = None  # 首次预读时创建，close 后可再次创建
+        self.key = self.future = None
+
+    def _load(self, dataset, index):
+        sample = dataset[index]
+        if self.pin_memory:  # 锁页内存让拷进显存的那一步可以异步进行
+            sample = sample._replace(image=sample.image.pin_memory(), label=sample.label.pin_memory())
+        return sample
+
+    def submit(self, dataset, index):
+        self.discard()
+        if self.pool is None:
+            self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='next-case')
+        self.key = (id(dataset), index)
+        self.future = self.pool.submit(self._load, dataset, index)
+
+    def take(self, dataset, index):
+        """命中返回预读结果；未命中返回 None，由调用方现读。"""
+        if self.future is None or self.key != (id(dataset), index):
+            self.discard()
+            return None
+        future, self.key, self.future = self.future, None, None
+        return future.result()
+
+    def discard(self):
+        if self.future is not None and not self.future.cancel():
+            # 已在运行的读取无法取消：等它结束再丢弃，保证同一时刻只有一个线程读数据集；
+            # 它的异常也丢弃，需要这一例时主线程会现读并重新抛出。
+            try:
+                self.future.result()
+            except Exception:
+                pass
+        self.key = self.future = None
+
+    def close(self):
+        self.discard()
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
+            self.pool = None
 
 
 def validate_options(options):
@@ -94,8 +169,12 @@ def gradient_diagnostics(model):
 class Trainer:
     def __init__(self, model, criterion, optimizer, dataset, case_ids, *, device,
                  options, identity, run_dir, validation_dataset=None, validation_case_ids=(), resume=None,
-                 console=None, tensorboard=False, extend_to=None):
+                 console=None, tensorboard=False, extend_to=None, prefetch=False):
         validate_options(options)
+        if type(prefetch) is not bool:
+            raise ValueError('prefetch must be a boolean')
+        if prefetch and not all(prefetch_safe(d) for d in (dataset, validation_dataset) if d is not None):
+            raise ValueError('prefetch requires datasets whose loading is pure and consumes no random numbers')
         if identity.get('training') != options:
             raise ValueError('training options must match the strict run identity')
         self.mode = identity.get('mode')
@@ -127,6 +206,7 @@ class Trainer:
         self.dataset, self.case_ids = dataset, list(case_ids)
         self.validation_dataset, self.validation_case_ids = validation_dataset, list(validation_case_ids)
         self.device, self.options, self.identity = torch.device(device), options, identity
+        self.next_case = NextCase(pin_memory=self.device.type == 'cuda') if prefetch else None
         self.epoch_mode = options.get('cadence_unit') == 'epoch'
         self.observation_profile = 'development_v1'
         if options.get('early_stopping') and options['early_stopping']['monitor'] != 'dev_mean_region_hard_dice':
@@ -213,12 +293,21 @@ class Trainer:
                     peak_reserved_bytes=torch.cuda.max_memory_reserved(self.device))
 
     def _batch(self, dataset, index, *, validation=False):
-        # One index per iterator makes loader RNG consumption exactly one per
-        # committed sample, including mid-epoch resume. No worker/prefetch state.
+        # 每步只建一个读取器：读取器随机数对每个已提交样本恰好消耗一次（含中途续跑）。
+        # 没有多进程读取；可选的预读（NextCase）不进 checkpoint，也不改变这一点。
         generator = torch.Generator().manual_seed(0) if validation else self.loader_generator
-        batch = next(iter(DataLoader(dataset, batch_size=1, sampler=[index], num_workers=0,
-                                     generator=generator)))
-        image, label = batch.image.to(self.device), batch.label.to(self.device)
+        if self.next_case is None:
+            batch = next(iter(DataLoader(dataset, batch_size=1, sampler=[index], num_workers=0,
+                                         generator=generator)))
+            image, label = batch.image.to(self.device), batch.label.to(self.device)
+        else:
+            # 预读命中时读取器照常创建（随机数消耗不变），只是不再重复读盘；数值与上面的分支逐位相同。
+            sample = self.next_case.take(dataset, index)
+            source = dataset if sample is None else _Prefetched(index, sample)
+            batch = next(iter(DataLoader(source, batch_size=1, sampler=[index], num_workers=0,
+                                         generator=generator, collate_fn=_collate_one)))
+            image = batch.image.to(self.device, non_blocking=True)
+            label = batch.label.to(self.device, non_blocking=True)
         if self.options['memory_format'] == 'channels_last_3d':
             image = image.contiguous(memory_format=torch.channels_last_3d)
         return image, label
@@ -270,6 +359,8 @@ class Trainer:
                     started = time.perf_counter()
                     with torch.no_grad():
                         image, label = self._batch(self.validation_dataset, index, validation=True)
+                        if self.next_case is not None and index + 1 < len(self.validation_case_ids):
+                            self.next_case.submit(self.validation_dataset, index + 1)
                         output = self.model(image)
                         record = regions.region_dice(output.final_logits,label,self.identity['threshold'])
                         record['region_diagnostic'] = regions.region_diagnostics(output,label,self.criterion,self.identity['threshold'])
@@ -352,6 +443,8 @@ class Trainer:
             self.console.finish()
             return result
         finally:
+            if self.next_case is not None:
+                self.next_case.close()
             self.board.close()
             self.console.close()
 
@@ -376,6 +469,10 @@ class Trainer:
             started = time.perf_counter()
             self.optimizer.zero_grad(set_to_none=True)
             image, label = self._batch(self.dataset, index)
+            following = self.state['cursor'] + 1
+            if self.next_case is not None and following < len(self.state['order']) and step < self.total:
+                # 本轮内的下一例已确定，后台先读；跨轮的顺序要在下一步才抽取，那一例照常现读。
+                self.next_case.submit(self.dataset, self.state['order'][following])
             augmentation = None
             if self.augmentation is not None:  # Training cases only; drawn from (seed, step), never from labels.
                 augmentation = augment.draw(self.augmentation, augment.step_generator(self.options['seed'], step),

@@ -219,6 +219,12 @@ python scripts/brats.py train --config configs/train_brats_year_fold.json \
 恢复使用完全相同命令并加 `--resume runs/brats2018_fold0/last.ckpt`，保留原代码版本、
 源文件和运行环境。旧 step 模式 run 不迁移成此新协议，也不放宽历史源码身份校验。
 
+`--auto-resume`（代替 `--resume`）让同一条命令可反复执行：`<run-dir>/last.ckpt` 存在则严格续训（校验不变）；
+目录不存在或为空则新开；若在第一个 checkpoint 之前被中断（目录里只有 run.json/日志、没有任何 `.ckpt`，
+且实验身份 mode/model/loss/threshold/preprocessing/training/optimizer/data 一致），该目录改名为
+`<run-dir>.aborted-<UTC时间>` 保留（不删除），再从第 0 步按同一种子重新开始；其他情况一律拒绝且不改动目录。
+已早停结束的 run 续训即刻结束。实验进行中不要更新代码：续训仍严格校验代码版本。
+
 第一档消融（2026-11-09 用户批准）在整网混合精度外接框协议上各改一项，其余与
 `train_brats_year_fold_bbox_amp_bf16.json` 完全相同：`_no_relation`（建节点但不做关系推理，
 z(K)=z(0)）、`_drf_backbone`（双感受野编码器 + 普通 U-Net 解码器）、`_unet`（普通两卷积

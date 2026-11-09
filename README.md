@@ -218,3 +218,9 @@ python scripts/brats.py train --config configs/train_brats_year_fold.json \
 
 恢复使用完全相同命令并加 `--resume runs/brats2018_fold0/last.ckpt`，保留原代码版本、
 源文件和运行环境。旧 step 模式 run 不迁移成此新协议，也不放宽历史源码身份校验。
+
+第一档消融（2026-11-09 用户批准）在整网混合精度外接框协议上各改一项，其余与
+`train_brats_year_fold_bbox_amp_bf16.json` 完全相同：`_no_relation`（建节点但不做关系推理，
+z(K)=z(0)）、`_drf_backbone`（双感受野编码器 + 普通 U-Net 解码器）、`_unet`（普通两卷积
+编码器 + 普通解码器）、`_no_hier`（λ_hier=0）。各变体保留粗预测头作辅助深监督，目标函数相同。
+用法与主臂相同，只换 `--config` 和 `--run-dir`；定义与参数量见 METHOD_SPEC。

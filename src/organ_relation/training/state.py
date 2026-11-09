@@ -1,6 +1,7 @@
 """Atomic state and scalar logs. Load only checkpoints produced by trusted runs."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
@@ -121,6 +122,48 @@ def load_checkpoint(path, identity, *, extension=False, engineering_migration=Fa
     if state['scheduler'] is not None:
         raise ValueError('scheduler is not implemented in training v1')
     return state
+
+
+# The parts of a run identity that define the experiment (not code version or machine).
+SCIENTIFIC_IDENTITY_KEYS = ('mode', 'model', 'loss', 'threshold', 'preprocessing', 'training', 'optimizer', 'data')
+
+
+def prepare_auto_resume(run_dir, identity, *, now=None):
+    """One command that starts, resumes, or restarts an experiment run.
+
+    Returns (resume_path, archived_path). last.ckpt present: strict resume from
+    it (all usual checks still apply). Missing or empty directory: new run.
+    Otherwise the directory must be the residue of an interruption BEFORE the
+    first checkpoint: no checkpoint file anywhere and a run.json whose
+    scientific identity equals this one. Nothing in it can be resumed, so it is
+    renamed (never deleted) to <name>.aborted-<UTC time> and the run starts
+    again from step 0 with the same seed. Anything else is refused untouched.
+    """
+    run_dir = Path(run_dir)
+    last = run_dir / 'last.ckpt'
+    if last.is_file():
+        return last, None
+    if not run_dir.exists() or (run_dir.is_dir() and not any(run_dir.iterdir())):
+        return None, None
+    if not run_dir.is_dir():
+        raise ValueError(f'{run_dir} is not a directory')
+    if any(run_dir.rglob('*.ckpt')):
+        raise ValueError(f'{run_dir} has checkpoints but no last.ckpt; not touched, inspect it by hand')
+    try:
+        recorded = json.loads((run_dir / 'run.json').read_text(encoding='utf-8'))['identity']
+        if not isinstance(recorded, dict):
+            raise TypeError('identity is not a mapping')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f'{run_dir} is not an interrupted run (no readable run.json); not touched') from exc
+    differing = [key for key in SCIENTIFIC_IDENTITY_KEYS if recorded.get(key) != identity.get(key)]
+    if differing:
+        raise ValueError(f'{run_dir} belongs to a different experiment ({", ".join(differing)}); not touched')
+    stamp = (now or datetime.now(timezone.utc)).strftime('%Y%m%dT%H%M%SZ')
+    archived = run_dir.with_name(f'{run_dir.name}.aborted-{stamp}')
+    if archived.exists():
+        raise ValueError(f'{archived} already exists; not touched')
+    os.rename(run_dir, archived)
+    return None, archived
 
 
 class ScalarLog:

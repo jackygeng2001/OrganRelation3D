@@ -30,6 +30,9 @@ def main(argv=None):
     parser.add_argument('--max-steps',type=int,help='Explicit engineering-run horizon; no formal protocol default')
     parser.add_argument('--run-dir',type=Path)
     parser.add_argument('--resume',type=Path)
+    parser.add_argument('--auto-resume',action='store_true',
+                        help='Train/overfit: resume <run-dir>/last.ckpt if present, else start; a run interrupted '
+                             'before its first checkpoint is archived as <run-dir>.aborted-<time> and restarted')
     parser.add_argument('--extend-to',type=int,help='With --resume: increase total steps; keep original --max-steps')
     parser.add_argument('--stop-after',type=int)
     parser.add_argument('--profile-memory',action='store_true',
@@ -183,6 +186,8 @@ def execute(args):
 
     if args.extend_to is not None and (args.action not in ('train','overfit') or args.resume is None or args.extend_to < 1):
         raise ValueError('--extend-to requires training --resume and a positive total')
+    if args.auto_resume and (args.action not in ('train','overfit') or args.resume is not None or args.run_dir is None):
+        raise ValueError('--auto-resume is for train/overfit with --run-dir and without --resume')
     if args.profile_memory and args.action != 'check':
         raise ValueError('--profile-memory is only available for no-update check')
     config = json.loads(args.config.read_text())
@@ -204,7 +209,8 @@ def execute(args):
             subjects=len({r['subject_id'] for r in manifest['records']}),manifest_hash=digest(manifest),
             three_region_compatible=args.cohort!='brats2024_gli_post'),indent=2))
         return
-    if args.action == 'check' and (args.run_dir or args.resume or args.split or args.max_steps or args.stop_after):
+    if args.action == 'check' and (args.run_dir or args.resume or args.split or args.max_steps or args.stop_after
+                                   or args.auto_resume):
         raise ValueError('check is a no-update/no-run preflight')
     if args.action in ('train','overfit'):
         train,dev,options,data_identity = training_plan(args,manifest,config)
@@ -298,12 +304,20 @@ def execute(args):
             cudnn_allow_tf32=torch.backends.cudnn.allow_tf32,matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32),
         provenance=dict(git=git_state(),source_hashes=code_hashes()))
     identity=json.loads(json.dumps(identity))
+    resume=args.resume
+    if args.auto_resume:
+        from organ_relation.training.state import prepare_auto_resume
+        resume,archived=prepare_auto_resume(args.run_dir,identity)
+        if archived is not None:
+            print(f'auto-resume: {args.run_dir} stopped before its first checkpoint; archived to {archived}, '
+                  'restarting from step 0',file=sys.stderr)
+        print(f'auto-resume: '+(f'resuming {resume}' if resume else f'new run in {args.run_dir}'),file=sys.stderr)
     optimizer=torch.optim.AdamW(model.parameters(),**config['optimizer'])
     from organ_relation.training.engine import Trainer
     from organ_relation.training.console import TrainingConsole
     Trainer(model,criterion,optimizer,train_data,[r['case_id'] for r in train],device=device,
         options=options,identity=identity,run_dir=args.run_dir,validation_dataset=dev_data,
-        validation_case_ids=[r['case_id'] for r in dev],resume=args.resume,tensorboard=True,
+        validation_case_ids=[r['case_id'] for r in dev],resume=resume,tensorboard=True,
         console=TrainingConsole(),extend_to=args.extend_to).run(stop_after=args.stop_after)
 
 

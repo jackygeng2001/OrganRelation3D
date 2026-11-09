@@ -1,7 +1,20 @@
-"""Revised brain-tumor method, equations (1)-(26); image-only whole-volume forward."""
+"""Revised brain-tumor method, equations (1)-(26); image-only whole-volume forward.
+
+Ablation variants (user-approved 2026-11-09, explicit `model.variant`; omitted =
+the full document method, whose identity and construction are unchanged):
+  no_relation  -- nodes are built and used as in the full model, but no relation
+                  rounds run: z(K) := z(0) and the scale descriptor's incoming
+                  edge gates are fixed to 0 (there are no edges).
+  drf_backbone -- dual-receptive-field encoder + plain U-Net decoder (resize,
+                  concatenate the skip, two units); no nodes/writeback/queries.
+  unet         -- as drf_backbone, but each encoder stage is two ordinary units.
+Every variant keeps the coarse head on the deepest encoder feature, so all
+ablations train with the identical objective (27)-(33); in the two plain
+variants it is auxiliary deep supervision only and feeds nothing else.
+"""
 from dataclasses import asdict, dataclass
 import math
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import torch
 from torch import nn
@@ -30,6 +43,7 @@ class BrainTumorConfig:
     coarse_bias: bool
     fusion_bias: bool
     align_corners: bool
+    variant: Optional[str] = None  # None = full method; see VARIANTS.
 
     def __post_init__(self):
         for name in ('relation_channels', 'rounds', 'attention_channels', 'content_channels'):
@@ -40,9 +54,17 @@ class BrainTumorConfig:
             raise ValueError('finite gamma and positive epsilon required')
         if any(type(getattr(self, k)) is not bool for k in ('conv_bias','coarse_bias','fusion_bias','align_corners')):
             raise ValueError('explicit boolean settings required')
+        if self.variant not in VARIANTS:
+            raise ValueError(f'model variant must be omitted (full method) or one of {VARIANTS[1:]}')
 
     def to_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        if result['variant'] is None:  # The full method keeps its pre-ablation identity.
+            del result['variant']
+        return result
+
+
+VARIANTS = (None, 'no_relation', 'drf_backbone', 'unet')
 
 
 def unit(a, b, *, kernel=3, stride=1, dilation=1, bias):
@@ -71,10 +93,11 @@ class DualReceptiveField(nn.Module):
 class BrainEncoder(nn.Module):
     channels = (32, 64, 128, 256)
 
-    def __init__(self, *, bias):
+    def __init__(self, *, bias, dual_receptive_field=True):
         super().__init__()
         self.stem = nn.Sequential(unit(4, 32, bias=bias), unit(32, 32, bias=bias))
-        self.stages = nn.ModuleList(nn.Sequential(unit(a,b,stride=2,bias=bias), DualReceptiveField(b,bias=bias))
+        block = DualReceptiveField if dual_receptive_field else (lambda b, bias: unit(b, b, bias=bias))
+        self.stages = nn.ModuleList(nn.Sequential(unit(a,b,stride=2,bias=bias), block(b,bias=bias))
                                    for a,b in zip(self.channels[:-1], self.channels[1:]))
 
     def forward(self, image):
@@ -195,6 +218,32 @@ class BrainDecoder(nn.Module):
         return (logits,weights) if diagnostics else logits
 
 
+class PlainDecoder(nn.Module):
+    """Ablation decoder: the full decoder's resize/fuse/head without region
+    queries or scale weights (enhanced skip := skip)."""
+    scale_order = BrainDecoder.scale_order
+
+    def __init__(self, *, bias, align_corners):
+        super().__init__()
+        self.align_corners = align_corners
+        self.up = nn.ModuleList(ProjectThenUpsample(a,b,bias=bias) for a,b in ((256,128),(128,64),(64,32)))
+        self.fuse = nn.ModuleList(nn.Sequential(unit(2*c,c,bias=bias),unit(c,c,bias=bias)) for c in (128,64,32))
+        self.head = nn.Conv3d(32,3,1,bias=bias)
+
+    def forward(self, deepest, features):
+        decoded = deepest
+        for index, level in enumerate(self.scale_order):
+            skip = features[level]
+            decoded = self.up[index](decoded,size=skip.shape[2:],align_corners=self.align_corners)
+            first_unit, second_unit = self.fuse[index]
+            if isinstance(first_unit[0], DepthSlicedConv3d):
+                decoded = first_unit[2](first_unit[1](first_unit[0](decoded, skip)))
+                decoded = second_unit(decoded)
+            else:
+                decoded = self.fuse[index](torch.cat((decoded,skip),1))
+        return self.head(decoded)
+
+
 class BrainDiagnostics(NamedTuple):
     output: SegmentorOutput
     features: tuple
@@ -229,15 +278,21 @@ class BrainTumorSegmentor(nn.Module):
             raise ValueError('mixed_precision must be bfloat16, with depth_sliced and no convolution_compute_dtype')
         self.volume_dtype = None if mixed_precision is None else MIXED_PRECISION[mixed_precision]
         self.config = config
-        self.encoder = BrainEncoder(bias=config.conv_bias)
+        self.variant = config.variant
+        self.encoder = BrainEncoder(bias=config.conv_bias, dual_receptive_field=config.variant != 'unet')
         self.coarse_head = CoarseHead(256,bias=config.coarse_bias,out_channels=3,activation='sigmoid')
-        self.space_to_node = SpaceToNode(epsilon=config.epsilon,node_count=3,include_background=False)
-        self.relation = DynamicRelation(256,relation_channels=config.relation_channels,rounds=config.rounds,node_count=3)
-        self.node_to_space = NodeToSpace(256,attention_channels=config.attention_channels,
-                                         content_channels=config.content_channels,node_count=3)
-        self.fusion = ResidualFusion(256,content_channels=config.content_channels,bias=config.fusion_bias,
-                                     learnable_relation_scale=True,relation_scale_init=config.gamma_init)
-        self.decoder = BrainDecoder(bias=config.conv_bias,align_corners=config.align_corners)
+        if config.variant in ('drf_backbone', 'unet'):
+            self.decoder = PlainDecoder(bias=config.conv_bias,align_corners=config.align_corners)
+        else:  # Full method and no_relation; module order (and initialization) of the full method unchanged.
+            self.space_to_node = SpaceToNode(epsilon=config.epsilon,node_count=3,include_background=False)
+            if config.variant is None:
+                self.relation = DynamicRelation(256,relation_channels=config.relation_channels,
+                                                rounds=config.rounds,node_count=3)
+            self.node_to_space = NodeToSpace(256,attention_channels=config.attention_channels,
+                                             content_channels=config.content_channels,node_count=3)
+            self.fusion = ResidualFusion(256,content_channels=config.content_channels,bias=config.fusion_bias,
+                                         learnable_relation_scale=True,relation_scale_init=config.gamma_init)
+            self.decoder = BrainDecoder(bias=config.conv_bias,align_corners=config.align_corners)
         if convolution_backend == 'depth_sliced':
             from .depth_sliced_conv import enable_depth_sliced_convolutions
             enable_depth_sliced_convolutions(self, convolution_compute_dtype)
@@ -255,20 +310,29 @@ class BrainTumorSegmentor(nn.Module):
         # rounds and the deep writeback/fusion stay FP32 under mixed precision.
         F = features[-1].float() if reduced else features[-1]
         coarse = self.coarse_head(F)
-        nodes = self.space_to_node(F,coarse.probabilities)
-        relation = self.relation.forward_with_last_edges(nodes.z0,nodes.centroid,nodes.size,nodes.confidence)
-        content = self.node_to_space(F,relation.zK)
-        fused = self.fusion(F,content)
-        if reduced:
-            fused = fused.to(self.volume_dtype)
-        decoded = self.decoder(fused,features,relation.zK,nodes,relation.last_alpha,diagnostics=diagnostics)
-        final = decoded[0] if diagnostics else decoded
+        if isinstance(self.decoder, PlainDecoder):
+            del F  # Plain ablations: the coarse head is auxiliary supervision only.
+            nodes = zK = last_alpha = scale_weights = None
+            final = self.decoder(features[-1],features)
+        else:
+            nodes = self.space_to_node(F,coarse.probabilities)
+            if self.variant == 'no_relation':  # No rounds: z(K) := z(0); no edges, so no incoming gates.
+                zK, last_alpha = nodes.z0, nodes.z0.new_zeros(nodes.z0.shape[0],3,3)
+            else:
+                relation = self.relation.forward_with_last_edges(nodes.z0,nodes.centroid,nodes.size,nodes.confidence)
+                zK, last_alpha = relation.zK, relation.last_alpha
+            content = self.node_to_space(F,zK)
+            fused = self.fusion(F,content)
+            if reduced:
+                fused = fused.to(self.volume_dtype)
+            decoded = self.decoder(fused,features,zK,nodes,last_alpha,diagnostics=diagnostics)
+            final, scale_weights = decoded if diagnostics else (decoded, None)
         if reduced:
             final = final.float()
         if not torch.isfinite(final).all():
             raise ValueError('nonfinite final logits')
         output = SegmentorOutput(coarse.logits,final)
-        return BrainDiagnostics(output,features,nodes,relation.zK,relation.last_alpha,decoded[1]) if diagnostics else output
+        return BrainDiagnostics(output,features,nodes,zK,last_alpha,scale_weights) if diagnostics else output
 
     def forward(self, image):
         return self._run(image,False)

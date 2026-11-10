@@ -159,6 +159,17 @@ python scripts/brats_compare_runs.py runs/<实验A>_fold0 runs/<实验B>_fold0
 
 每个运行目录中的 `metrics.jsonl` 是完整的逐步日志，`validation/` 保存每次验证的逐病例结果，`best-dev.ckpt` 与 `last.ckpt` 分别为最佳轮与最新的 checkpoint。
 
+### 检查关系推理是否真的在起作用
+
+只用 CPU，读取同一折的若干 run（完整方法或 `no_relation`），在该折验证病例上测量回写占比、各轮边权和消息贡献，并在推理时逐项敲除（γ = 0、η = 0、边权置 0、跳过关系轮次），看 Dice 变化：
+
+```bash
+python scripts/brats_relation_probe.py probe --run E1=runs/<完整方法>_fold0 --run A3=runs/<no_relation>_fold0 --data-cache cache/npy --output <输出目录>/probe_fold0.jsonl --threads 8
+python scripts/brats_relation_probe.py summarize <输出目录>/probe_fold0.jsonl
+```
+
+输出文件写在运行目录和数据目录之外；中断后再执行同一条命令会跳过已完成的病例。训练时与当前代码的 `src/` 不同（例如训练后代码有过重构）时，需加 `--allow-source-change`，差异会记在输出表头里。
+
 ## 相关文档
 
 - [EXPERIMENTS.md](./EXPERIMENTS.md)：实验报告及日志，记录全部实验配置、进度与结果

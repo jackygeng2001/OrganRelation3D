@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 import support as training_fixtures
-from organ_relation.training.console import TrainingConsole, columns, duration
+from organ_relation.training.console import WIDTH, TrainingConsole, duration, report_row, spread
 from organ_relation.training.state import load_checkpoint, save_checkpoint, capture_rng
 from organ_relation.training.tensorboard import TensorBoardObserver, scalar_values
 
@@ -118,26 +118,41 @@ class MonitoringTests(unittest.TestCase):
         self.assertEqual([e.step for e in events.Scalars('Train/Total_Loss')], list(range(1, 41)))
         self.assertEqual([e.step for e in events.Scalars('Monitor/HardDice_Mean')], list(range(5, 41, 5)))
 
-    def start_console(self, stream, *, resume=False, cases=1):
+    def start_console(self, stream, *, resume=False, cases=1, epoch_mode=False):
         console = TrainingConsole(stream=stream)
-        identity = dict(model=training_fixtures.config()['model'],
+        identity = dict(model=dict(training_fixtures.config()['model'], graph='nested_chain'),
                         preprocessing={'spatial_crop': {'kind': 'nonzero_bbox', 'margin': 0, 'multiple_of': 8}},
-                        optimizer={'name': 'AdamW', 'lr': 3e-4},
-                        environment={'gpu_name': 'RX 7900 XTX'}, runtime={'dtype': 'float32'})
-        options = training_fixtures.config()['training']
+                        loss={'lambda_c': .5, 'lambda_hier': 1.0},
+                        optimizer={'name': 'AdamW', 'lr': 3e-4, 'weight_decay': 0},
+                        data={'manifest': {'cohort': 'brats2018', 'source_partition': 'training'},
+                              'split': {'fold': 2, 'folds': 5, 'dev': ['x'] * 57}},
+                        provenance={'git': {'commit': 'f58c4cd8abfe', 'dirty': False}},
+                        environment={'gpu_name': 'RX 7900 XTX', 'rocm': '7.2.26015', 'torch': '2.11.0+rocm7.2'},
+                        runtime={'dtype': 'float32', 'convolution_backend': 'depth_sliced',
+                                 'data_cache': 'brats_npy_v1', 'data_prefetch': 'next_case_thread_v1'})
+        options = dict(training_fixtures.config()['training'])
+        if epoch_mode:
+            options.update(cadence_unit='epoch', validation_every=1, checkpoint_every_steps=25, console_every_steps=25,
+                           early_stopping=dict(min_epochs=20, patience_epochs=20, min_delta=.001, monitor='x'))
         console.start(identity, options, [CASE] * cases, 100, 100,
                       dict(global_step=25 if resume else 0, epoch=25 if resume else 0),
-                      resume='run/last.ckpt' if resume else None, next_case=CASE)
+                      resume='run/last.ckpt' if resume else None, next_case=CASE,
+                      run_name='brats2018_r4_full_fold2', parameters=8486001)
         return console
 
-    def test_two_columns_have_fixed_colons_and_values(self):
-        text = columns([(('Model', '3-stage [8,16,32]'), ('Device', 'RX 7900 XTX')),
-                        (('LR', '3e-4'), ('Batch Size', 1))])
-        for line in text.splitlines()[1:-1]:
-            self.assertEqual(len(line), 97)
-            self.assertEqual([line[15], line[65]], [':', ':'])
-            self.assertNotEqual(line[17], ' ')
-            self.assertNotEqual(line[67], ' ')
+    def test_report_lines_share_one_right_edge(self):
+        lines = [report_row('[Epoch 012/150]', 'Train Loss', '0.8631', 'Val Dice', '0.7712'),
+                 report_row('', 'Lr', '3.00e-04', 'GPU Peak', '12.34 GiB'),
+                 report_row('', 'Fold', '2/5', 'Time', '4m 21s'),
+                 report_row('', 'Fold', 'x' * 30, 'Time', 'y' * 30),
+                 spread('[SAVE] Best 0.7712 (+0.0021), checkpoint saved', 'ETA 3h12m'),
+                 spread('[WARN] ' + 'z' * 80, 'ETA 3h12m')]
+        for line in lines:
+            self.assertEqual(len(line), WIDTH, line)
+        self.assertTrue(lines[1].endswith(' 12.34 GiB'))
+        self.assertTrue(lines[4].startswith('[SAVE] Best') and lines[4].endswith('  ETA 3h12m'))
+        self.assertTrue(lines[5].endswith('...  ETA 3h12m'))
+        self.assertEqual(len({line.index('|', 10) for line in lines[:3]}), 1)  # 悬挂缩进：各行竖线对齐
 
     def test_tqdm_tty_and_redirected_output_flags(self):
         for tty in (False, True):
@@ -149,9 +164,10 @@ class MonitoringTests(unittest.TestCase):
                 self.assertEqual(kwargs['disable'], not tty)
                 self.assertFalse(kwargs['leave'])
                 self.assertTrue(kwargs['dynamic_ncols'])
+                self.assertEqual(kwargs['desc'], 'Fold 2/5 Train')
                 console.close()
 
-    def test_resume_summary_and_no_raw_debug_dicts(self):
+    def test_checklist_resume_and_no_raw_debug_dicts(self):
         stream = Terminal()
         console = self.start_console(stream, resume=True)
         console.train_step(train_row(26))
@@ -161,34 +177,66 @@ class MonitoringTests(unittest.TestCase):
         console.validation_summary(validation_row(26))
         console.close()
         text = stream.getvalue()
-        for value in ('[RESUME]', '25 / 100', f'Next Case  : {CASE}', 'Monitor Dice', '0.7000', 'nonzero_bbox'):
+        for value in ('Pre-flight Checklist', '[INFO] Run        : brats2018_r4_full_fold2', '[INFO] Fold       : 2/5',
+                      'RX 7900 XTX, ROCm 7.2', 'f58c4cd (clean), PyTorch 2.11.0', 'brats2018 training, 1 train / 57 val',
+                      'crop nonzero_bbox x8, cache + prefetch', 'full method, nested_chain graph', '8,486,001',
+                      'final + 0.5 coarse + 1.0 hierarchy', '[INFO] Resume     : epoch 26/100, step 25/100',
+                      f'[INFO] Next Case  : {CASE}', 'Training Started', 'Mon Dice', '0.7000', '[Step 26]'):
             self.assertIn(value, text)
         for value in ('Val Dice', 'gradient_norm', 'pending_validation', 'eta_seconds', "{'", '\r'):
             self.assertNotIn(value, text)
+        self.assertTrue(all(len(line) <= WIDTH for line in text.splitlines()))
 
-    def test_single_case_does_not_print_summary_each_epoch(self):
-        stream = Terminal(); console = self.start_console(stream)
-        for step in range(1, 10):
-            console.train_step(train_row(step)); console.epoch_end()
-        self.assertNotIn('Last Loss', stream.getvalue())
-        console.finish(); console.close()
-        self.assertEqual(stream.getvalue().count('Last Loss'), 1)
-
-    def test_multicase_epoch_and_val_bars_and_summary(self):
+    def test_epoch_reports_save_warn_stop_with_fold_and_one_right_edge(self):
         stream = Terminal()
-        console = self.start_console(stream, cases=3)
+        console = self.start_console(stream, cases=3, epoch_mode=True)
+        early = dict(best_metric=None, best_epoch=None, no_improvement_count=0, last_validation_epoch=0, stopped=False)
         with patch('tqdm.tqdm', return_value=MagicMock()) as factory:
             factory.write.side_effect = lambda text, file: print(text, file=file)
-            console.begin_step(1, 0)
-            self.assertEqual(factory.call_args.kwargs['total'], 3)
-            console.train_step(train_row(3))
-            console.epoch_end()
-            self.assertIn('Last Loss', stream.getvalue())
-            console.validation_start(40, 'internal_dev')
-            self.assertEqual(factory.call_args.kwargs['desc'], '[Val]')
-            console.validation_summary(validation_row(3, 'internal_dev'))
+            for epoch, dice, improved in ((1, .70, True), (2, .71, True), (3, .705, False), (4, .7105, True)):
+                console.begin_step(epoch, 0)
+                self.assertEqual(factory.call_args.kwargs['desc'], f'Fold 2/5 Epoch {epoch}/100')
+                for step in range(3):
+                    row = train_row(3 * (epoch - 1) + step + 1); row['epoch'] = epoch
+                    console.train_step(row)
+                console.train_epoch(dict(phase='train_epoch', epoch=epoch, epoch_metrics={'total_loss': 2. - epoch / 10}))
+                console.validation_start(57, 'internal_dev')
+                self.assertEqual(factory.call_args.kwargs['desc'], 'Fold 2/5 Val')
+                console.validation_end()
+                count = 0 if improved and dice - (early['best_metric'] or 0) >= .001 else early['no_improvement_count'] + 1
+                early = dict(early, best_metric=max(dice, early['best_metric'] or 0), no_improvement_count=count,
+                             best_epoch=epoch if improved else early['best_epoch'], last_validation_epoch=epoch)
+                row = dict(validation_row(3 * epoch, 'internal_dev'), epoch=epoch, best_dev_improved=improved,
+                           early_stopping=early)
+                row['metrics'] = dict(row['metrics'], mean_case_dice=dice)
+                console.validation_summary(row)
+                console.epoch_end(monitored=True)
+            console.early_stop(dict(early, stopped=True))
             console.close()
-        self.assertIn('Val Dice', stream.getvalue())
+        text = stream.getvalue()
+        blocks = [line for line in text.splitlines() if line.startswith('[Epoch ')]
+        self.assertEqual([b[:15] for b in blocks], [f'[Epoch 00{e}/100]' for e in range(1, 5)])
+        for value in ('Train Loss : 1.9000', 'Val Dice :    0.7000', 'GPU Peak :  8.00 GiB', 'Fold       : 2/5',
+                      '[SAVE] Best 0.7000, checkpoint saved', '[SAVE] Best 0.7100 (+0.0100), checkpoint saved',
+                      '[WARN] No gain 1/20, best 0.7100 @ epoch 2', '[SAVE] Best 0.7105 (+0.0005), saved; no gain 2/20',
+                      '[STOP] Early stopping at epoch 4', 'Fold 2/5', 'Best Val Dice 0.7105 @ epoch 4', 'ETA 1h 00m'):
+            self.assertIn(value, text)
+        report = text[text.index('Training Started'):].splitlines()[2:]
+        for line in report:
+            if line:  # 报告与分隔线一律正好 WIDTH 列，空行分隔各轮
+                self.assertEqual(len(line), WIDTH, line)
+        self.assertEqual(text.count('=' * WIDTH + '\n\n' + '=' * WIDTH), 4)
+
+    def test_step_mode_prints_one_line_every_n_steps_and_done(self):
+        stream = Terminal()
+        console = self.start_console(stream, cases=3)
+        console.console_every_steps = 5
+        for step in range(1, 11):
+            console.train_step(train_row(step))
+        self.assertEqual(stream.getvalue().count('[Step '), 2)
+        console.total = 10
+        console.finish(); console.close()
+        self.assertIn('[DONE] Reached 10 steps', stream.getvalue())
 
     def test_time_format_only_presents_existing_eta(self):
         for value, expected in [(None, 'warming up'), (0, '0s'), (1902, '31m 42s'),

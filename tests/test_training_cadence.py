@@ -146,26 +146,19 @@ class CadenceTests(unittest.TestCase):
         self.assertEqual((row['epoch'], row['global_step'], row['case_id']), (3, 48, next_case))
         self.assertEqual(resumed.state['order'], ck['progress']['order'])
 
-    def test_console_every_five_steps_fields_and_no_fake_data(self):
-        for tty in (False, True):
-            with self.subTest(tty=tty):
-                stream = Terminal(tty); console = TrainingConsole(stream=stream)
-                with patch.object(console, '_bar', return_value=MagicMock()):
-                    console.start({}, options(), list(range(160)), 80000, 500, dict(epoch=0, global_step=0, cursor=0))
-                    console.begin_step(1, 0)
-                    for step in range(1, 11):
-                        row = train_row(step); row['epoch'] = 1
-                        row['total_loss'] = float(step)
-                        row['final']['segmentation'] = 3.1
-                        row['coarse']['segmentation'] = 2.05
-                        console.train_step(row)
-                    console.close()
-                text = stream.getvalue()
-                self.assertEqual(text.count('[Train summary]'), 2)
-                for value in ('5 / 80000', '10 / 80000', '5 / 160', '10 / 160', 'Mean Loss (5)', '3.0000', '8.0000',
-                              'Final Loss', 'Coarse Loss', '2.0500', 'LR', 'GPU Peak', 'Step Mean', 'Train ETA'):
-                    self.assertIn(value, text)
-                self.assertNotIn('Gamma', text)
+    def test_epoch_runs_print_no_per_step_lines(self):
+        stream = Terminal(); console = TrainingConsole(stream=stream)
+        with patch.object(console, '_bar', return_value=MagicMock()):
+            console.start({}, options(), list(range(160)), 80000, 500, dict(epoch=0, global_step=0, cursor=0))
+            console.begin_step(1, 0)
+            for step in range(1, 11):
+                row = train_row(step); row['epoch'] = 1
+                console.train_step(row)
+            console.close()
+        text = stream.getvalue()
+        self.assertIn('Pre-flight Checklist', text)
+        self.assertNotIn('[Step ', text)  # 按轮训练只在每次验证后输出一块报告
+        self.assertNotIn('Gamma', text)
 
 
 if __name__ == '__main__': unittest.main()

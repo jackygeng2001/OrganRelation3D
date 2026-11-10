@@ -408,13 +408,14 @@ class Trainer:
     def _start_observers(self):
         rng = capture_rng(self.device)
         try:
-            last = None
+            last, trained_seconds = None, 0.0
             if self.console.enabled:
                 with self.log.path.open(encoding='utf-8') as stream:
                     for line in stream:
                         row = json.loads(line)
                         if row['phase'] == 'train':
                             last = row
+                            trained_seconds += row.get('step_seconds') or 0.0
                 next_case = 'complete'
                 if self.state['global_step'] < self.total:
                     order = self.state['order']
@@ -423,8 +424,11 @@ class Trainer:
                         order = (torch.randperm(len(self.case_ids), generator=preview).tolist()
                                  if self.options['shuffle'] else list(range(len(self.case_ids))))
                     next_case = self.case_ids[order[self.state['cursor']]]
+                # 以下只用于显示：运行目录名、参数量、已有最佳与累计训练时间（全部来自已提交的状态与日志）
                 self.console.start(self.identity, self.options, self.case_ids, self.total, self.epochs,
-                                   self.state, resume=self.resume_path, next_case=next_case, last=last)
+                                   self.state, resume=self.resume_path, next_case=next_case, last=last,
+                                   run_name=self.run_dir.name, parameters=sum(p.numel() for p in self.model.parameters()),
+                                   best=self.development_state.get('best_dev'), trained_seconds=trained_seconds)
             self.board.start(self.state['global_step'], self.log.path)
         finally:
             # Lazy observer imports/initialization must not alter training RNG.
@@ -543,6 +547,7 @@ class Trainer:
                     epoch_metrics=summarize_region_branches(self.development_state['epoch_cases']))
                 self.log.append(summary)
                 self.board.record(summary)
+                self.console.train_epoch(summary)
                 self.development_state['epoch_cases'] = []
             due = cadence_due(self.options, 'validation_every', step, epoch, epoch_complete)
             self.state['pending_validation'] = due

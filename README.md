@@ -9,20 +9,20 @@
 
 ## 项目简介
 
-本项目研究多模态 MRI 脑肿瘤分割中的**区域关系建模**。BraTS 要求同时分割三个相互嵌套的区域：全肿瘤（WT）、肿瘤核心（TC）和增强肿瘤（ET）。多数方法把它们当成三个独立的输出；本方法则把三个区域各自表示成一个"节点"，让节点之间通过动态学习的有向边交换信息，再把关系推理的结果写回特征图并指导解码。
+本项目研究多模态 MRI 脑肿瘤分割中的**区域关系建模**。BraTS 要求同时分割三个相互嵌套的区域：全肿瘤（WT）、肿瘤核心（TC）和增强肿瘤（ET）。多数方法把它们当成三个独立的输出；本方法则把三个区域各自表示成一个"节点"，按 WT ⊇ TC ⊇ ET 的嵌套关系连成双向链 WT⇄TC⇄ET：由外到内的边表示包含关系，用外层区域约束内层的范围；由内到外的边用内层区域帮助外层确定位置。节点之间通过动态学习的边权交换信息，再把关系推理的结果写回特征图并指导解码。
 
 模型以 T1、T1ce、T2、FLAIR 四个模态为输入，**整个脑体积一次前向**（不切 patch、不滑窗），输出三个可重叠的区域概率。代码完全基于标准 PyTorch 实现，同时支持 AMD ROCm 与 NVIDIA CUDA。
 
-**当前进度（2026 年 11 月）**：BraTS2018 训练集 285 例的五折交叉验证主实验已完成，五折平均 Dice 为 **0.814**（WT 0.895 / TC 0.837 / ET 0.709）。第一档消融与基线实验（去掉关系推理、去掉层级一致性损失、双感受野主干、3D U-Net）正在进行。
+**当前进度（2026 年 11 月）**：三节点完全图版本在 BraTS2018 训练集 285 例上的五折交叉验证已完成，五折平均 Dice 为 **0.814**（WT 0.895 / TC 0.837 / ET 0.709）。关系图已改为嵌套双向链，接下来在 BraTS2018 上做逐项累加的消融，再在 BraTS 2023 与 2024 上训练完整方法，并把 2023 验证集的结果提交到官方评测。
 
 ## 亮点
 
-- **区域关系推理**：WT/TC/ET 三个节点、六条有向边，边权由节点特征和几何信息（质心、体积、置信度）动态计算，多轮消息传递后写回最深层特征。
+- **嵌套区域关系推理**：WT/TC/ET 三个节点连成双向链，共四条有向边，向内、向外两类边各有一套参数；边权由节点特征和几何信息（质心、体积、置信度）动态计算，多轮消息传递后写回最深层特征。
 - **关系驱动的尺度自适应解码**：由关系推理结果决定每个区域在各个解码尺度上使用多少区域信息。
 - **层级一致性约束**：在损失中软约束 ET ⊆ TC ⊆ WT 的嵌套关系。
 - **整例训练的工程优化**：深度切片卷积、空洞卷积的等价交错执行、整网 bf16 混合精度与整脑外接框裁剪，在 RX 7900 XTX 上把每轮训练从 44 分钟降到约 4.4 分钟，显存峰值约减半。
 - **严格可恢复**：checkpoint 保存模型、优化器、全部随机状态、病例顺序与日志位置，续跑前严格核对配置与代码版本；中断后**用同一条命令即可续跑**（CPU 测试中续跑轨迹与不中断逐位一致）。
-- **消融只改配置**：每个消融实验与主实验只差一项设置，由测试自动核对。
+- **消融只改配置**：逐项累加的消融中，相邻两组只差一项设置，由测试自动核对。
 
 ## 方法概览
 
@@ -30,7 +30,7 @@
 | --- | --- |
 | 双感受野编码器 | 四级编码（32/64/128/256 通道），每级并联普通卷积与空洞卷积，并按两路特征及其差异学习融合权重 |
 | 空间到节点 | 由最深层的粗预测得到三个区域的软掩码，把特征聚合成 WT/TC/ET 三个节点，并附带质心、体积、置信度 |
-| 动态关系推理 | 三节点完全图上进行 K 轮消息传递，边权每轮重新计算，GRU 更新节点 |
+| 嵌套关系推理 | 在双向链 WT⇄TC⇄ET 上进行 K 轮消息传递，向内边与向外边分开设参，边权每轮重新计算，GRU 更新节点 |
 | 深层回写 | 节点通过注意力写回最深层特征图：F' = F + γ·φ(G) |
 | 尺度自适应解码器 | 在三个跳连尺度上用节点查询注入区域信息，尺度权重由关系推理结果决定 |
 | 联合损失 | 最终输出与粗预测的 BCE + Dice，加上最终输出的层级一致性项 |
@@ -39,7 +39,7 @@
 
 ## 实验结果
 
-BraTS2018 训练集 285 例，按患者随机分成五折；每折 228 例训练、57 例验证，训练至早停。下表为各折最佳轮的验证集 Dice 平均值 ± 标准差：
+BraTS2018 训练集 285 例，按患者随机分成五折；每折 228 例训练、57 例验证，训练至早停。下表为三节点完全图版本各折最佳轮的验证集 Dice 平均值 ± 标准差（双向链版本正在训练）：
 
 | 指标 | 平均 | WT | TC | ET |
 | --- | ---: | ---: | ---: | ---: |
@@ -112,7 +112,7 @@ python scripts/brats_folds.py --cohort brats2018 --source datasets/BraTS2018/raw
 3. 预先生成预处理缓存（可选，约 16 GB，能显著加快训练）：
 
 ```bash
-python scripts/brats_cache.py --config configs/experiments/main.json --cohort brats2018 --source-partition training --source datasets/BraTS2018/raw/brats2018.zip --data-cache cache/npy
+python scripts/brats_cache.py --config configs/experiments/r4_full.json --cohort brats2018 --source-partition training --source datasets/BraTS2018/raw/brats2018.zip --data-cache cache/npy
 ```
 
 4. 复制本机配置模板，并按需要修改路径和设备：
@@ -128,10 +128,10 @@ cp configs/machine.example.json configs/machine.local.json
 ### 运行一个实验的五折
 
 ```bash
-python scripts/run_experiment.py configs/experiments/main.json
+python scripts/run_experiment.py configs/experiments/r4_full.json
 ```
 
-`configs/experiments/` 下每个文件是一个实验：`main.json` 为完整方法，`no_relation.json`、`no_hier.json`、`drf_backbone.json`、`unet.json` 为消融与基线。训练结果写入 `runs/<数据集>_<实验名>_fold<k>/`。
+`configs/experiments/` 下每个文件是一个实验：`r1_drf_backbone`（双感受野编码器 + 普通解码器）、`r2_nodes`（加入区域节点，不做关系推理）、`r3_relation`（加入嵌套关系推理）、`r4_full`（再加层级一致性损失，即完整方法）为逐项累加的消融，`r4_k1`、`r4_k3` 为关系推理轮数 K = 1、3 的对照。训练结果写入 `runs/<数据集>_<实验名>_fold<k>/`。
 
 训练中断后，**再次执行同一条命令即可续跑**：已早停结束的折自动跳过，未完成的折从断点继续。只想跑部分折时加 `--folds 0 1`，只想查看将要执行的命令时加 `--dry-run`。
 
@@ -140,7 +140,7 @@ python scripts/run_experiment.py configs/experiments/main.json
 用最大病例做一次前向和反向，不更新参数：
 
 ```bash
-python scripts/brats.py check --config configs/experiments/main.json --device cuda:0 --convolution-backend depth_sliced --cohort brats2018 --source-partition training --source datasets/BraTS2018/raw/brats2018.zip --data-cache cache/npy --case Brats18_TCIA13_653_1
+python scripts/brats.py check --config configs/experiments/r4_full.json --device cuda:0 --convolution-backend depth_sliced --cohort brats2018 --source-partition training --source datasets/BraTS2018/raw/brats2018.zip --data-cache cache/npy --case Brats18_TCIA13_653_1
 ```
 
 ### 查看结果

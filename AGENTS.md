@@ -13,11 +13,11 @@
 ## 方法与范围
 
 - 完整四模态 MRI，顺序 T1/T1ce/T2/FLAIR。一次整例（整脑）前向，无 patch/sliding-window 或标签引导采样。原始数据只读。唯一允许的空间裁剪是 2026-11-05 用户批准的显式 `preprocessing.spatial_crop`：仅由四模态非零体素决定的整脑外接框，标签只用于拒绝会丢失肿瘤体素的裁剪。
-- WT/TC/ET 三个重叠区域，独立 sigmoid 与阈值；三个固定节点、六条有向边、无 self-loop。GT 只用于监督与评估，绝不进入模型或存在性判断。
+- WT/TC/ET 三个重叠区域，独立 sigmoid 与阈值；三个固定节点，无 self-loop。关系图为 2026-11-10 老师批准的嵌套双向链 WT⇄TC⇄ET：四条有向边，WT 与 ET 之间无边；向内边（WT→TC、TC→ET）表示包含关系，用外层约束内层范围，向外边（ET→TC、TC→WT）用内层帮助外层定位；两类边的门控 MLP 与消息矩阵分开设参，GRU 共用。配置显式写 `model.graph=nested_chain`；省略 graph 即历史的三节点完全图（六条有向边，E1/A3 所用），identity 不变。GT 只用于监督与评估，绝不进入模型或存在性判断。
 - 严格按 METHOD_SPEC 实现双感受野编码器、关系公式、深层回写、关系尺度自适应解码器、BCE+Dice 联合损失；层级一致性损失仅加在最终预测上，权重由 `loss.lambda_hier` 显式给出。c/s/q 固定但不 detach；各轮共享参数、同步更新、重算边权。解码使用 z(K) 与缓存的 alpha(K-1)，不再重算一轮关系。
-- 消融只通过显式 `model.variant`（no_relation/drf_backbone/unet，2026-11-09 用户批准）或配置项实现；缺省必须是完整方法且 identity 不变，消融臂与主臂只差一项（由测试核对）。
+- 消融只通过显式 `model.variant`（no_relation/drf_backbone/unet，2026-11-09 用户批准）或配置项实现；省略 variant 与 graph 时构建与 identity 和历史 run 完全一致。当前消融（2026-11-10 老师批准，参照 DHAS）只在 BraTS 2018 五折上做、不跑基线，按 R1 双感受野编码器 + 普通解码器 → R2 加区域节点、不做关系推理 → R3 加嵌套关系推理 → R4 加层级一致性损失（完整方法）逐项累加，相邻两行只差一项（由测试核对），相邻两行做配对 t 检验；时间允许再跑 K=1、K=3 两组。
 - 方法文档未确定的实验选择必须显式配置并标为待冻结，不声称正式最优。`configs/development/implementation_check.json` 仅用于实现检查。
-- 2024 GLI 术后 RC 标签不能当作旧 BraTS 的 ET=4；不同年份/任务不自动混合；同一患者多时间点不得跨 train/dev。
+- 数据集（2026-11-10 老师批准）：BraTS 2018（消融）、2023 GLI（验证集结果提交到官方持续评测）、2024 GLI。2023/2024 的训练与提交协议在 EXPERIMENTS.md 中确定前，只做元数据与缓存检查。2024 GLI 术后 RC 标签不能当作旧 BraTS 的 ET=4；不同年份/任务不自动混合；同一患者多时间点不得跨 train/dev。
 - 修改 AGENTS 或 METHOD_SPEC 不能替代用户对科学变更的授权。文档缺失定义时先说明，沿用值必须可审计。
 
 ## 设备与环境
@@ -32,7 +32,7 @@
 ## 工程与复现
 
 - 源码按 models/data/training 职责放置，损失在 losses.py；复用现有 Trainer，不增 registry/manager/service 框架。各 `__init__.py` 保持轻量。
-- 配置：`configs/experiments/` 为正式五折实验（主方法与消融），`configs/development/` 为开发与历史配置；本机路径与设备写在不进 git 的 `configs/machine.local.json`（模板 `configs/machine.example.json`）。五折统一用 `scripts/run_experiment.py <配置>` 运行，中断后同一命令续跑。
+- 配置：`configs/experiments/` 为正式五折实验（主方法与消融），`configs/development/` 为开发与历史配置（旧全连接图阶段的正式配置在 `configs/development/complete_graph/`）；本机路径与设备写在不进 git 的 `configs/machine.local.json`（模板 `configs/machine.example.json`）。五折统一用 `scripts/run_experiment.py <配置>` 运行，中断后同一命令续跑。
 - 原子 checkpoint 保存完整 model/optimizer/RNG/sampler/order/日志提交位置；续跑严格验证 config/source/data/split/environment，不能通过宽松 resume 偷换模型或科学条件。实验进行期间，不得改动该实验所用目录中的代码。
 - `src/organ_relation/data/brats.py` 的 SHA256 是 npy 缓存键的一部分，改动它会使全部缓存失效；确需修改时先告知用户。
 - JSONL/checkpoint 为事实来源；TensorBoard/console 只是观察者，失败不改变训练轨迹，续跑时去除未提交的日志尾部。日志字段沿用现有格式，保证新旧 run 可直接对比。

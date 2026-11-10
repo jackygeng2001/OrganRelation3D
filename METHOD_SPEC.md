@@ -46,14 +46,19 @@ q_i = sum_x P_i(x)^2 / (M_i+epsilon)
 u_a(x)=x_a/max(n_a-1,1), axes D,H,W
 ```
 
-三节点、六条有向边、无自环；张量 alpha 的轴是 `[batch,sender,receiver]`。
+张量 alpha 的轴是 `[batch,sender,receiver]`，无自环。关系图由显式 `model.graph` 决定：
+
+- **嵌套双向链**（`graph=nested_chain`，2026-11-10 老师批准，当前方法）：节点 [WT,TC,ET] 由外到内，边集 E = E_in ∪ E_out，WT 与 ET 之间无边。向内边 E_in = {WT→TC, TC→ET} 表示包含关系，用外层区域约束内层的范围；向外边 E_out = {ET→TC, TC→WT} 用内层区域帮助外层确定位置。两类边各有一套边门控 MLP（W1,b1,w2,b2）与消息矩阵 Wm，记为上标 τ(i,j) ∈ {in,out}；GRU 两类共用。
+- **完全图**（省略 graph，历史实验 E1/A3）：六条有向边 i≠j，只有一套边门控与 Wm。
 
 ```
 r_ij = [z_i;z_j;c_j-c_i;s_i;s_j;q_i;q_j]   # 2C+7
-alpha_ij = sigmoid(w2^T ReLU(W1 r_ij+b1)+b2)
-m_j = sum_(i!=j) alpha_ij Wm z_i
+alpha_ij = sigmoid(w2_τ^T ReLU(W1_τ r_ij+b1_τ)+b2_τ)   for (i,j) ∈ E；不在 E 中的 alpha_ij = 0
+m_j = sum_((i,j)∈E) alpha_ij Wm_τ(i,j) z_i            # 接收端求和，不平均
 z_new_j = GRU(m_j,z_j)
 ```
+
+实现：每类边的 MLP 对 3×3 全部节点对打分后，用该类的固定结构掩码置 0（与无自环掩码同类，与标签无关），两类掩码互不重叠，相加即 `[B,3,3]` 的 alpha；聚合时再按掩码拆回两类，各乘自己的 Wm 后相加。被掩去的位置值恰为 0、对参数无梯度。两个掩码是非持久 buffer（随模型移动设备，不写入 state_dict 与 checkpoint，不消耗随机数）。参数名 `inward_hidden/inward_output/W_inward` 与 `outward_*`，构建顺序为向内、向外、GRU；完全图的参数名、构建顺序、初始化与计算不变（CPU 训练场景新旧代码日志与 checkpoint 逐值一致）。在 Cr=64 下双向链比完全图多一套边门控与 Wm（+98,881），完整模型 8,486,001 参数。链上 WT 与 ET 的信息只能经 TC 中转，K=2 是二者能互相影响的最少轮数。尺度描述中每个区域的两个入边门控按发送者升序排列，链上不存在的入边（WT 自 ET、ET 自 WT）恒为 0。
 
 每轮从同一旧 z 同步计算全部消息后更新，所有轮次共享参数。c/s/q/P 保持不变但不 detach。最后输出 z(K) 与实际末轮 `alpha(K-1)`；不额外基于 z(K) 重算边权。
 
@@ -130,15 +135,17 @@ Omega_I 为输入体素网格（使用 spatial_crop 时即框内体素，与 BCE
 
 `configs/development/implementation_check.json` 是实现检查配置，**不是正式实验协议**。文档固定的编码器和解码器尺寸已完整实现；不是缩通道的 micro 替身。
 
-尚未由修订文档给定的 deep Cr/K/da/Cg 暂沿用旧工程值 8/2/4/6，epsilon=1e-6，lambda_c=.5，gamma_init=.1；conv/coarse/deep fusion bias=true、align_corners=false、beta_init=0、tau=.5 均明确记录。标准层初始化保留 PyTorch 默认。模型参数量在这些显式设置下为 8,330,296。整脑外接框协议的配置（`configs/development/year_fold_bbox_fp32.json`、`configs/development/year_fold_bbox_conv_bf16.json` 与 `configs/experiments/*.json`）改用 2026-11-06 用户批准的 Cr/K/da/Cg=64/2/32/32：修订文档只规定 K 为正整数、未给 Cr/da/Cg 数值；边门控 MLP 输入为 2C+7=519 维，Cr=64=C/4；三节点完全图一轮即可两两直接交互，K=2 为交互一次再修正一次；深层回写 da=Cg=32 与文档给定的解码器 d=Cg=32 对齐。参数量 8,387,120（+0.7%），新增计算只在节点与最深层网格。epsilon、lambda_c、gamma_init、lambda_hier=1.0、beta_init、tau 不变。其余配置保持 8/2/4/6 以维持历史 run 可追溯。
+尚未由修订文档给定的 deep Cr/K/da/Cg 暂沿用旧工程值 8/2/4/6，epsilon=1e-6，lambda_c=.5，gamma_init=.1；conv/coarse/deep fusion bias=true、align_corners=false、beta_init=0、tau=.5 均明确记录。标准层初始化保留 PyTorch 默认。模型参数量在这些显式设置下为 8,330,296。整脑外接框协议的配置（`configs/development/year_fold_bbox_fp32.json`、`configs/development/year_fold_bbox_conv_bf16.json`、`configs/development/complete_graph/*.json` 与 `configs/experiments/*.json`）改用 2026-11-06 用户批准的 Cr/K/da/Cg=64/2/32/32：修订文档只规定 K 为正整数、未给 Cr/da/Cg 数值；边门控 MLP 输入为 2C+7=519 维，Cr=64=C/4；三节点完全图一轮即可两两直接交互，K=2 为交互一次再修正一次；深层回写 da=Cg=32 与文档给定的解码器 d=Cg=32 对齐。参数量 8,387,120（+0.7%；嵌套双向链 8,486,001），新增计算只在节点与最深层网格。epsilon、lambda_c、gamma_init、lambda_hier=1.0、beta_init、tau 不变。其余配置保持 8/2/4/6 以维持历史 run 可追溯。
 
 MRI 在原配准网格按各文件 scaling 读取；逐模态非零体素 z-score（std 下限 1e-8），原零值保持零；默认不空间裁剪，裁剪仅按上述 spatial_crop 显式开启。该强度选择、seed=20260925、AdamW 3e-4/weight_decay=0、batch=1、channels_last_3d 是开发选择，不声称来自论文或已是最优配置。没有 checkpointing 或 scheduler；默认没有 augmentation 和 AMP。整脑外接框协议配置显式开启 2026-11-06 用户批准的轻量训练增强 `training.augmentation=flip_intensity_v1`（`data/augmentation.py`）：仅训练病例，三个空间轴各以 0.5 概率翻转（图像与标签同步），每个模态的非零体素乘 U(0.9,1.1)、加 U(-0.1,0.1) 个 z-score 单位，零值保持零；dev/验证/推理从不增强。随机数由 (seed, global step) 派生，不消耗其他随机流，续训逐步复现，每步参数写入训练日志。增强作用于输入与标签，标签不进入模型或图像变换。不使用旋转、弹性形变或噪声。
 
 可选卷积计算精度（2026-11-05 用户批准，显式 `training.convolution_compute_dtype`，缺省为 FP32 且计算与 identity 逐位不变）：只在 depth_sliced 的 3×3×3 卷积内部把每批输入平面与权重舍入为 bfloat16 做乘加，部分和、输出、输入/权重梯度均累加回 FP32；参数、优化器、1×1 投影、GroupNorm、激活、节点构建与关系推理、深层回写、解码器注意力与尺度权重、损失全部保持 FP32，方法公式不变。训练入口只接受 null/bfloat16：float16 在真实体积上每体素梯度下溢（BraTS2018 一例实测 27.6% 梯度为 0，全梯度相对误差 67%），需要未实现的损失缩放。同例 bf16 相对 FP32：损失 2.61243/2.61230，logits 相对 L2 误差 0.65%，全参数梯度 0.54%（余弦约 1.0）。7900 XTX 实测训练步 3.47 s 对 3.64 s（约快 5%）。对照臂为 `configs/development/year_fold_bbox_conv_bf16.json`；所有对比实验必须统一精度。
 
-可选整网混合精度（2026-11-06 用户批准，显式 `training.mixed_precision=bfloat16`，与上一项二选一，仅 depth_sliced；缺省 null 时计算与 identity 不变）：编码器/解码器体数据以 bfloat16 存储，3×3×3 卷积、1×1 投影、激活、残差相加与解码器两次体积乘积用 bf16 计算；卷积每个深度块内各核平面的部分和在 FP32 中累加、每个输出只舍入一次，输入梯度按块在 FP32 中求和后写回，权重/偏置梯度累加为 FP32。保持 FP32 的是：参数与 AdamW、GroupNorm 的统计量与归一化算术（分块 FP32 var_mean 按 Chan 公式合并，不复制整卷）、粗预测头、Space-to-Node、关系轮次、深层回写与融合（最深层网格仅为体积的 1/512）、尺度权重、解码器打分偏置与 sigmoid 门控、交给损失的 logits 与损失本身。bf16 指数范围同 FP32，不需要损失缩放。BraTS2018 一例（136×160×136）同权重实测，相对 FP32：损失 2.61244/2.61230，最终 logits 相对 L2 误差 0.84%，全参数梯度 0.70%（余弦 0.99998；仅卷积 bf16 为 0.54%），峰值显存 3.82 对 7.10 GiB。正式训练入口同 30 例 30 步（npy 缓存、交错空洞执行）中位步时：FP32 1.56 s、仅卷积 bf16 1.21 s（1.29×）、整网 1.10 s（1.42×），峰值显存 10.10/10.10/5.43 GiB，30 步损失 1.4574/1.4578/1.4573；整网模式中断续训通过。采用交错空洞执行之前三者为 4.18/3.82/3.77 s：MIOpen 对空洞率 2 的 3×3 卷积回退的 naive 内核占主导，bf16 同样慢。对照臂为 `configs/experiments/main.json`。
+可选整网混合精度（2026-11-06 用户批准，显式 `training.mixed_precision=bfloat16`，与上一项二选一，仅 depth_sliced；缺省 null 时计算与 identity 不变）：编码器/解码器体数据以 bfloat16 存储，3×3×3 卷积、1×1 投影、激活、残差相加与解码器两次体积乘积用 bf16 计算；卷积每个深度块内各核平面的部分和在 FP32 中累加、每个输出只舍入一次，输入梯度按块在 FP32 中求和后写回，权重/偏置梯度累加为 FP32。保持 FP32 的是：参数与 AdamW、GroupNorm 的统计量与归一化算术（分块 FP32 var_mean 按 Chan 公式合并，不复制整卷）、粗预测头、Space-to-Node、关系轮次、深层回写与融合（最深层网格仅为体积的 1/512）、尺度权重、解码器打分偏置与 sigmoid 门控、交给损失的 logits 与损失本身。bf16 指数范围同 FP32，不需要损失缩放。BraTS2018 一例（136×160×136）同权重实测，相对 FP32：损失 2.61244/2.61230，最终 logits 相对 L2 误差 0.84%，全参数梯度 0.70%（余弦 0.99998；仅卷积 bf16 为 0.54%），峰值显存 3.82 对 7.10 GiB。正式训练入口同 30 例 30 步（npy 缓存、交错空洞执行）中位步时：FP32 1.56 s、仅卷积 bf16 1.21 s（1.29×）、整网 1.10 s（1.42×），峰值显存 10.10/10.10/5.43 GiB，30 步损失 1.4574/1.4578/1.4573；整网模式中断续训通过。采用交错空洞执行之前三者为 4.18/3.82/3.77 s：MIOpen 对空洞率 2 的 3×3 卷积回退的 naive 内核占主导，bf16 同样慢。对照臂为 `configs/development/complete_graph/main.json`。
 
-第一档消融（2026-11-09 用户批准；显式 `model.variant`，缺省即完整文档方法，其构建顺序、初始化、参数与 identity 逐位不变，`to_dict` 不写出 variant）：`no_relation` 照常由粗掩码构建三节点（含 c/s/q）并用于深层回写与解码器，但不运行关系轮次，z(K):=z(0)，尺度描述中的入边门控因无边而固定为 0，参数 7,894,255；`drf_backbone` 保留双感受野编码器，解码器换为普通 U-Net 解码（三线性放大后与 skip 拼接、两个单元、1×1 头），无节点、回写、区域查询与尺度权重，参数 7,780,444；`unet` 在此基础上把每级 DRF 块换成一个普通 3×3×3 单元（stride-2 单元 + 单元，经典两卷积层级），无空洞卷积，参数 5,305,350。各变体都保留最深层 1×1 粗预测头：完整方法中它提供节点掩码；两个 plain 变体中只作辅助深监督、不接入其他模块。因此所有消融使用完全相同的目标（式 27–33，λc=0.5、λ_hier=1），只改结构；第四臂 `lambda_hier=0` 只去掉式 (33) 层级项（仍计算并记录）。配置为 `configs/experiments/{no_relation,drf_backbone,unet,no_hier}.json`，与主臂 `configs/experiments/main.json` 只差上述一项（测试逐项比对）。plain 变体中未用到的节点/关系字段保留原值仅为 identity 对齐。这些是开发对照，不是冻结的论文协议；同一组对比必须同精度、同折、同早停，并报告参数量。
+第一档消融（2026-11-09 用户批准；显式 `model.variant`，缺省即完整文档方法，其构建顺序、初始化、参数与 identity 逐位不变，`to_dict` 不写出 variant）：`no_relation` 照常由粗掩码构建三节点（含 c/s/q）并用于深层回写与解码器，但不运行关系轮次，z(K):=z(0)，尺度描述中的入边门控因无边而固定为 0，参数 7,894,255；`drf_backbone` 保留双感受野编码器，解码器换为普通 U-Net 解码（三线性放大后与 skip 拼接、两个单元、1×1 头），无节点、回写、区域查询与尺度权重，参数 7,780,444；`unet` 在此基础上把每级 DRF 块换成一个普通 3×3×3 单元（stride-2 单元 + 单元，经典两卷积层级），无空洞卷积，参数 5,305,350。各变体都保留最深层 1×1 粗预测头：完整方法中它提供节点掩码；两个 plain 变体中只作辅助深监督、不接入其他模块。因此所有消融使用完全相同的目标（式 27–33，λc=0.5、λ_hier=1），只改结构；第四臂 `lambda_hier=0` 只去掉式 (33) 层级项（仍计算并记录）。配置为 `configs/development/complete_graph/{no_relation,drf_backbone,unet,no_hier}.json`，与主臂 `configs/development/complete_graph/main.json` 只差上述一项（测试逐项比对）；2026-11-10 起这一组由下述累加消融取代，其中只有 E1（main）与 A3（no_relation）实际运行。plain 变体中未用到的节点/关系字段保留原值仅为 identity 对齐。这些是开发对照，不是冻结的论文协议；同一组对比必须同精度、同折、同早停，并报告参数量。
+
+累加消融（2026-11-10 老师批准，参照 DHAS，只在 BraTS 2018 五折上做，不跑基线）：`configs/experiments/` 下 R1 `r1_drf_backbone`（variant=drf_backbone，λ_hier=0，7,780,444 参数）→ R2 `r2_nodes`（variant=no_relation，λ_hier=0，7,894,255）→ R3 `r3_relation`（省略 variant，graph=nested_chain，λ_hier=0，8,486,001）→ R4 `r4_full`（λ_hier=1，即完整方法）；可选 `r4_k1`、`r4_k3`（R4 的 K=1、3）。相邻两行只差一项，R4 与 E1 的配置只差 graph（测试逐项比对）；所有新配置都写 graph=nested_chain，无关系模块的变体不使用它。λ_hier=0 时层级项仍计算并记录。相邻两行做配对 t 检验（检验单位待定，见 EXPERIMENTS.md）。
 
 ## 数据与实验协议边界
 

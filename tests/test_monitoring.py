@@ -163,7 +163,8 @@ class MonitoringTests(unittest.TestCase):
                 self.assertIs(kwargs['file'], stream)
                 self.assertEqual(kwargs['disable'], not tty)
                 self.assertFalse(kwargs['leave'])
-                self.assertTrue(kwargs['dynamic_ncols'])
+                self.assertEqual(kwargs['ascii'], ' =')  # 只用单宽 ASCII 字符
+                self.assertLessEqual(kwargs['ncols'], 100)
                 self.assertEqual(kwargs['desc'], 'Fold 2/5 Train')
                 console.close()
 
@@ -181,7 +182,7 @@ class MonitoringTests(unittest.TestCase):
                       'RX 7900 XTX, ROCm 7.2', 'f58c4cd (clean), PyTorch 2.11.0', 'brats2018 training, 1 train / 57 val',
                       'crop nonzero_bbox x8, cache + prefetch', 'full method, nested_chain graph', '8,486,001',
                       'final + 0.5 coarse + 1.0 hierarchy', '[INFO] Resume     : epoch 26/100, step 25/100',
-                      f'[INFO] Next Case  : {CASE}', 'Training Started', 'Mon Dice', '0.7000', '[Step 26]'):
+                      f'[INFO] Next Case  : {CASE}', '\n[Training Started]\n', 'Mon Dice', '0.7000', '[Step 26]'):
             self.assertIn(value, text)
         for value in ('Val Dice', 'gradient_norm', 'pending_validation', 'eta_seconds', "{'", '\r'):
             self.assertNotIn(value, text)
@@ -221,7 +222,7 @@ class MonitoringTests(unittest.TestCase):
                       '[WARN] No gain 1/20, best 0.7100 @ epoch 2', '[SAVE] Best 0.7105 (+0.0005), saved; no gain 2/20',
                       '[STOP] Early stopping at epoch 4', 'Fold 2/5', 'Best Val Dice 0.7105 @ epoch 4', 'ETA 1h 00m'):
             self.assertIn(value, text)
-        report = text[text.index('Training Started'):].splitlines()[2:]
+        report = text[text.index('[Training Started]'):].splitlines()[2:]
         for line in report:
             if line:  # 报告与分隔线一律正好 WIDTH 列，空行分隔各轮
                 self.assertEqual(len(line), WIDTH, line)

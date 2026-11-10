@@ -113,9 +113,13 @@ class TrainingConsole:
 
     def _bar(self, total, initial, desc):
         from tqdm import tqdm
+        # 只用 ASCII 字符画进度条：中文环境的终端常把方块字符按双宽显示，行宽超过终端后换行，
+        # 回车只能回到最后一行开头，进度条就会叠成乱码。宽度比终端窄一列，最多 100 列。
+        import shutil
+        width = min(100, shutil.get_terminal_size((WIDTH + 1, 24)).columns - 1)
         return tqdm(total=total, initial=initial, desc=desc, file=self.stream,
-                    disable=not self.stream.isatty(), leave=False, dynamic_ncols=True,
-                    bar_format='{desc} {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} {postfix}')
+                    disable=not self.stream.isatty(), leave=False, ncols=width, ascii=' =',
+                    bar_format='{desc} {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}{postfix}')
 
     def _write(self, message):
         from tqdm import tqdm
@@ -187,7 +191,7 @@ class TrainingConsole:
             items.append(('Next Case', next_case))
         lines = [rule('='), 'Pre-flight Checklist'.center(WIDTH).rstrip(), rule('-')]
         lines += [fit(f'[INFO] {key:<10} : {value}') for key, value in items]
-        lines += [rule('='), '', 'Training Started'.center(WIDTH).rstrip(), '']
+        lines += [rule('='), '', '[Training Started]', '']
         self._write('\n'.join(lines))
         if self.global_bar:
             self.train_bar = self._bar(total, state['global_step'], self._label('Train'))
@@ -206,7 +210,9 @@ class TrainingConsole:
         if peak is not None:
             self.epoch_peak = peak if self.epoch_peak is None else max(self.epoch_peak, peak)
         if self.train_bar is not None:
-            self.train_bar.set_postfix_str(f"loss={row['total_loss']:.3f} ETA={duration(row['progress']['eta_seconds'])}",
+            # 进度条的 ETA 是本轮剩余时间；整个训练的 ETA 在每轮报告里
+            epoch_eta = row['progress'].get('epoch_eta_seconds')
+            self.train_bar.set_postfix_str(f"loss {row['total_loss']:.3f} ETA {duration(epoch_eta) if epoch_eta else '-'}",
                                            refresh=False)
             self.train_bar.update(1)
         if self.console_every_steps and row['global_step'] % self.console_every_steps == 0:

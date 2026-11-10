@@ -70,7 +70,7 @@
 | 编号 | 运行目录（`runs/` 下） | 代码版本 | 说明 |
 | --- | --- | --- | --- |
 | E1 | `brats2018_5fold_amp_bf16_fold{0..4}` | 7e77278 | 主实验，已完成 |
-| A3 | `brats2018_5fold_amp_bf16_no_relation_fold{0..4}` | fold0：e153447；fold1–2：84ad213；fold3–4：acf9972 | fold0 在旧分支 `feat/brats-brain-bbox-crop` 上运行（续跑必须用原代码）；首次运行在第 22 步中断，残留目录已自动归档为 `..._fold0.aborted-20261109T041140Z`。fold1–4 在 `.worktrees/prefetch`（84ad213，加入数据预读）上运行，配置内容与 fold0 相同，沿用原目录命名 |；fold3、fold4 改在 dev（acf9972，新控制台）上运行，配置为 `configs/development/complete_graph/no_relation.json`（内容未变），fold3 在旧代码上的约 5 轮残留目录改名为 `..._fold3.superseded-20261110` 保留
+| A3 | `brats2018_5fold_amp_bf16_no_relation_fold{0..4}` | fold0：e153447；fold1–2：84ad213；fold3–4：acf9972 起（以各 run.json 记录的提交号为准）| fold0 在旧分支 `feat/brats-brain-bbox-crop` 上运行（续跑必须用原代码）；首次运行在第 22 步中断，残留目录已自动归档为 `..._fold0.aborted-20261109T041140Z`。fold1–4 在 `.worktrees/prefetch`（84ad213，加入数据预读）上运行，配置内容与 fold0 相同，沿用原目录命名 |；fold3、fold4 改在 dev（acf9972，新控制台）上运行，配置为 `configs/development/complete_graph/no_relation.json`（内容未变），fold3 在旧代码上的约 5 轮残留目录改名为 `..._fold3.superseded-20261110` 保留
 | R1–R4、K1/K3 | `brats2018_<配置名>_fold{0..4}`，如 `brats2018_r4_full_fold0` | 605e5a1 起 | 用 `scripts/run_experiment.py configs/experiments/<配置名>.json` 运行 |
 | A4/A2/A1 | — | — | 2026-11-10 取消，未运行 |
 | D1–D5 | 见第 6 节 | 各自记录 | 开发阶段实验 |
@@ -186,7 +186,7 @@
 
 **机器分配**（2026-11-09 定）：AMD 跑 A3 → A4 → A2；RTX 5060 只跑 A1，需先完成环境验证和 3 轮一致性检查。唯一跨机器的比较是 A1 对 A2。
 
-**A3 进展**：2026-11-09 13:11 启动；fold0 于 11-10 01:35 完成，fold1 于 07:52 完成，fold2 于 15:18 完成（第 105 轮早停，最佳 0.8134 @ 89，WT 0.891 / TC 0.847 / ET 0.698，最后 5 轮平均 0.7984；E1 fold2 为 0.8140）。fold3 于 15:18 在旧代码上启动，约 5 轮后由用户停止，改用新控制台的代码（acf9972）从头重跑；旧代码的 fold3 残留目录改名保留为 `..._fold3.superseded-20261110`，不使用。fold3、fold4 在 acf9972 上运行。前两折结果见 5.3，关系推理诊断见 5.4。
+**A3 进展**：2026-11-09 13:11 启动；fold0 于 11-10 01:35 完成，fold1 于 07:52 完成，fold2 于 15:18 完成（第 105 轮早停，最佳 0.8134 @ 89，WT 0.891 / TC 0.847 / ET 0.698，最后 5 轮平均 0.7984；E1 fold2 为 0.8140）。fold3 于 15:18 在旧代码上启动，约 5 轮后由用户停止，改用新控制台的代码（acf9972）从头重跑；旧代码的 fold3 残留目录改名保留为 `..._fold3.superseded-20261110`，不使用。fold3、fold4 在 acf9972 起的代码上运行（以各 run.json 记录的提交号为准）。前两折结果见 5.3，关系推理诊断见 5.4。
 
 **后续可选（第二、三档，已由 5.1 取代）**：
 - 第二档：静态边权，检验"动态"本身是否有用；去掉解码器区域引导；去掉深层回写（γ = 0）。

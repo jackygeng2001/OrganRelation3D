@@ -99,7 +99,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((rows['r1_drf_backbone']['model']['variant'], rows['r1_drf_backbone']['loss']['lambda_hier']),
                          ('drf_backbone', 0.0))
         old = json.loads((fixtures.ROOT / 'configs/development/complete_graph/main.json').read_text())
-        self.assertEqual(science(rows['r4_full']), changed(old, 'model', 'graph', 'nested_chain'))
+        # R4 与 E1 只差关系图和轮数上限（150 对 500，二者都在上限前早停，训练过程等价）
+        expected = changed(old, 'model', 'graph', 'nested_chain')
+        expected['training']['max_epochs'] = 150
+        self.assertEqual(science(rows['r4_full']), expected)
         for name, cfg in rows.items():
             with self.subTest(arm=name):
                 self.assertEqual(cfg['model']['graph'], 'nested_chain')

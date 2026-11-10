@@ -14,7 +14,7 @@ from organ_relation.training.console import TrainingConsole
 from organ_relation.training.engine import Trainer, validate_options
 from organ_relation.training.state import seed_all, load_checkpoint, capture_rng
 
-MAIN_CONFIG = 'configs/experiments/main.json'
+MAIN_CONFIG = 'configs/experiments/r4_full.json'
 EARLY = dict(min_epochs=20, patience_epochs=20, min_delta=0.001, monitor='dev_mean_region_hard_dice')
 
 

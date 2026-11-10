@@ -11,6 +11,10 @@ the full document method, whose identity and construction are unchanged):
 Every variant keeps the coarse head on the deepest encoder feature, so all
 ablations train with the identical objective (27)-(33); in the two plain
 variants it is auxiliary deep supervision only and feeds nothing else.
+
+关系图（显式 `model.graph`）：省略 = 三节点完全图（六条有向边，历史实验 E1/A3，identity 不变）；
+'nested_chain' = 2026-11-10 老师批准的嵌套双向链 WT⇄TC⇄ET（四条有向边，向内/向外两类边分开设参，
+见 dynamic_relation.NESTED_CHAIN_EDGES）。没有关系模块的变体不受 graph 影响。
 """
 from dataclasses import asdict, dataclass
 import math
@@ -48,6 +52,7 @@ class BrainTumorConfig:
     fusion_bias: bool
     align_corners: bool
     variant: Optional[str] = None  # None = full method; see VARIANTS.
+    graph: Optional[str] = None  # None = 历史完全图；'nested_chain' = 嵌套双向链；见 GRAPHS。
 
     def __post_init__(self):
         for name in ('relation_channels', 'rounds', 'attention_channels', 'content_channels'):
@@ -60,15 +65,20 @@ class BrainTumorConfig:
             raise ValueError('explicit boolean settings required')
         if self.variant not in VARIANTS:
             raise ValueError(f'model variant must be omitted (full method) or one of {VARIANTS[1:]}')
+        if self.graph not in GRAPHS:
+            raise ValueError(f'model graph must be omitted (complete graph) or one of {GRAPHS[1:]}')
 
     def to_dict(self):
         result = asdict(self)
         if result['variant'] is None:  # The full method keeps its pre-ablation identity.
             del result['variant']
+        if result['graph'] is None:  # 完全图保持引入 graph 之前的 identity。
+            del result['graph']
         return result
 
 
 VARIANTS = (None, 'no_relation', 'drf_backbone', 'unet')
+GRAPHS = (None, 'nested_chain')
 
 
 def unit(a, b, *, kernel=3, stride=1, dilation=1, bias):
@@ -291,7 +301,7 @@ class BrainTumorSegmentor(nn.Module):
             self.space_to_node = SpaceToNode(epsilon=config.epsilon,node_count=3,include_background=False)
             if config.variant is None:
                 self.relation = DynamicRelation(256,relation_channels=config.relation_channels,
-                                                rounds=config.rounds,node_count=3)
+                                                rounds=config.rounds,node_count=3,graph=config.graph or 'complete')
             self.node_to_space = NodeToSpace(256,attention_channels=config.attention_channels,
                                              content_channels=config.content_channels,node_count=3)
             self.fusion = ResidualFusion(256,content_channels=config.content_channels,bias=config.fusion_bias,

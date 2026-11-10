@@ -1,4 +1,4 @@
-"""Tier-1 ablation variants (no_relation / drf_backbone / unet) and their configs, CPU only."""
+"""Ablation variants, the nested-chain graph and the experiment configs, CPU only."""
 import copy
 import json
 import unittest
@@ -51,13 +51,14 @@ class ConfigTests(unittest.TestCase):
                 BrainTumorConfig(**dict(cfg, variant=bad))
 
     def test_each_ablation_config_differs_from_the_main_arm_in_one_item(self):
-        main = json.loads((fixtures.ROOT / 'configs/experiments/main.json').read_text())
+        # 旧全连接图阶段的配置（E1/A3 等），已移到 configs/development/complete_graph/
+        main = json.loads((fixtures.ROOT / 'configs/development/complete_graph/main.json').read_text())
         science = lambda c: {k: v for k, v in c.items() if k != 'status' and not k.endswith('_note')}
         expected = {'no_relation': ('model', 'variant', 'no_relation'), 'drf_backbone': ('model', 'variant', 'drf_backbone'),
                     'unet': ('model', 'variant', 'unet'), 'no_hier': ('loss', 'lambda_hier', 0.0)}
         for name, (section, key, value) in expected.items():
             with self.subTest(arm=name):
-                arm = json.loads((fixtures.ROOT / f'configs/experiments/{name}.json').read_text())
+                arm = json.loads((fixtures.ROOT / f'configs/development/complete_graph/{name}.json').read_text())
                 wanted = copy.deepcopy(science(main))
                 wanted[section][key] = value
                 self.assertEqual(science(arm), wanted)
@@ -66,11 +67,78 @@ class ConfigTests(unittest.TestCase):
                 RegionJointLoss(**arm['loss'])
 
 
+    def test_graph_round_trips_and_is_validated(self):
+        cfg = dict(config()['model'], graph='nested_chain')
+        self.assertEqual(BrainTumorConfig(**cfg).to_dict(), cfg)
+        self.assertEqual(BrainTumorConfig(**dict(cfg, variant='no_relation')).to_dict(), dict(cfg, variant='no_relation'))
+        for bad in ('complete', 'chain', '', 1):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'graph'):
+                BrainTumorConfig(**dict(cfg, graph=bad))
+
+    def test_cumulative_rows_each_add_one_item_and_full_method_only_changes_the_graph(self):
+        load = lambda name: json.loads((fixtures.ROOT / f'configs/experiments/{name}.json').read_text())
+        science = lambda c: {k: v for k, v in c.items() if k != 'status' and not k.endswith('_note')}
+        rows = {name: load(name) for name in ('r1_drf_backbone', 'r2_nodes', 'r3_relation', 'r4_full', 'r4_k1', 'r4_k3')}
+        self.assertEqual(sorted(p.stem for p in (fixtures.ROOT / 'configs/experiments').glob('*.json')), sorted(rows))
+
+        def changed(base, section, key, value):
+            result = copy.deepcopy(science(base))
+            if value is None:
+                del result[section][key]
+            else:
+                result[section][key] = value
+            return result
+        steps = (('r1_drf_backbone', 'r2_nodes', ('model', 'variant', 'no_relation')),
+                 ('r2_nodes', 'r3_relation', ('model', 'variant', None)),
+                 ('r3_relation', 'r4_full', ('loss', 'lambda_hier', 1.0)),
+                 ('r4_full', 'r4_k1', ('model', 'rounds', 1)),
+                 ('r4_full', 'r4_k3', ('model', 'rounds', 3)))
+        for before, after, change in steps:
+            with self.subTest(step=f'{before}->{after}'):
+                self.assertEqual(science(rows[after]), changed(rows[before], *change))
+        self.assertEqual((rows['r1_drf_backbone']['model']['variant'], rows['r1_drf_backbone']['loss']['lambda_hier']),
+                         ('drf_backbone', 0.0))
+        old = json.loads((fixtures.ROOT / 'configs/development/complete_graph/main.json').read_text())
+        self.assertEqual(science(rows['r4_full']), changed(old, 'model', 'graph', 'nested_chain'))
+        for name, cfg in rows.items():
+            with self.subTest(arm=name):
+                self.assertEqual(cfg['model']['graph'], 'nested_chain')
+                self.assertIn('ablation_note', cfg)
+                BrainTumorConfig(**cfg['model'])
+                RegionJointLoss(**cfg['loss'])
+
+
 class ArchitectureTests(unittest.TestCase):
     def test_full_method_modules_unchanged(self):
         model = build(None)
         self.assertEqual([n for n, _ in model.named_children()], FULL_CHILDREN)
         self.assertEqual(sum(p.numel() for p in model.parameters()), 8330296)
+
+    def test_nested_chain_parameter_counts(self):
+        cfg = dict(config()['model'], graph='nested_chain')
+        self.assertEqual(sum(p.numel() for p in BrainTumorSegmentor(BrainTumorConfig(**cfg)).parameters()), 8400001)
+        counts = {'r1_drf_backbone': 7780444, 'r2_nodes': 7894255, 'r3_relation': 8486001, 'r4_full': 8486001}
+        for name, expected in counts.items():
+            with self.subTest(arm=name):
+                arm = json.loads((fixtures.ROOT / f'configs/experiments/{name}.json').read_text())
+                model = BrainTumorSegmentor(BrainTumorConfig(**arm['model']))
+                self.assertEqual(sum(p.numel() for p in model.parameters()), expected)
+
+    def test_nested_chain_model_four_edges_and_all_gradients(self):
+        seed_all(6)
+        model = BrainTumorSegmentor(BrainTumorConfig(**dict(config()['model'], graph='nested_chain')))
+        self.assertEqual([n for n, _ in model.named_children()], FULL_CHILDREN)
+        image, label = volume((9, 11, 13))
+        out = model.forward_with_diagnostics(image)
+        nonzero = {(i, j) for i in range(3) for j in range(3) if out.last_alpha[0, i, j] != 0}
+        self.assertEqual(nonzero, {(0, 1), (1, 2), (1, 0), (2, 1)})
+        RegionJointLoss(**dict(config()['loss'], lambda_hier=1.0))(*out.output, label).total.backward()
+        for name, p in model.named_parameters():
+            self.assertIsNotNone(p.grad, name)
+            self.assertTrue(torch.isfinite(p.grad).all(), name)
+        for name in ('inward_hidden', 'outward_hidden', 'W_inward', 'W_outward'):
+            self.assertGreater(getattr(model.relation, name).weight.grad.abs().sum().item(), 0, name)
+
 
     def test_variant_modules_and_encoders(self):
         for variant, children in CHILDREN.items():

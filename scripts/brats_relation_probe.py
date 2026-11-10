@@ -141,9 +141,12 @@ def probe_tail(model, features, *, gamma=None, eta=None, relation='on', record=N
                           unscaled_ratio_tumor=ratio(writeback, F, mask), scaled_ratio_tumor=ratio(scale * writeback, F, mask),
                           tumor_fraction_of_grid=mask.mean().item(),
                           cosine_F_Fprime=functional.cosine_similarity(F.double().flatten(), fused.double().flatten(), dim=0).item())
+    # 模型实际具有的有向边 [sender, receiver]；汇总边权时只统计这些边（双向链里 WT 与 ET 之间没有边）
+    edges = [] if model.variant == 'no_relation' else sorted(
+        [i, j] for mask in model.relation.edge_masks().values() for i, j in mask.nonzero().tolist())
     record['relation'] = dict(
         z_change_per_node=(torch.linalg.vector_norm(zK.double() - z0, dim=-1) / torch.linalg.vector_norm(z0, dim=-1))[0].tolist(),
-        last_alpha=last_alpha[0].tolist(), rounds=rounds)
+        last_alpha=last_alpha[0].tolist(), rounds=rounds, edges=edges)
     record['decoder'] = []
     with _RecordDecoderWriteback(model.decoder, record['decoder'], tumor):
         return functional_call(model.decoder, overrides, arguments)
@@ -336,8 +339,11 @@ def summarize(paths):
                 lines.append(f'  decoder writeback {scale} ||eta*Phi(G)||/||E||: volume {_quantiles([d["ratio"] for d in dec])}; '
                              f'tumor {_quantiles([d["ratio_tumor"] for d in dec])}')
             rounds = [r[label]['relation']['rounds'] for r in part]
+            # 旧输出没有 edges 字段，当作完全图（全部非对角边）
+            edges = [[tuple(e) for e in r[label]['relation'].get('edges', [[i, j] for i in range(3) for j in range(3) if i != j])]
+                     for r in part]
             for t in range(len(rounds[0])):
-                alpha = [a for rr in rounds for i, row in enumerate(rr[t]['alpha']) for j, a in enumerate(row) if i != j]
+                alpha = [rr[t]['alpha'][i][j] for rr, ee in zip(rounds, edges) for i, j in ee]
                 lines.append(f'  round {t + 1} edge weights: median {np.median(alpha):.4f}, max {max(alpha):.4f}, >0.05 {np.mean(np.asarray(alpha) > .05):.1%}; '
                              f'||message||/||z|| {_quantiles([rr[t]["message_to_z"] for rr in rounds])}; '
                              f'message share of node update {_quantiles([rr[t]["message_share_of_update"] for rr in rounds])}')

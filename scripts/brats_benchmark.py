@@ -29,7 +29,7 @@ def parse_crop(text):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=ROOT / 'configs/experiments/main.json')
+    parser.add_argument('--config', type=Path, default=ROOT / 'configs/experiments/r4_full.json')
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--cohort', required=True)
     parser.add_argument('--source-partition', choices=('all', 'training'), default='all')

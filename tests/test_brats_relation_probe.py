@@ -105,6 +105,28 @@ class KnockoutTests(unittest.TestCase):
         self.assertEqual([d['eta'] for d in record['decoder']], model.decoder.eta.tolist())
         json.dumps(record, allow_nan=False)
 
+    def test_nested_chain_records_only_its_four_edges(self):
+        torch.manual_seed(0)
+        model = BrainTumorSegmentor(BrainTumorConfig(**CFG['model'], graph='nested_chain')).eval()
+        image, label = case_inputs(seed=5)
+        with torch.no_grad():
+            features = model.encoder(image)
+            reference = model(image).final_logits
+        record = {}
+        self.assertTrue(torch.equal(probe.probe_tail(model, features, record=record, tumor=region_targets(label)[0][0]), reference))
+        self.assertEqual(record['relation']['edges'], [[0, 1], [1, 0], [1, 2], [2, 1]])
+        silent = copy.deepcopy(model)
+        original = silent.relation._edge_weights
+        with torch.no_grad(), patch.object(silent.relation, '_edge_weights', side_effect=lambda *a: torch.zeros_like(original(*a))):
+            self.assertTrue(torch.equal(probe.probe_tail(model, features, relation='edges_zero'), silent(image).final_logits))
+        row = {'E1': dict(probe.probe_case(model, image, label, .5), ledger_dice=None), 'case_id': 'x'}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'chain.jsonl'
+            path.write_text(json.dumps(dict(kind='header', schema=probe.SCHEMA, runs={'E1': {}})) + '\n' + json.dumps(row) + '\n')
+            text = probe.summarize([path])
+        alphas = [row['E1']['relation']['rounds'][0]['alpha'][i][j] for i, j in record['relation']['edges']]
+        self.assertIn(f'round 1 edge weights: median {np.median(alphas):.4f}', text)
+
     def test_probe_case_variants_and_no_relation_refusals(self):
         image, label = case_inputs(seed=3)
         for variant, expected in ((None, {'edges_zero', 'relation_skipped'}), ('no_relation', set())):

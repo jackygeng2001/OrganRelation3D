@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "mode": "brats_regions",
+  "status": "brats2018_cumulative_ablation_nested_chain_r3_relation_not_final_paper_protocol",
+  "model": {
+    "relation_channels": 64,
+    "rounds": 2,
+    "attention_channels": 32,
+    "content_channels": 32,
+    "epsilon": 1e-06,
+    "gamma_init": 0.1,
+    "conv_bias": true,
+    "coarse_bias": true,
+    "fusion_bias": true,
+    "align_corners": false,
+    "graph": "nested_chain"
+  },
+  "model_choice_note": "Document fixes encoder 32/64/128/256, GN8, LeakyReLU .01, decoder d=32/Cg=32/MLP64, eta=1e-3. Relation graph (advisor-approved 2026-11-10): the nested bidirectional chain WT<->TC<->ET with four directed edges and no WT-ET edge; inward edges (WT->TC, TC->ET: containment, the outer region bounds the inner one) and outward edges (ET->TC, TC->WT: the inner region helps locate the outer one) each have their own edge-gate MLP and message matrix, the GRU is shared. Cr=64 (=C/4; edge descriptor 2C+7=519), K=2 (on the chain WT and ET exchange only through TC, so two rounds are the fewest that carry information between them), deep writeback da=Cg=32, as approved 2026-11-06. 8,486,001 parameters. epsilon=1e-6 and gamma_init=0.1 keep the development values. Development choices, not tuned.",
+  "loss": {
+    "epsilon": 1e-06,
+    "lambda_c": 0.5,
+    "align_corners": false,
+    "lambda_hier": 0.0
+  },
+  "threshold": 0.5,
+  "preprocessing": {
+    "normalization": "nonzero_zscore",
+    "normalization_epsilon": 1e-08,
+    "spatial_crop": {
+      "kind": "nonzero_bbox",
+      "margin": 0,
+      "multiple_of": 8
+    }
+  },
+  "optimizer": {
+    "lr": 0.0003,
+    "weight_decay": 0,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "foreach": false,
+    "fused": false
+  },
+  "training": {
+    "max_steps": null,
+    "max_epochs": 500,
+    "batch_size": 1,
+    "num_workers": 0,
+    "seed": 20260925,
+    "shuffle": true,
+    "memory_format": "channels_last_3d",
+    "scheduler": null,
+    "checkpoint_every": 1,
+    "diagnostics_every": 1,
+    "validation_every": 1,
+    "validation_role": "internal_dev",
+    "eta_window": 20,
+    "eta_warmup": 5,
+    "console_every_steps": 25,
+    "cadence_unit": "epoch",
+    "checkpoint_every_steps": 25,
+    "early_stopping": {
+      "min_epochs": 20,
+      "patience_epochs": 20,
+      "min_delta": 0.001,
+      "monitor": "dev_mean_region_hard_dice"
+    },
+    "mixed_precision": "bfloat16",
+    "augmentation": {
+      "kind": "flip_intensity_v1",
+      "flip_probability": 0.5,
+      "intensity_scale": 0.1,
+      "intensity_shift": 0.1
+    }
+  },
+  "protocol_note": "Whole-brain-box year-specific patient folds, no stratification; full internal-dev every epoch. Cap 500 epochs, minimum 20, patience 20 epochs, accumulated Dice improvement >=0.001. Development choices, not an optimal/frozen paper protocol; official unlabeled validation not used for early stopping.",
+  "preprocessing_note": "User-approved 2026-11-05: one whole-brain forward per case on the image-only box of nonzero voxels across T1/T1ce/T2/FLAIR, grown to a multiple of 8 inside the volume. Z-score statistics are unchanged (all nonzero voxels lie inside). Loading stops if any labeled tumor voxel would fall outside; the BraTS2018 training partition passed this audit (285/285). Not a patch or sliding window. Node c/s are relative to the box; BCE averages over box voxels.",
+  "loss_note": "Hierarchy revision (层级一致性修订版.docx, eqs. 32-33): L = Lseg(final) + lambda_c*Lseg(coarse) + lambda_hier*Lhier(final). The document fixes lambda_hier >= 0 but gives no value; 1.0 is the development value the user agreed to on 2026-11-05; it is not tuned or stated in the paper.",
+  "precision_note": "Comparison arm for whole-network mixed precision: encoder/decoder volumes, their 3x3x3 convolutions and pointwise projections run in bfloat16 with FP32 accumulation (each output rounded once). FP32: parameters and AdamW, GroupNorm statistics and normalization arithmetic, coarse head, Space-to-Node, relation rounds, deep writeback/fusion, scale weights, decoder score bias and gates, and the logits given to the loss. No loss scaling (bfloat16 keeps the FP32 exponent range). Requires --convolution-backend depth_sliced. Identical to development/year_fold_bbox_fp32.json otherwise.",
+  "augmentation_note": "User-approved 2026-11-06: light training-only augmentation, training cases only (dev/inference never). Each spatial axis mirrored with p=0.5 (image and label together); per modality, nonzero voxels scaled by U(0.9,1.1) and shifted by U(-0.1,0.1) z-score units, zero voxels stay zero. Draws are seeded by (seed, global step): exact on resume, no other RNG consumed, logged per step. No rotation/elastic/noise. Development choice.",
+  "ablation_note": "Advisor-approved 2026-11-10 cumulative ablation (after DHAS), BraTS 2018 five folds only; adjacent rows R1-R2-R3-R4 are compared with a paired t-test. Identical data, folds, crop, augmentation, bf16 mixed precision, optimizer, seed, epochs and early stopping in every row; each row differs from the previous one in one item. Development comparison, not a frozen paper protocol. R3 = R2 + nested relation reasoning on the bidirectional chain (model.variant omitted, model.graph=nested_chain). No hierarchy loss (lambda_hier=0). 8,486,001 parameters."
+}

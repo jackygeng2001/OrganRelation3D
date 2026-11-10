@@ -1,5 +1,5 @@
 """Run every fold of one experiment config; rerun the same command to resume after any interruption."""
-# 用法：python scripts/run_experiment.py configs/experiments/no_relation.json
+# 用法：python scripts/run_experiment.py configs/experiments/r4_full.json
 #
 # 本机相关的设置（数据、划分、缓存、输出目录、设备、启动环境变量）写在 configs/machine.local.json，
 # 不进 git；模板见 configs/machine.example.json。每一折用独立子进程调用 scripts/brats.py train --auto-resume：
@@ -52,7 +52,7 @@ def fold_command(config, machine, fold):
 
 def main(argv=None, *, runner=subprocess.run):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('config', type=Path, help='experiment config, e.g. configs/experiments/main.json')
+    parser.add_argument('config', type=Path, help='experiment config, e.g. configs/experiments/r4_full.json')
     parser.add_argument('--machine', type=Path, default=ROOT / 'configs' / 'machine.local.json')
     parser.add_argument('--folds', type=int, nargs='+', default=[0, 1, 2, 3, 4])
     parser.add_argument('--dry-run', action='store_true', help='print the commands without running them')

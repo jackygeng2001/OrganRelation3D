@@ -15,7 +15,7 @@ except ModuleNotFoundError as exc:
     TORCH_AVAILABLE = False
 else:
     TORCH_AVAILABLE = True
-    from organ_relation.models.dynamic_relation import DynamicRelation, FormulaGRU, RelationResult
+    from organ_relation.models.dynamic_relation import DynamicRelation, FormulaGRU, NESTED_CHAIN_EDGES, RelationResult
     from organ_relation.models.coarse_head import CoarseHead
     from organ_relation.models.space_to_node import SpaceToNode
 
@@ -481,6 +481,152 @@ class DynamicRelationTests(unittest.TestCase):
                 gru(bad, z)
         with self.assertRaises(ValueError):
             FormulaGRU(0)
+
+
+def reference_chain_round(model, z, centroid, size, confidence):
+    """嵌套双向链的逐元素参考：逐条边按其类别用各自的门控 MLP 与消息矩阵，不调用生产代码的辅助函数。"""
+    kinds = {pair: kind for kind, pairs in NESTED_CHAIN_EDGES.items() for pair in pairs}
+    layers = {'inward': (model.inward_hidden, model.inward_output, model.W_inward),
+              'outward': (model.outward_hidden, model.outward_output, model.W_outward)}
+    all_alpha, all_message, all_z = [], [], []
+    for b in range(z.shape[0]):
+        alpha = z.new_zeros(3, 3)
+        for (i, j), kind in kinds.items():
+            hidden_layer, output_layer, _ = layers[kind]
+            descriptor = torch.cat((z[b, i], z[b, j], centroid[b, j] - centroid[b, i], size[b, i], size[b, j],
+                                    confidence[b, i], confidence[b, j]))
+            hidden = torch.relu(torch.mv(hidden_layer.weight, descriptor) + hidden_layer.bias)
+            alpha = alpha.index_put((torch.tensor([i]), torch.tensor([j])),
+                                    torch.sigmoid((output_layer.weight[0] * hidden).sum() + output_layer.bias[0]).reshape(1))
+        messages, updated = [], []
+        for j in range(3):
+            message = z.new_zeros(model.channels)
+            for i in range(3):
+                if (i, j) in kinds:
+                    message = message + alpha[i, j] * torch.mv(layers[kinds[(i, j)]][2].weight, z[b, i])
+            messages.append(message)
+            updated.append(reference_gru(model.gru, message, z[b, j]))
+        all_alpha.append(alpha)
+        all_message.append(torch.stack(messages))
+        all_z.append(torch.stack(updated))
+    return torch.stack(all_alpha), torch.stack(all_message), torch.stack(all_z)
+
+
+@unittest.skipUnless(TORCH_AVAILABLE, 'isolated PyTorch CPU environment required')
+class NestedChainTests(unittest.TestCase):
+    """嵌套双向链 WT⇄TC⇄ET：四条有向边，向内/向外两类边分开设参，GRU 共用。"""
+
+    def setUp(self):
+        torch.manual_seed(20261110)
+
+    def inputs(self, channels=3, batch=2, grad=False):
+        return tuple((.1 + .7 * torch.rand(batch, 3, c, dtype=torch.float64)).requires_grad_(grad)
+                     for c in (channels, 3, 1, 1))
+
+    def model(self, channels=3, hidden=4, rounds=2):
+        model = DynamicRelation(channels, relation_channels=hidden, rounds=rounds, node_count=3,
+                                graph='nested_chain').double()
+        with torch.no_grad():  # 让 ReLU 远离折点、两类边的门控明显不同
+            for parameter in model.parameters():
+                parameter.uniform_(-.2, .2)
+            for kind, bias in (('inward', .5), ('outward', -.3)):
+                getattr(model, f'{kind}_hidden').weight.uniform_(.01, .05)
+                getattr(model, f'{kind}_hidden').bias.fill_(.5)
+                getattr(model, f'{kind}_output').weight.fill_(.3)
+                getattr(model, f'{kind}_output').bias.fill_(bias)
+        return model
+
+    def test_four_typed_edges_match_loop_reference_every_round(self):
+        model = self.model(rounds=3)
+        inputs = self.inputs()
+        result = model(*inputs, return_diagnostics=True)
+        z = inputs[0]
+        for round_ in result.rounds:
+            alpha, message, z = reference_chain_round(model, z, *inputs[1:])
+            torch.testing.assert_close(round_.alpha, alpha, rtol=1e-12, atol=1e-14)
+            torch.testing.assert_close(round_.messages, message, rtol=1e-12, atol=1e-14)
+            torch.testing.assert_close(round_.z, z, rtol=1e-12, atol=1e-14)
+            edges = {(i, j) for i in range(3) for j in range(3) if (round_.alpha[:, i, j] != 0).all()}
+            self.assertEqual(edges, {(0, 1), (1, 2), (1, 0), (2, 1)})
+            for i, j in ((0, 2), (2, 0), (0, 0), (1, 1), (2, 2)):
+                self.assertTrue((round_.alpha[:, i, j] == 0).all())
+        torch.testing.assert_close(result.zK, z, rtol=1e-12, atol=1e-14)
+
+    def test_receiver_sums_typed_messages(self):
+        model = self.model(channels=2)
+        z = torch.tensor([[[1., 0.], [0., 1.], [2., -1.]]], dtype=torch.float64)
+        alpha = torch.zeros(1, 3, 3, dtype=torch.float64)
+        alpha[0, 0, 1], alpha[0, 2, 1], alpha[0, 1, 0], alpha[0, 1, 2] = .5, .25, .75, 1.
+        with torch.no_grad():
+            model.W_inward.weight.copy_(torch.tensor([[1., 2.], [3., 4.]]))
+            model.W_outward.weight.copy_(torch.tensor([[-1., 0.], [0., 2.]]))
+        message = model._aggregate_messages(z, alpha)
+        win, wout = model.W_inward.weight, model.W_outward.weight
+        expected = torch.stack([.75 * (wout @ z[0, 1]),                          # WT 只收 TC→WT（向外）
+                                .5 * (win @ z[0, 0]) + .25 * (wout @ z[0, 2]),   # TC 收 WT→TC（向内）与 ET→TC（向外），求和
+                                1. * (win @ z[0, 1])])[None]                     # ET 只收 TC→ET（向内）
+        torch.testing.assert_close(message, expected, rtol=0, atol=1e-15)
+        alpha[0, 0, 2] = alpha[0, 2, 0] = 9.  # WT 与 ET 之间没有边：即使传入非零值也不产生消息
+        torch.testing.assert_close(model._aggregate_messages(z, alpha), expected, rtol=0, atol=1e-15)
+
+    def test_direction_parameters_are_separate_and_gru_shared(self):
+        model = self.model(channels=3, hidden=4)
+        names = [n for n, _ in model.named_parameters()]
+        self.assertEqual([n.split('.')[0] for n in names[:10]],
+                         ['inward_hidden'] * 2 + ['inward_output'] * 2 + ['W_inward']
+                         + ['outward_hidden'] * 2 + ['outward_output'] * 2 + ['W_outward'])
+        self.assertFalse(any(n.startswith(('relation_hidden', 'relation_output', 'W_m')) for n in names))
+        per_kind = 4 * (2 * 3 + 7) + 4 + 4 + 1 + 3 * 3
+        self.assertEqual(sum(p.numel() for p in model.parameters()), 2 * per_kind + 6 * 3 * 3 + 3 * 3)
+        self.assertIsNone(model.W_inward.bias)
+        self.assertIsNone(model.W_outward.bias)
+        # 结构掩码是非持久 buffer：不进 state_dict，随模型转换 dtype 时保持 bool
+        self.assertFalse(any('mask' in k for k in model.state_dict()))
+        self.assertEqual({k: v.dtype for k, v in model.named_buffers()},
+                         {'inward_mask': torch.bool, 'outward_mask': torch.bool})
+        z, c, s, q = self.inputs()
+        before = model._edge_weights(z, c, s, q)
+        with torch.no_grad():
+            model.outward_output.bias.add_(1.)
+        after = model._edge_weights(z, c, s, q)
+        for i, j in NESTED_CHAIN_EDGES['inward']:
+            torch.testing.assert_close(after[:, i, j], before[:, i, j], rtol=0, atol=0)
+        for i, j in NESTED_CHAIN_EDGES['outward']:
+            self.assertTrue((after[:, i, j] > before[:, i, j]).all())
+
+    def test_input_and_all_parameter_gradients_match_loop_reference(self):
+        model = self.model(rounds=2)
+        inputs = self.inputs(batch=1, grad=True)
+        actual = model(*inputs)
+        z = inputs[0]
+        for _ in range(model.rounds):
+            _, _, z = reference_chain_round(model, z, *inputs[1:])
+        weight = torch.randn_like(actual)
+        leaves = (*inputs, *model.parameters())
+        actual_gradients = torch.autograd.grad((actual * weight).sum(), leaves)
+        expected_gradients = torch.autograd.grad((z * weight).sum(), leaves)
+        for name, a, e in zip(('z0', 'centroid', 'size', 'confidence', *dict(model.named_parameters())),
+                              actual_gradients, expected_gradients):
+            with self.subTest(gradient=name):
+                self.assertTrue(torch.isfinite(a).all())
+                self.assertGreater(a.abs().sum().item(), 1e-12)
+                torch.testing.assert_close(a, e, rtol=2e-10, atol=2e-12)
+
+    def test_fp64_gradcheck_all_four_inputs_through_two_rounds(self):
+        model = self.model(channels=1, hidden=2, rounds=2)
+        self.assertTrue(torch.autograd.gradcheck(model, self.inputs(channels=1, batch=1, grad=True)))
+
+    def test_complete_graph_default_and_invalid_graphs(self):
+        default = DynamicRelation(2, relation_channels=3, rounds=2, node_count=3)
+        self.assertEqual(default.graph, 'complete')
+        self.assertEqual([n for n, _ in default.named_parameters()][:5],
+                         ['relation_hidden.weight', 'relation_hidden.bias', 'relation_output.weight',
+                          'relation_output.bias', 'W_m.weight'])
+        for kwargs, message in ((dict(graph='chain'), 'graph must be one of'),
+                                (dict(graph=None), 'graph must be one of'),
+                                (dict(graph='nested_chain', node_count=15), 'three nodes')):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, message):
+                DynamicRelation(2, relation_channels=3, rounds=2, **dict(dict(node_count=3), **kwargs))
 
 
 if __name__ == '__main__':

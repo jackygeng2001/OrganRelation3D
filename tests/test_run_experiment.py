@@ -34,11 +34,11 @@ class RunExperimentTests(support.TrainingTests):
         return code, out.getvalue(), err.getvalue()
 
     def test_dry_run_prints_one_auto_resume_command_per_fold(self):
-        config = str(support.ROOT / 'configs/experiments/no_relation.json')
+        config = str(support.ROOT / 'configs/experiments/r2_nodes.json')
         code, out, _ = self.invoke([config, '--machine', str(self.machine()), '--dry-run'])
         self.assertEqual(code, 0)
         for fold in range(5):
-            self.assertIn(f'brats2018_no_relation_fold{fold}', out)
+            self.assertIn(f'brats2018_r2_nodes_fold{fold}', out)
             self.assertIn(f'fold_{fold}.local.json', out)
         self.assertEqual(out.count('--auto-resume'), 5)
         self.assertEqual(out.count('PYTORCH_MIOPEN_SUGGEST_NHWC=1'), 5)
@@ -48,7 +48,7 @@ class RunExperimentTests(support.TrainingTests):
         def fake(command, *, cwd, env):
             calls.append((command, cwd, env))
             return SimpleNamespace(returncode=3 if len(calls) == 3 else 0)
-        config = str(support.ROOT / 'configs/experiments/main.json')
+        config = str(support.ROOT / 'configs/experiments/r4_full.json')
         code, _, err = self.invoke([config, '--machine', str(self.machine())], runner=fake)
         self.assertEqual(code, 3)
         self.assertEqual(len(calls), 3)  # 第三折失败后不再启动第四、五折
@@ -57,22 +57,22 @@ class RunExperimentTests(support.TrainingTests):
             self.assertEqual(cwd, support.ROOT)
             self.assertEqual(env['PYTORCH_MIOPEN_SUGGEST_NHWC'], '1')
             self.assertEqual(command[2:4], ['train', '--config'])
-            self.assertEqual(command[-3:], ['--run-dir', str(self.root / 'runs' / f'brats2018_main_fold{fold}'), '--auto-resume'])
+            self.assertEqual(command[-3:], ['--run-dir', str(self.root / 'runs' / f'brats2018_r4_full_fold{fold}'), '--auto-resume'])
             self.assertNotIn('--resume', command)
 
     def test_selected_folds_and_relative_paths(self):
         path = self.machine(source='datasets/x.zip')
-        code, _, err = self.invoke([str(support.ROOT / 'configs/experiments/main.json'), '--machine', str(path), '--dry-run'])
+        code, _, err = self.invoke([str(support.ROOT / 'configs/experiments/r4_full.json'), '--machine', str(path), '--dry-run'])
         self.assertEqual(code, 2)
         self.assertIn(str(support.ROOT / 'datasets/x.zip'), err)  # 相对路径按仓库根目录解析
-        code, out, _ = self.invoke([str(support.ROOT / 'configs/experiments/main.json'), '--machine', str(self.machine()),
+        code, out, _ = self.invoke([str(support.ROOT / 'configs/experiments/r4_full.json'), '--machine', str(self.machine()),
                                  '--folds', '2', '4', '--dry-run'])
         self.assertEqual(code, 0)
         self.assertEqual(out.count('[fold '), 2)
-        self.assertIn('main_fold2', out); self.assertIn('main_fold4', out)
+        self.assertIn('r4_full_fold2', out); self.assertIn('r4_full_fold4', out)
 
     def test_invalid_inputs_are_refused_before_training(self):
-        config = str(support.ROOT / 'configs/experiments/main.json')
+        config = str(support.ROOT / 'configs/experiments/r4_full.json')
         machine = lambda **changes: str(self.machine(**changes))  # 每个用例在循环内单独写入本机配置
         cases = [
             (lambda: [config, '--machine', str(self.root / 'absent.json')], 'machine.example.json'),

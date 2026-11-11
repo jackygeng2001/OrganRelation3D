@@ -47,6 +47,8 @@ SCHEMA = 'brats_relation_probe_v1'
 COMMON_VARIANTS = (('gamma_zero', dict(gamma=0.0)), ('eta_zero', dict(eta=0.0)),
                    ('gamma_eta_zero', dict(gamma=0.0, eta=0.0)))
 RELATION_VARIANTS = (('edges_zero', dict(relation='edges_zero')), ('relation_skipped', dict(relation='skipped')))
+# 关系推理 v2 的包含读出：去掉先验平移 / 存在性门控（containment='prior_shift' 或 'gate' 的模型才有）
+READOUT_VARIANTS = (('readout_off', dict(readout='off')),)
 
 
 def norm(x, mask=None):
@@ -95,7 +97,12 @@ def check_probe_model(model):
 
 
 @torch.no_grad()
-def probe_tail(model, features, *, gamma=None, eta=None, relation='on', record=None, tumor=None):
+def apply_readout(model, logits, containment, readout):
+    """与 BrainTumorSegmentor._run 相同的输出端处理；readout='off' 时跳过先验平移 / 存在性门控（敲除），嵌套分解照常。"""
+    return model.output_logits(logits, containment, readout=readout == 'on')
+
+
+def probe_tail(model, features, *, gamma=None, eta=None, relation='on', readout='on', record=None, tumor=None, image=None):
     """最深层之后的前向（与 BrainTumorSegmentor._run 相同的运算次序），可敲除 gamma、eta、边或关系轮次。
 
     relation: 'on' 正常；'edges_zero' 保留 GRU 轮次但边权全部为 0（节点之间不交流），尺度描述中的
@@ -112,10 +119,23 @@ def probe_tail(model, features, *, gamma=None, eta=None, relation='on', record=N
     coarse = model.coarse_head(F)
     nodes = model.space_to_node(F, coarse.probabilities)
     rounds = []
+    containment = None
+    if readout not in ('on', 'off'):
+        raise ValueError('readout must be on or off')
+    conditioned = model.variant is None and model.relation.conditioning == 'layernorm_residual'
+    extra = None
+    if model.config.node_inputs:  # 额外的节点输入（其他尺度、模态强度）要用到输入图像
+        if image is None:
+            raise ValueError('this model has extra node inputs: pass image= to probe_tail')
+        extra = model.node_extra(features, coarse.probabilities, image)
     if model.variant == 'no_relation' or relation == 'skipped':
         zK, last_alpha = nodes.z0, nodes.z0.new_zeros(nodes.z0.shape[0], 3, 3)
+        if model.variant is None and model.relation.containment:  # 不做关系轮次：读出取自 h(0)
+            containment = model.relation.containment_logits(model.relation.initial_state(nodes.z0, extra), nodes.centroid,
+                                                            nodes.size, nodes.confidence)
     else:
-        engine, z = model.relation, nodes.z0
+        engine = model.relation
+        z = engine.initial_state(nodes.z0, extra)  # v2：在归一化状态 h 上推理
         for _ in range(engine.rounds):
             alpha = engine._edge_weights(z, nodes.centroid, nodes.size, nodes.confidence)
             if relation == 'edges_zero':
@@ -127,14 +147,16 @@ def probe_tail(model, features, *, gamma=None, eta=None, relation='on', record=N
                 rounds.append(dict(alpha=alpha[0].tolist(), message_to_z=ratio(message, z),
                                    message_share_of_update=ratio(updated - silent, updated - z)))
             z = updated
-        zK, last_alpha = z, alpha
+        if engine.containment:
+            containment = engine.containment_logits(z, nodes.centroid, nodes.size, nodes.confidence)
+        zK, last_alpha = (nodes.z0 + engine.readout(z) if conditioned else z), alpha
     writeback = model.fusion.phi(model.node_to_space(F, zK))
     scale = model.fusion.relation_scale if gamma is None else writeback.new_tensor(float(gamma))
     fused = F + scale * writeback
     overrides = {} if eta is None else {'eta': torch.full_like(model.decoder.eta, float(eta))}
     arguments = (fused, features, zK, nodes, last_alpha)
     if record is None:
-        return functional_call(model.decoder, overrides, arguments)
+        return apply_readout(model, functional_call(model.decoder, overrides, arguments), containment, readout)
     mask = tumor_grid(tumor, F.shape[2:])
     z0 = nodes.z0.double()
     record['deep'] = dict(gamma=float(scale), unscaled_ratio=ratio(writeback, F), scaled_ratio=ratio(scale * writeback, F),
@@ -147,9 +169,11 @@ def probe_tail(model, features, *, gamma=None, eta=None, relation='on', record=N
     record['relation'] = dict(
         z_change_per_node=(torch.linalg.vector_norm(zK.double() - z0, dim=-1) / torch.linalg.vector_norm(z0, dim=-1))[0].tolist(),
         last_alpha=last_alpha[0].tolist(), rounds=rounds, edges=edges)
+    if containment is not None:  # 包含读出：[2] 比例 logit，或 [2,2]（比例 logit，存在 logit）
+        record['relation']['containment_logits'] = containment[0].tolist()
     record['decoder'] = []
     with _RecordDecoderWriteback(model.decoder, record['decoder'], tumor):
-        return functional_call(model.decoder, overrides, arguments)
+        return apply_readout(model, functional_call(model.decoder, overrides, arguments), containment, readout)
 
 
 def compare(base, logits, label, threshold):
@@ -168,11 +192,13 @@ def probe_case(model, image, label, threshold):
     features = model.encoder(image)
     tumor = region_targets(label)[0][0]
     stats = {}
-    base = probe_tail(model, features, record=stats, tumor=tumor)
+    base = probe_tail(model, features, record=stats, tumor=tumor, image=image)
     result = dict(stats, base=compare(base, base, label, threshold))
     variants = COMMON_VARIANTS + (RELATION_VARIANTS if model.variant is None else ())
+    if model.config.containment in ('prior_shift', 'gate'):
+        variants += READOUT_VARIANTS
     for name, kwargs in variants:
-        result[name] = compare(base, probe_tail(model, features, **kwargs), label, threshold)
+        result[name] = compare(base, probe_tail(model, features, image=image, **kwargs), label, threshold)
     return result
 
 
@@ -359,7 +385,7 @@ def summarize(paths):
             if ledger:
                 diff = np.abs([a - b for a, b in ledger])
                 lines.append(f'  vs training validation ledger (GPU): {len(ledger)} case-region Dice values, mean |diff| {diff.mean():.4f}, max {diff.max():.4f}')
-            for variant in [v for v, _ in COMMON_VARIANTS + RELATION_VARIANTS if v in part[0][label]]:
+            for variant in [v for v, _ in COMMON_VARIANTS + RELATION_VARIANTS + READOUT_VARIANTS if v in part[0][label]]:
                 mean, deltas = _mean_delta(part, label, variant)
                 regions = ', '.join(f'{n} {_mean_delta(part, label, variant, i)[0]:+.4f}' for i, n in enumerate(REGION_NAMES))
                 flips = [r[label][variant]['flipped_fraction_of_predicted'] for r in part]

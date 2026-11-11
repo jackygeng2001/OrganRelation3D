@@ -76,7 +76,7 @@ def profile_check(model, criterion, image, label, device):
                 if phase == 'forward':
                     output = model(image)
                 elif phase == 'loss':
-                    loss = criterion(output.coarse_logits, output.final_logits, label)
+                    loss = criterion(output.coarse_logits, output.final_logits, label, getattr(output, 'containment_logits', None))
                 else:
                     loss.total.backward()
             memory = monitor.snapshot(phase)
@@ -270,7 +270,7 @@ def execute(args):
         monitor = DeviceMemoryMonitor(device);monitor.begin()
         start=time.perf_counter()
         output=model(image)
-        loss=criterion(output.coarse_logits,output.final_logits,label)
+        loss=criterion(output.coarse_logits,output.final_logits,label,getattr(output,'containment_logits',None))
         loss.total.backward()
         memory=monitor.snapshot('forward_loss_backward')
         inventory=parameter_inventory(model)

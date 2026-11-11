@@ -38,6 +38,57 @@ class SegmentorOutput(NamedTuple):
     final_logits: torch.Tensor  # [B,3,D,H,W] 最终预测，未经 sigmoid
 
 
+class ContainmentSegmentorOutput(NamedTuple):
+    """启用 model.containment 时的输出；未启用时仍返回两个字段的 SegmentorOutput（历史解包方式不变）。"""
+    coarse_logits: torch.Tensor
+    final_logits: torch.Tensor  # 启用先验平移时已含平移
+    # WT→TC、TC→ET 两条边的读出：[B,2] 包含比例 logit；containment='gate' 时 [B,2,2]（比例 logit，存在 logit）
+    containment_logits: torch.Tensor
+
+
+def existence_gate(logits, existence):
+    """存在性门控：P'_j(x) = pi_j * sigmoid(L_j(x))，返回 logit(P')；WT 通道不变。
+
+    existence [B,2] 是 WT→TC、TC→ET 两条包含边的存在 logit。沿嵌套链相乘：pi_TC = sigmoid(e_TC)，
+    pi_ET = pi_TC * sigmoid(e_ET)（TC 不存在则 ET 也不存在）。全程用 logsigmoid / logaddexp 计算，
+    任何有限输入都给出有限 logit；pi → 1 时 logit(P') → L，pi → 0 时整块区域被关掉。
+    """
+    if existence.shape != (logits.shape[0], 2) or logits.shape[1] != 3:
+        raise ValueError('existence gate expects [B,3,...] logits and [B,2] existence logits')
+    log_sigmoid = functional.logsigmoid
+    e_tc, e_et = existence[:, 0], existence[:, 1]
+    shape = (logits.shape[0], 2, 1, 1, 1)
+    log_pi = torch.stack((log_sigmoid(e_tc), log_sigmoid(e_tc) + log_sigmoid(e_et)), 1).view(shape)
+    log_not_pi = torch.stack((log_sigmoid(-e_tc), torch.logaddexp(log_sigmoid(-e_tc), log_sigmoid(e_tc) + log_sigmoid(-e_et))),
+                             1).view(shape)
+    inner = logits[:, 1:]
+    log_p = log_pi + log_sigmoid(inner)                                                  # log P'
+    log_not_p = torch.logaddexp(log_not_pi.expand_as(inner), log_pi + log_sigmoid(-inner))  # log(1 - P')
+    return torch.cat((logits[:, :1], log_p - log_not_p), 1)
+
+
+def nested_logits(logits):
+    """逐体素嵌套分解：P_WT = sigmoid(L_WT)，P_TC = P_WT * sigmoid(L_TC)，P_ET = P_TC * sigmoid(L_ET)；返回 logit(P)。
+
+    先定外层、内层只在外层之内细分（级联的单网络形式），输出必然满足 P_ET <= P_TC <= P_WT。
+    全程用 logsigmoid / logaddexp，任何有限输入都得到有限 logit。
+    """
+    if logits.ndim != 5 or logits.shape[1] != 3:
+        raise ValueError('nested output expects [B,3,D,H,W] logits')
+    log_sigmoid = functional.logsigmoid
+    wt, tc, et = logits[:, 0], logits[:, 1], logits[:, 2]
+    log_tc = log_sigmoid(wt) + log_sigmoid(tc)
+    log_not_tc = torch.logaddexp(log_sigmoid(-wt), log_sigmoid(wt) + log_sigmoid(-tc))
+    log_et = log_tc + log_sigmoid(et)
+    log_not_et = torch.logaddexp(log_not_tc, log_tc + log_sigmoid(-et))
+    return torch.stack((wt, log_tc - log_not_tc, log_et - log_not_et), 1)
+
+
+def containment_logits(output):
+    """输出里的包含比例 logit；模型未启用时为 None。"""
+    return getattr(output, 'containment_logits', None)
+
+
 @dataclass(frozen=True)
 class BrainTumorConfig:
     # Architecture is fixed by the revised document; unspecified choices are explicit.
@@ -53,6 +104,16 @@ class BrainTumorConfig:
     align_corners: bool
     variant: Optional[str] = None  # None = full method; see VARIANTS.
     graph: Optional[str] = None  # None = 历史完全图；'nested_chain' = 嵌套双向链；见 GRAPHS。
+    # 关系推理 v2（2026-11-11，见 dynamic_relation.DynamicRelation 与 METHOD_SPEC）；省略即历史行为，identity 不变。
+    relation_conditioning: Optional[str] = None  # 'layernorm_residual'：归一化状态上推理 + 零初始化残差读出
+    # 'supervised'：包含比例读出（只由损失监督）；'prior_shift'：另按比例平移内层 logit；
+    # 'gate'：读出另含内层存在 logit，最终概率 = 存在概率 × 体素概率（见 existence_gate）。
+    containment: Optional[str] = None
+    # 额外的节点输入（需要 relation_conditioning；按字母序的列表，取自 NODE_INPUTS）：
+    # 'multiscale'：同一组粗掩码在 1/4、1/2 分辨率编码特征上的池化；'intensity'：各区域内四个模态的强度均值与标准差。
+    node_inputs: Optional[list] = None
+    # 'nested'：逐体素的嵌套分解 P_TC = P_WT * sigmoid(L_TC)，P_ET = P_TC * sigmoid(L_ET)（先外后内）。
+    output_hierarchy: Optional[str] = None
 
     def __post_init__(self):
         for name in ('relation_channels', 'rounds', 'attention_channels', 'content_channels'):
@@ -67,6 +128,21 @@ class BrainTumorConfig:
             raise ValueError(f'model variant must be omitted (full method) or one of {VARIANTS[1:]}')
         if self.graph not in GRAPHS:
             raise ValueError(f'model graph must be omitted (complete graph) or one of {GRAPHS[1:]}')
+        if self.relation_conditioning not in (None, 'layernorm_residual'):
+            raise ValueError('relation_conditioning must be omitted or layernorm_residual')
+        if self.containment not in CONTAINMENTS:
+            raise ValueError(f'containment must be omitted or one of {CONTAINMENTS[1:]}')
+        if (self.relation_conditioning or self.containment) and self.variant is not None:
+            raise ValueError('relation_conditioning/containment apply only to the full method (no variant)')
+        if self.containment and self.relation_conditioning != 'layernorm_residual':
+            raise ValueError('containment requires relation_conditioning=layernorm_residual')
+        if self.node_inputs is not None and (
+                not isinstance(self.node_inputs, list) or not self.node_inputs
+                or self.node_inputs != sorted(set(self.node_inputs)) or not set(self.node_inputs) <= set(NODE_INPUTS)
+                or self.relation_conditioning != 'layernorm_residual'):
+            raise ValueError(f'node_inputs must be a sorted non-empty list from {NODE_INPUTS} and needs layernorm_residual')
+        if self.output_hierarchy not in (None, 'nested'):
+            raise ValueError('output_hierarchy must be omitted or nested')
 
     def to_dict(self):
         result = asdict(self)
@@ -74,11 +150,20 @@ class BrainTumorConfig:
             del result['variant']
         if result['graph'] is None:  # 完全图保持引入 graph 之前的 identity。
             del result['graph']
+        for key in ('relation_conditioning', 'containment', 'node_inputs', 'output_hierarchy'):  # 省略时 identity 不变。
+            if result[key] is None:
+                del result[key]
         return result
 
 
 VARIANTS = (None, 'no_relation', 'drf_backbone', 'unet')
 GRAPHS = (None, 'nested_chain')
+CONTAINMENTS = (None, 'supervised', 'prior_shift', 'gate')
+NODE_INPUTS = ('intensity', 'multiscale')
+# 先验平移 delta_j = PRIOR_SHIFT_GAIN * a_j * clamp(u_j, ±PRIOR_SHIFT_CLAMP)。a_j 是零初始化的可学习标量；
+# 固定增益只为让标量在 AdamW 3e-4 下学得动（每步至多改变 3e-4，放大后约 300 步可到 1）。
+PRIOR_SHIFT_GAIN = 10.0
+PRIOR_SHIFT_CLAMP = 6.0
 
 
 def unit(a, b, *, kernel=3, stride=1, dilation=1, bias):
@@ -301,12 +386,24 @@ class BrainTumorSegmentor(nn.Module):
             self.space_to_node = SpaceToNode(epsilon=config.epsilon,node_count=3,include_background=False)
             if config.variant is None:
                 self.relation = DynamicRelation(256,relation_channels=config.relation_channels,
-                                                rounds=config.rounds,node_count=3,graph=config.graph or 'complete')
+                                                rounds=config.rounds,node_count=3,graph=config.graph or 'complete',
+                                                conditioning=config.relation_conditioning or 'none',
+                                                containment=config.containment is not None,
+                                                existence=config.containment == 'gate')
             self.node_to_space = NodeToSpace(256,attention_channels=config.attention_channels,
                                              content_channels=config.content_channels,node_count=3)
             self.fusion = ResidualFusion(256,content_channels=config.content_channels,bias=config.fusion_bias,
                                          learnable_relation_scale=True,relation_scale_init=config.gamma_init)
             self.decoder = BrainDecoder(bias=config.conv_bias,align_corners=config.align_corners)
+            if config.containment == 'prior_shift':  # 常数初始化，不消耗随机数；[a_TC, a_ET]
+                self.prior_shift_scale = nn.Parameter(torch.zeros(2))
+            # 额外的节点输入：排在其余模块之后构建，不改变它们的初始化。
+            inputs = config.node_inputs or []
+            if 'multiscale' in inputs:  # 1/4（128 通道）与 1/2（64 通道）编码特征的区域池化 -> C 维
+                self.scale_norms = nn.ModuleList(nn.LayerNorm(c) for c in (128, 64))
+                self.scale_projections = nn.ModuleList(nn.Linear(c, 256, bias=False) for c in (128, 64))
+            if 'intensity' in inputs:  # 每个区域 8 个量：四个模态的强度均值与标准差
+                self.intensity_projection = nn.Sequential(nn.Linear(8, 64), nn.LeakyReLU(0.01), nn.Linear(64, 256))
         if convolution_backend == 'depth_sliced':
             from .depth_sliced_conv import enable_depth_sliced_convolutions
             enable_depth_sliced_convolutions(self, convolution_compute_dtype)
@@ -326,15 +423,17 @@ class BrainTumorSegmentor(nn.Module):
         coarse = self.coarse_head(F)
         if isinstance(self.decoder, PlainDecoder):
             del F  # Plain ablations: the coarse head is auxiliary supervision only.
-            nodes = zK = last_alpha = scale_weights = None
+            nodes = zK = last_alpha = scale_weights = containment = None
             final = self.decoder(features[-1],features)
         else:
             nodes = self.space_to_node(F,coarse.probabilities)
+            containment = None
             if self.variant == 'no_relation':  # No rounds: z(K) := z(0); no edges, so no incoming gates.
                 zK, last_alpha = nodes.z0, nodes.z0.new_zeros(nodes.z0.shape[0],3,3)
             else:
-                relation = self.relation.forward_with_last_edges(nodes.z0,nodes.centroid,nodes.size,nodes.confidence)
-                zK, last_alpha = relation.zK, relation.last_alpha
+                extra = self.node_extra(features, coarse.probabilities, image) if self.config.node_inputs else None
+                relation = self.relation.forward_with_last_edges(nodes.z0,nodes.centroid,nodes.size,nodes.confidence,extra)
+                zK, last_alpha, containment = relation.zK, relation.last_alpha, relation.containment
             content = self.node_to_space(F,zK)
             fused = self.fusion(F,content)
             if reduced:
@@ -343,10 +442,63 @@ class BrainTumorSegmentor(nn.Module):
             final, scale_weights = decoded if diagnostics else (decoded, None)
         if reduced:
             final = final.float()
+        final = self.output_logits(final, containment)
         if not torch.isfinite(final).all():
             raise ValueError('nonfinite final logits')
-        output = SegmentorOutput(coarse.logits,final)
+        output = (SegmentorOutput(coarse.logits,final) if containment is None
+                  else ContainmentSegmentorOutput(coarse.logits,final,containment))
         return BrainDiagnostics(output,features,nodes,zK,last_alpha,scale_weights) if diagnostics else output
+
+    def output_logits(self, logits, containment, *, readout=True):
+        """解码器 logit -> 模型输出：可选的逐体素嵌套分解，然后是包含读出的先验平移或存在性门控。
+
+        readout=False 只跳过平移 / 门控（只读探针做敲除用），嵌套分解照常。
+        """
+        if self.config.output_hierarchy == 'nested':
+            logits = nested_logits(logits)
+        if readout and self.config.containment == 'prior_shift':
+            logits = logits + self.prior_shift(containment).view(logits.shape[0],3,1,1,1)
+        elif readout and self.config.containment == 'gate':
+            logits = existence_gate(logits, containment[..., 1])
+        return logits
+
+    def node_extra(self, features, probabilities, image):
+        """[B,3,C]：加到关系状态 h(0) 上的额外节点输入，都用同一组粗概率 P 作权重（P 插值到相应网格）。
+
+        multiscale：z_i^(l) = sum_x P_i(x) E_l(x) / (sum_x P_i(x) + eps)，l = 2、1（1/4、1/2 分辨率），
+        各经 LayerNorm 与无偏置线性映射到 C 维。最深层网格上 TC 与 ET 的掩码几乎重合，较细的尺度能把它们分开。
+        intensity：各区域内 T1/T1ce/T2/FLAIR 四个模态的加权均值与标准差（8 维），经两层 MLP 到 C 维；
+        这是深层特征里已被混合的"各模态原始对比度"。池化都在 FP32 中累加。
+        """
+        epsilon, extra = self.config.epsilon, 0
+        def pooled(volume, power=1):
+            weights = functional.interpolate(probabilities, size=volume.shape[2:], mode='trilinear',
+                                             align_corners=self.config.align_corners).flatten(2)
+            values = volume.flatten(2).transpose(1, 2).to(probabilities.dtype)
+            mass = weights.sum(-1, keepdim=True) + epsilon
+            if power == 1:
+                return torch.bmm(weights, values) / mass
+            return torch.bmm(weights, values) / mass, torch.bmm(weights, values.square()) / mass
+        inputs = self.config.node_inputs
+        if 'multiscale' in inputs:
+            for level, norm, projection in zip((2, 1), self.scale_norms, self.scale_projections):
+                extra = extra + projection(norm(pooled(features[level])))
+        if 'intensity' in inputs:
+            mean, second = pooled(image, power=2)
+            deviation = (second - mean.square()).clamp_min(0).add(epsilon).sqrt()
+            extra = extra + self.intensity_projection(torch.cat((mean, deviation), -1))
+        if not torch.isfinite(extra).all():
+            raise ValueError('nonfinite extra node inputs')
+        return extra
+
+    def prior_shift(self, containment):
+        """[B,3] 逐区域的 logit 平移：WT 为 0；TC、ET 为 gain * a_j * clamp(u_j)。
+
+        u_j 是关系模块给出的包含比例 logit（|TC|/|WT|、|ET|/|TC| 的估计）。这里对 u 取 detach：
+        u 只由包含比例监督学习，保持"比例估计"的含义；分割损失经这条通路只学习标量 a_j（信多少）。
+        """
+        shift = PRIOR_SHIFT_GAIN * self.prior_shift_scale * containment.detach().clamp(-PRIOR_SHIFT_CLAMP, PRIOR_SHIFT_CLAMP)
+        return torch.cat((shift.new_zeros(shift.shape[0],1), shift), 1)
 
     def forward(self, image):
         return self._run(image,False)

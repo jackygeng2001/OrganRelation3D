@@ -103,7 +103,7 @@ def main(argv=None):
             try:
                 optimizer.zero_grad(set_to_none=True)
                 output = model(image)
-                loss = criterion(output.coarse_logits, output.final_logits, label)
+                loss = criterion(output.coarse_logits, output.final_logits, label, getattr(output, 'containment_logits', None))
                 loss.total.backward()
                 optimizer.step()
                 torch.cuda.synchronize(device)

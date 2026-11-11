@@ -35,7 +35,7 @@ def summarize_regions(cases):
 
 
 def region_diagnostics(output, label, criterion, threshold):
-    result = criterion(output.coarse_logits,output.final_logits,label)
+    result = criterion(output.coarse_logits,output.final_logits,label,getattr(output,'containment_logits',None))
     def stats(branch):
         return dict(bce=branch.ce.item(),dice_loss=branch.dice_loss.item(),loss=branch.segmentation.item(),
                     soft_dice=branch.dice_per_class[0].tolist())
@@ -44,6 +44,9 @@ def region_diagnostics(output, label, criterion, threshold):
     diagnostic = dict(total_loss=result.total.item(),final=stats(result.final),coarse=coarse)
     if getattr(result, 'hierarchy', None) is not None:  # Only when lambda_hier is configured.
         diagnostic['hierarchy'] = result.hierarchy.item()
+    if getattr(result, 'containment', None) is not None:  # 仅在配置了 lambda_contain 时；另记预测的包含 logit
+        diagnostic['containment'] = result.containment.item()
+        diagnostic['containment_logits'] = output.containment_logits[0].tolist()
     return diagnostic
 
 
@@ -96,6 +99,8 @@ def region_training_branches(loss):
         for name in ('final', 'coarse')})
     if getattr(loss, 'hierarchy', None) is not None:
         result['hierarchy'] = loss.hierarchy.detach().item()
+    if getattr(loss, 'containment', None) is not None:
+        result['containment'] = loss.containment.detach().item()
     return result
 
 
@@ -107,6 +112,8 @@ def region_validation_branches(record):
         for name in ('final', 'coarse')})
     if 'hierarchy' in diagnostic:
         result['hierarchy'] = diagnostic['hierarchy']
+    if 'containment' in diagnostic:
+        result['containment'] = diagnostic['containment']
     return result
 
 
@@ -114,6 +121,8 @@ def summarize_region_branches(cases):
     result = dict(total_loss=sum(c['total_loss'] for c in cases)/len(cases))
     if all('hierarchy' in c for c in cases):
         result['hierarchy'] = sum(c['hierarchy'] for c in cases)/len(cases)
+    if all('containment' in c for c in cases):
+        result['containment'] = sum(c['containment'] for c in cases)/len(cases)
     for name in ('final', 'coarse'):
         values = [c[name] for c in cases]
         soft = [sum(v['soft_per_region'][i] for v in values)/len(values) for i in range(3)]

@@ -105,6 +105,62 @@ class KnockoutTests(unittest.TestCase):
         self.assertEqual([d['eta'] for d in record['decoder']], model.decoder.eta.tolist())
         json.dumps(record, allow_nan=False)
 
+    def test_relation_v2_baseline_and_knockouts_equal_direct_model_edits(self):
+        import copy
+        image, label = case_inputs()
+        tumor = region_targets(label)[0][0]
+        for containment in (None, 'supervised', 'prior_shift', 'gate', 'full'):
+            with self.subTest(containment=containment):
+                torch.manual_seed(4)
+                extra = dict(graph='nested_chain', relation_conditioning='layernorm_residual')
+                full = containment == 'full'  # 完整方案：门控 + 两种额外节点输入 + 嵌套输出
+                if full:
+                    containment = 'gate'
+                    extra.update(node_inputs=['intensity', 'multiscale'], output_hierarchy='nested')
+                if containment:
+                    extra['containment'] = containment
+                model = BrainTumorSegmentor(BrainTumorConfig(**CFG['model'], **extra)).eval()
+                with torch.no_grad():  # 让残差读出、平移与门控都明显非零
+                    model.relation.readout.weight.normal_(std=.05)
+                    model.decoder.eta.copy_(torch.tensor([.5, -.4, .3]))
+                    if containment == 'prior_shift':
+                        model.prior_shift_scale.copy_(torch.tensor([.03, -.02]))
+                    if containment == 'gate':
+                        model.relation.containment_output.bias[1] = 0.3
+                    features = model.encoder(image)
+                    reference = model(image).final_logits
+                    record = {}
+                    tail = lambda **kwargs: probe.probe_tail(model, features, image=image, **kwargs)
+                    self.assertTrue(torch.equal(tail(record=record, tumor=tumor), reference))
+                    self.assertTrue(torch.equal(tail(), reference))
+                    if full:
+                        with self.assertRaises(ValueError):
+                            probe.probe_tail(model, features)  # 额外节点输入需要图像
+                    self.assertEqual('containment_logits' in record['relation'], containment is not None)
+                    # 边权全部置 0：与把两类边门控的输出偏置压到极小的模型一致（门控恒为 0）
+                    silent = copy.deepcopy(model)
+                    for kind in ('inward', 'outward'):
+                        getattr(silent.relation, f'{kind}_output').weight.zero_()
+                        getattr(silent.relation, f'{kind}_output').bias.fill_(-1e4)
+                    self.assertTrue(torch.equal(tail(relation='edges_zero'), silent(image).final_logits))
+                    off = tail(readout='off')
+                    if containment in ('prior_shift', 'gate'):
+                        self.assertFalse(torch.equal(off, reference))
+                        plain = copy.deepcopy(model)
+                        if containment == 'prior_shift':
+                            plain.prior_shift_scale.zero_()
+                            self.assertTrue(torch.equal(off, plain(image).final_logits))
+                        else:
+                            plain.relation.containment_output.bias[1] = 1e4  # 存在概率为 1
+                            plain.relation.containment_output.weight[1].zero_()
+                            torch.testing.assert_close(off, plain(image).final_logits, atol=1e-4, rtol=1e-4)
+                    else:
+                        self.assertTrue(torch.equal(off, reference))
+                    result = probe.probe_case(model, image, label, .5)
+                    self.assertEqual('readout_off' in result, containment in ('prior_shift', 'gate'))
+                    self.assertIn('edges_zero', result)
+                    self.assertIn('relation_skipped', result)
+
     def test_nested_chain_records_only_its_four_edges(self):
         torch.manual_seed(0)
         model = BrainTumorSegmentor(BrainTumorConfig(**CFG['model'], graph='nested_chain')).eval()

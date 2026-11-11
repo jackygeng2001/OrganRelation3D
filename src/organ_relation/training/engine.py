@@ -118,8 +118,7 @@ def validate_options(options):
         raise ValueError('max_steps or max_epochs required')
     if options['batch_size'] != 1 or options['num_workers'] != 0:
         raise ValueError('training v1 requires batch_size=1 and num_workers=0')
-    if options['scheduler'] is not None:
-        raise ValueError('scheduler not implemented')
+    validate_scheduler(options['scheduler'])
     if options['memory_format'] not in ('contiguous', 'channels_last_3d'):
         raise ValueError('invalid memory format')
     if options.get('convolution_compute_dtype') not in (None, 'bfloat16'):
@@ -134,6 +133,29 @@ def validate_options(options):
     augment.validate_augmentation(options.get('augmentation'))
     ProgressClock(options['eta_window'], options['eta_warmup'])
     validate_early_stopping(options)
+
+
+def validate_scheduler(scheduler):
+    """scheduler=null：学习率全程不变（历史行为）。{"kind": "cosine", "min_lr": x}：余弦衰减，见 scheduled_lr。"""
+    if scheduler is None:
+        return
+    if (not isinstance(scheduler, dict) or set(scheduler) != {'kind', 'min_lr'} or scheduler['kind'] != 'cosine'
+            or isinstance(scheduler['min_lr'], bool) or not isinstance(scheduler['min_lr'], (int, float))
+            or not math.isfinite(scheduler['min_lr']) or scheduler['min_lr'] < 0):
+        raise ValueError('scheduler must be null or {"kind": "cosine", "min_lr": >= 0}')
+
+
+def scheduled_lr(scheduler, base_lr, step, total_steps):
+    """第 step 步（从 1 起）使用的学习率。只是 (step, 总步数) 的函数，没有状态：续训时逐步相同。
+
+    余弦：第 1 步为 base_lr，随后按 0.5 * (1 + cos(pi * (step - 1) / total_steps)) 从 base_lr 降向 min_lr。
+    """
+    if scheduler is None:
+        return base_lr
+    if not 1 <= step <= total_steps or scheduler['min_lr'] > base_lr:
+        raise ValueError('scheduled step outside the run horizon, or min_lr above the base learning rate')
+    cosine = 0.5 * (1 + math.cos(math.pi * (step - 1) / total_steps))
+    return scheduler['min_lr'] + (base_lr - scheduler['min_lr']) * cosine
 
 
 def weights_hash(model):
@@ -187,6 +209,8 @@ class Trainer:
                          if isinstance(criterion, RegionJointLoss) else None)
         if expected_loss is not None and criterion.lambda_hier is not None:
             expected_loss['lambda_hier'] = criterion.lambda_hier  # Eq. (33); absent keeps legacy identity.
+        if expected_loss is not None and criterion.lambda_contain is not None:
+            expected_loss['lambda_contain'] = criterion.lambda_contain  # 关系推理 v2；缺省时 identity 不变
         if (not isinstance(model, BrainTumorSegmentor) or not isinstance(criterion, RegionJointLoss)
                 or model.config.to_dict() != identity.get('model')
                 or identity.get('loss') != expected_loss
@@ -196,6 +220,11 @@ class Trainer:
         self.ce_reduction_mode, self.foreground_ce_reduction = 'region_probability_bce', 'not_applicable'
         if extend_to is not None and (resume is None or type(extend_to) is not int or extend_to < 1):
             raise ValueError('--extend-to requires --resume and a positive integer total')
+        self.scheduler = options['scheduler']
+        if self.scheduler is not None and extend_to is not None:
+            raise ValueError('a scheduled run has a fixed horizon; --extend-to would change every later learning rate')
+        # 构造优化器时给定的学习率（defaults 不随 load_state_dict 改变），调度以它为起点。
+        self.base_lr = optimizer.defaults['lr']
         if not case_ids or len(dataset) != len(case_ids) or len(set(case_ids)) != len(case_ids):
             raise ValueError('invalid training case list')
         if options['validation_every'] and (validation_dataset is None or not validation_case_ids):
@@ -485,12 +514,15 @@ class Trainer:
                 if self.options['memory_format'] == 'channels_last_3d':
                     image = image.contiguous(memory_format=torch.channels_last_3d)
             output = self.model(image)  # No supervision enters forward.
-            loss = self.criterion(output.coarse_logits, output.final_logits, label)
+            loss = self.criterion(output.coarse_logits, output.final_logits, label, getattr(output, 'containment_logits', None))
             loss.total.backward()
             epoch_complete = self.state['cursor'] + 1 == len(self.dataset)
             check = cadence_due(self.options, 'diagnostics_every', step, epoch, epoch_complete)
             diagnostics = gradient_diagnostics(self.model) if check else None
             before = {n: p.detach().clone() for n, p in self.model.named_parameters()} if check else None
+            if self.scheduler is not None:  # 无状态调度：本步学习率只由 (step, 总步数) 决定
+                for group in self.optimizer.param_groups:
+                    group['lr'] = scheduled_lr(self.scheduler, self.base_lr, step, self.total)
             lr = self.optimizer.param_groups[0]['lr']
             self.optimizer.step()
             if check:
@@ -518,6 +550,8 @@ class Trainer:
                 row[branch]['bce'] = row[branch].pop('ce')
             if getattr(loss, 'hierarchy', None) is not None:  # Eq. (32), before lambda_hier.
                 row['hierarchy'] = loss.hierarchy.detach().item()
+            if getattr(loss, 'containment', None) is not None:  # 包含比例损失，未乘 lambda_contain
+                row['containment'] = loss.containment.detach().item()
             if self.epoch_mode:
                 # Observe this same forward, before freeing it; no extra model
                 # call or stochastic sampling. Store only case scalar records.

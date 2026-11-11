@@ -73,6 +73,70 @@ z_new = (1-u)*z + u*z_tilde
 
 W 各有一个偏置，U 无偏置，Wm 无偏置。
 
+## 关系推理 v2（2026-11-11，用户已同意；效果待正式实验检验）
+
+依据：EXPERIMENTS.md 5.5。三项都由显式配置开启；省略时上一节的模型、参数初始化、损失与 identity 完全不变。
+
+**归一化与残差读出**（`model.relation_conditioning = layernorm_residual`）。式 12–16 的形式不变，只是作用在归一化后的状态上：
+
+```
+h_i(0) = LayerNorm(z_i(0))                      # 逐节点，256 维，可学习仿射
+r_ij(t) = [h_i(t); h_j(t); c_j-c_i; s_i; s_j; q_i; q_j]
+alpha_ij(t), m_j(t), h_j(t+1) = GRU(m_j(t), h_j(t))   # 同式 13–15，以 h 代 z
+z_i' = z_i(0) + W_o h_i(K)                      # W_o ∈ R^{C×C}，无偏置，零初始化
+```
+
+初始时 z' = z(0)，与不做关系推理的模型相同；送入解码器的仍是 z'、(c, s, q) 与末轮边权 alpha(K-1)。新增的 LayerNorm 与 W_o 排在原有参数之后构建，原有参数的初始化不变。
+
+**包含读出**（`model.containment`）。只定义在两条相邻嵌套的向内边 (i→j) ∈ {WT→TC, TC→ET} 上，取末轮之后的状态：
+
+```
+[u_ij, e_ij] = W2^c ReLU(W1^c [h_i(K); h_j(K); c_j-c_i; s_i; s_j; q_i; q_j] + b1^c) + b2^c
+```
+
+u_ij 是包含比例 |T_j|/|T_i| 的 logit，e_ij 是"内层区域 j 存在"的 logit（偏置初值 4，即起点近似都存在）。W1^c ∈ R^{Cr×(2C+7)}，与边门控 MLP 同形但参数独立。`containment = supervised` 只输出 u（仅受监督）；`prior_shift` 另把内层 logit 整体平移 10·a_j·clamp(u_ij, ±6)（a_j 零初始化，平移处 u 取 detach；实测无益，保留作对照）；`gate` 输出 u 与 e 并做存在性门控。
+
+**存在性门控**（`containment = gate`）。记解码器输出为 L，
+
+```
+pi_TC = sigmoid(e_WT→TC),   pi_ET = pi_TC * sigmoid(e_TC→ET)
+P_WT = sigmoid(L_WT),   P_TC = pi_TC * sigmoid(L_TC),   P_ET = pi_ET * sigmoid(L_ET)
+```
+
+模型输出 logit(P)（用 logsigmoid 与 logaddexp 计算，任何有限输入都得到有限值），损失、阈值与评估都作用在它上面；WT 通道不变。pi → 1 时退回原输出，pi → 0 时整块区域被关掉。
+
+**包含监督**（`loss.lambda_contain`，需同时给出 `lambda_hier`）。真值只进入损失：
+
+```
+rho_ij = |T_j| / |T_i|,   y_ij = 1[|T_j| > 0]                 # 真值体素数；|T_i| = 0 的边不计
+L_contain = mean_valid_edges [ BCE(u_ij, rho_ij) + BCE(e_ij, y_ij) ]   # 没有 e 时只有第一项
+L = L_seg(final) + lambda_c L_seg(coarse) + lambda_hier L_hier + lambda_contain L_contain
+```
+
+**额外的节点输入**（`model.node_inputs`，需要 layernorm_residual）。都以同一组粗概率 P 为权重（P 三线性插值到相应网格），只加到关系状态上：h_i(0) = LayerNorm(z_i(0)) + x_i；残差读出仍以 z(0) 为底。
+
+```
+multiscale: z_i^(l) = sum_x P_i(x) E_l(x) / (sum_x P_i(x) + eps),  l = 2, 1     # 1/4、1/2 分辨率，128、64 维
+            x_i += W_l LayerNorm_l(z_i^(l))                                    # W_l 无偏置，映射到 C 维
+intensity:  mu_i,m = sum_x P_i(x) I_m(x) / (sum_x P_i(x) + eps),  m = T1, T1ce, T2, FLAIR
+            sd_i,m = sqrt(max(E_i[I_m^2] - mu_i,m^2, 0) + eps)
+            x_i += MLP([mu_i; sd_i])                                           # 8 → 64 → C，LeakyReLU(0.01)
+```
+
+池化在 FP32 中累加；粗概率不 detach。最深层网格上 TC 与 ET 的掩码几乎重合，较细的尺度和各模态的原始对比度是深层池化向量里没有的信息。
+
+**逐体素嵌套输出**（`model.output_hierarchy = nested`）。记解码器输出为 L：
+
+```
+P_WT = sigmoid(L_WT),   P_TC = P_WT * sigmoid(L_TC),   P_ET = P_TC * sigmoid(L_ET)
+```
+
+即 L_TC、L_ET 分别是“在 WT 内属于 TC”、“在 TC 内属于 ET”的条件 logit（先外后内的级联，单网络形式）。模型输出 logit(P)，必然满足 P_ET ≤ P_TC ≤ P_WT，层级一致性项恒为 0。与存在性门控同时启用时先做嵌套分解，再乘存在概率。
+
+**协议 P2**（`training.scheduler = {"kind": "cosine", "min_lr": 1e-6}`，`max_epochs = 80`，不设 `early_stopping`）。第 t 步（从 1 起）的学习率为 min_lr + (lr − min_lr)·0.5·(1 + cos(π (t−1)/T))，T 为总步数；它只是 (t, T) 的函数，没有状态，续训逐步相同；有调度的 run 不能用 `--extend-to` 延长。
+
+参数量（Cr = 64，嵌套双向链）：归一化 + 残差读出 +66,048；包含读出 +33,410（只有比例时 +33,345）；multiscale +49,536；intensity +17,216。R3 8,552,049，R3A 8,585,459，`p2_r4_full` 8,652,211。
+
 ## 深层回写（式 17–19）
 
 ```

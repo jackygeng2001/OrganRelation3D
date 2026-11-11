@@ -14,6 +14,7 @@
 
 - 完整四模态 MRI，顺序 T1/T1ce/T2/FLAIR。一次整例（整脑）前向，无 patch/sliding-window 或标签引导采样。原始数据只读。唯一允许的空间裁剪是 2026-11-05 用户批准的显式 `preprocessing.spatial_crop`：仅由四模态非零体素决定的整脑外接框，标签只用于拒绝会丢失肿瘤体素的裁剪。
 - WT/TC/ET 三个重叠区域，独立 sigmoid 与阈值；三个固定节点，无 self-loop。关系图为 2026-11-10 老师批准的嵌套双向链 WT⇄TC⇄ET：四条有向边，WT 与 ET 之间无边；向内边（WT→TC、TC→ET）表示包含关系，用外层约束内层范围，向外边（ET→TC、TC→WT）用内层帮助外层定位；两类边的门控 MLP 与消息矩阵分开设参，GRU 共用。配置显式写 `model.graph=nested_chain`；省略 graph 即历史的三节点完全图（六条有向边，E1/A3 所用），identity 不变。GT 只用于监督与评估，绝不进入模型或存在性判断。
+- 关系推理 v2 与协议 P2（2026-11-11 用户同意，见 METHOD_SPEC 与 EXPERIMENTS.md 5.5–5.7）：`model.relation_conditioning`、`model.containment`、`model.node_inputs`、`model.output_hierarchy`、`loss.lambda_contain`、`training.scheduler` 都是显式配置，省略即历史行为、identity 不变；正式配置在 `configs/relation_v2/`，队列在 `configs/queues/`。真值只进入包含监督的损失，不进入模型。
 - 严格按 METHOD_SPEC 实现双感受野编码器、关系公式、深层回写、关系尺度自适应解码器、BCE+Dice 联合损失；层级一致性损失仅加在最终预测上，权重由 `loss.lambda_hier` 显式给出。c/s/q 固定但不 detach；各轮共享参数、同步更新、重算边权。解码使用 z(K) 与缓存的 alpha(K-1)，不再重算一轮关系。
 - 消融只通过显式 `model.variant`（no_relation/drf_backbone/unet，2026-11-09 用户批准）或配置项实现；省略 variant 与 graph 时构建与 identity 和历史 run 完全一致。当前消融（2026-11-10 老师批准，参照 DHAS）只在 BraTS 2018 五折上做、不跑基线，按 R1 双感受野编码器 + 普通解码器 → R2 加区域节点、不做关系推理 → R3 加嵌套关系推理 → R4 加层级一致性损失（完整方法）逐项累加，相邻两行只差一项（由测试核对），相邻两行做配对 t 检验；时间允许再跑 K=1、K=3 两组。
 - 方法文档未确定的实验选择必须显式配置并标为待冻结，不声称正式最优。`configs/development/implementation_check.json` 仅用于实现检查。
@@ -24,6 +25,7 @@
 
 - AMD 主实验环境：Ubuntu 24.04，RX 7900 XTX 24GB，conda 环境 organrelation3d（Python 3.11 / PyTorch 2.11.0+ROCm7.2）。Windows 11 + RTX 5060 8GB（PyTorch 2.8 + CUDA 12.8）为辅助环境，正式训练前须先完成验证（见 EXPERIMENTS.md）。不得自行升级/降级核心环境。
 - GPU 预检、短训练与正式实验须用户明确授权；CPU 合成测试、只读数据检查可直接进行。
+- RX 7900 XTX 上同时跑两个训练（2026-11-11 实测总吞吐约 1.45–1.48 倍，合计保留显存约 17 GiB，见 EXPERIMENTS.md 5.7）：成批实验用 `scripts/run_queue.py <队列文件>` 两个并行执行，中断后同一条命令续跑；三个并行放不下。RTX 5060 一次一个。
 - 只用标准 PyTorch 算子，兼容 CPU/ROCm/CUDA，不引入 NVIDIA 专属扩展。设备由入口管理，内部临时张量继承输入 device/dtype。
 - 保留有限值、autocast 与形状检查；不能用 CPU 小输入通过来宣称整例显存可行。
 - channels_last_3d 为显式运行设置；ROCm 启动前须有 `PYTORCH_MIOPEN_SUGGEST_NHWC=1`，只能由本机配置或命令显式给出，不偷偷设置或回退。

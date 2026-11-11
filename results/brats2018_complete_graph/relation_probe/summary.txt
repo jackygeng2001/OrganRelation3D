@@ -1,0 +1,86 @@
+#### all files (114 cases)
+[E1] gamma median 0.104 [IQR 0.099, 0.110]
+  deep writeback ||gamma*phi(G)||/||F||: volume median 0.116 [IQR 0.051, 0.544]; tumor median 0.264 [IQR 0.151, 0.368]
+  unscaled ||phi(G)||/||F|| median 1.058 [IQR 0.462, 5.481]; cosine(F, F') median 0.993 [IQR 0.895, 0.999]
+  decoder writeback 1/4 ||eta*Phi(G)||/||E||: volume median 0.045 [IQR 0.020, 0.120]; tumor median 0.006 [IQR 0.003, 0.016]
+  decoder writeback 1/2 ||eta*Phi(G)||/||E||: volume median 0.537 [IQR 0.222, 1.205]; tumor median 0.095 [IQR 0.039, 0.196]
+  decoder writeback full ||eta*Phi(G)||/||E||: volume median 0.296 [IQR 0.179, 0.395]; tumor median 0.115 [IQR 0.086, 0.167]
+  round 1 edge weights: median 0.4690, max 1.0000, >0.05 51.5%; ||message||/||z|| median 2.075 [IQR 0.031, 4.450]; message share of node update median 0.450 [IQR 0.071, 0.744]
+  round 2 edge weights: median 0.0003, max 0.1256, >0.05 1.6%; ||message||/||z|| median 0.001 [IQR 0.001, 0.020]; message share of node update median 0.002 [IQR 0.001, 0.077]
+  ||z(K)-z(0)||/||z(0)|| median 0.802 [IQR 0.706, 0.956]
+  baseline (CPU FP32) mean Dice 0.7990; WT 0.9049, TC 0.8153, ET 0.6752
+  vs training validation ledger (GPU): 341 case-region Dice values, mean |diff| 0.0001, max 0.0041
+  knockout gamma_zero       mean Dice change -0.0029 (WT -0.0014, TC -0.0032, ET -0.0042); worse by >0.01 in 20/114 cases; flipped median 0.018 [IQR 0.008, 0.037]; logit change median 0.008 [IQR 0.006, 0.014]
+  knockout eta_zero         mean Dice change -0.0130 (WT -0.0082, TC -0.0231, ET -0.0072); worse by >0.01 in 41/114 cases; flipped median 0.078 [IQR 0.043, 0.120]; logit change median 0.080 [IQR 0.057, 0.099]
+  knockout gamma_eta_zero   mean Dice change -0.0175 (WT -0.0119, TC -0.0273, ET -0.0127); worse by >0.01 in 55/114 cases; flipped median 0.089 [IQR 0.050, 0.141]; logit change median 0.081 [IQR 0.058, 0.103]
+  knockout edges_zero       mean Dice change -0.0015 (WT -0.0013, TC -0.0035, ET +0.0004); worse by >0.01 in 8/114 cases; flipped median 0.019 [IQR 0.008, 0.033]; logit change median 0.019 [IQR 0.009, 0.026]
+  knockout relation_skipped mean Dice change -0.0268 (WT -0.0111, TC -0.0533, ET -0.0161); worse by >0.01 in 65/114 cases; flipped median 0.095 [IQR 0.053, 0.166]; logit change median 0.095 [IQR 0.067, 0.122]
+[A3] gamma median 0.095 [IQR 0.087, 0.104]
+  deep writeback ||gamma*phi(G)||/||F||: volume median 0.071 [IQR 0.036, 0.107]; tumor median 0.203 [IQR 0.137, 0.303]
+  unscaled ||phi(G)||/||F|| median 0.706 [IQR 0.401, 1.092]; cosine(F, F') median 0.998 [IQR 0.994, 0.999]
+  decoder writeback 1/4 ||eta*Phi(G)||/||E||: volume median 0.151 [IQR 0.062, 0.416]; tumor median 0.062 [IQR 0.030, 0.110]
+  decoder writeback 1/2 ||eta*Phi(G)||/||E||: volume median 0.907 [IQR 0.512, 1.581]; tumor median 0.219 [IQR 0.128, 0.395]
+  decoder writeback full ||eta*Phi(G)||/||E||: volume median 0.194 [IQR 0.137, 0.274]; tumor median 0.137 [IQR 0.097, 0.190]
+  baseline (CPU FP32) mean Dice 0.7990; WT 0.8982, TC 0.8064, ET 0.6949
+  vs training validation ledger (GPU): 339 case-region Dice values, mean |diff| 0.0002, max 0.0034
+  knockout gamma_zero       mean Dice change -0.0041 (WT -0.0011, TC -0.0062, ET -0.0049); worse by >0.01 in 19/114 cases; flipped median 0.024 [IQR 0.015, 0.038]; logit change median 0.013 [IQR 0.009, 0.018]
+  knockout eta_zero         mean Dice change -0.0331 (WT -0.0177, TC -0.0568, ET -0.0092); worse by >0.01 in 62/114 cases; flipped median 0.134 [IQR 0.071, 0.204]; logit change median 0.104 [IQR 0.070, 0.133]
+  knockout gamma_eta_zero   mean Dice change -0.0332 (WT -0.0187, TC -0.0592, ET -0.0059); worse by >0.01 in 63/114 cases; flipped median 0.122 [IQR 0.066, 0.193]; logit change median 0.098 [IQR 0.067, 0.131]
+
+#### probe_fold0.jsonl (57 cases)
+[E1] gamma median 0.099 [IQR 0.099, 0.099]
+  deep writeback ||gamma*phi(G)||/||F||: volume median 0.547 [IQR 0.446, 0.756]; tumor median 0.362 [IQR 0.264, 0.551]
+  unscaled ||phi(G)||/||F|| median 5.507 [IQR 4.491, 7.607]; cosine(F, F') median 0.895 [IQR 0.817, 0.922]
+  decoder writeback 1/4 ||eta*Phi(G)||/||E||: volume median 0.122 [IQR 0.034, 0.242]; tumor median 0.014 [IQR 0.004, 0.027]
+  decoder writeback 1/2 ||eta*Phi(G)||/||E||: volume median 0.738 [IQR 0.366, 1.210]; tumor median 0.103 [IQR 0.070, 0.184]
+  decoder writeback full ||eta*Phi(G)||/||E||: volume median 0.366 [IQR 0.306, 0.434]; tumor median 0.120 [IQR 0.097, 0.188]
+  round 1 edge weights: median 0.0021, max 0.1324, >0.05 2.9%; ||message||/||z|| median 0.031 [IQR 0.009, 0.075]; message share of node update median 0.070 [IQR 0.022, 0.133]
+  round 2 edge weights: median 0.0010, max 0.1256, >0.05 3.2%; ||message||/||z|| median 0.020 [IQR 0.004, 0.051]; message share of node update median 0.077 [IQR 0.021, 0.148]
+  ||z(K)-z(0)||/||z(0)|| median 0.774 [IQR 0.681, 0.915]
+  baseline (CPU FP32) mean Dice 0.8016; WT 0.9062, TC 0.7982, ET 0.7005
+  vs training validation ledger (GPU): 171 case-region Dice values, mean |diff| 0.0001, max 0.0009
+  knockout gamma_zero       mean Dice change -0.0021 (WT -0.0009, TC -0.0007, ET -0.0046); worse by >0.01 in 13/57 cases; flipped median 0.019 [IQR 0.008, 0.058]; logit change median 0.009 [IQR 0.007, 0.019]
+  knockout eta_zero         mean Dice change -0.0075 (WT -0.0114, TC -0.0083, ET -0.0030); worse by >0.01 in 19/57 cases; flipped median 0.092 [IQR 0.060, 0.132]; logit change median 0.096 [IQR 0.081, 0.126]
+  knockout gamma_eta_zero   mean Dice change -0.0124 (WT -0.0159, TC -0.0108, ET -0.0104); worse by >0.01 in 26/57 cases; flipped median 0.105 [IQR 0.070, 0.167]; logit change median 0.100 [IQR 0.082, 0.129]
+  knockout edges_zero       mean Dice change -0.0008 (WT -0.0008, TC -0.0008, ET -0.0006); worse by >0.01 in 1/57 cases; flipped median 0.009 [IQR 0.003, 0.017]; logit change median 0.009 [IQR 0.003, 0.016]
+  knockout relation_skipped mean Dice change -0.0076 (WT -0.0064, TC -0.0097, ET -0.0067); worse by >0.01 in 23/57 cases; flipped median 0.065 [IQR 0.041, 0.134]; logit change median 0.105 [IQR 0.072, 0.131]
+[A3] gamma median 0.087 [IQR 0.087, 0.087]
+  deep writeback ||gamma*phi(G)||/||F||: volume median 0.070 [IQR 0.037, 0.113]; tumor median 0.178 [IQR 0.140, 0.215]
+  unscaled ||phi(G)||/||F|| median 0.807 [IQR 0.423, 1.302]; cosine(F, F') median 0.998 [IQR 0.994, 0.999]
+  decoder writeback 1/4 ||eta*Phi(G)||/||E||: volume median 0.294 [IQR 0.166, 0.478]; tumor median 0.077 [IQR 0.057, 0.117]
+  decoder writeback 1/2 ||eta*Phi(G)||/||E||: volume median 1.260 [IQR 0.880, 1.882]; tumor median 0.353 [IQR 0.220, 0.485]
+  decoder writeback full ||eta*Phi(G)||/||E||: volume median 0.224 [IQR 0.191, 0.313]; tumor median 0.172 [IQR 0.116, 0.222]
+  baseline (CPU FP32) mean Dice 0.8063; WT 0.9027, TC 0.7948, ET 0.7310
+  vs training validation ledger (GPU): 169 case-region Dice values, mean |diff| 0.0002, max 0.0018
+  knockout gamma_zero       mean Dice change -0.0030 (WT -0.0002, TC -0.0047, ET -0.0042); worse by >0.01 in 7/57 cases; flipped median 0.021 [IQR 0.013, 0.029]; logit change median 0.012 [IQR 0.009, 0.015]
+  knockout eta_zero         mean Dice change -0.0559 (WT -0.0382, TC -0.1043, ET -0.0093); worse by >0.01 in 47/57 cases; flipped median 0.189 [IQR 0.131, 0.242]; logit change median 0.133 [IQR 0.100, 0.153]
+  knockout gamma_eta_zero   mean Dice change -0.0547 (WT -0.0386, TC -0.1040, ET -0.0057); worse by >0.01 in 45/57 cases; flipped median 0.179 [IQR 0.109, 0.255]; logit change median 0.131 [IQR 0.098, 0.154]
+
+#### probe_fold1.jsonl (57 cases)
+[E1] gamma median 0.110 [IQR 0.110, 0.110]
+  deep writeback ||gamma*phi(G)||/||F||: volume median 0.052 [IQR 0.030, 0.075]; tumor median 0.201 [IQR 0.123, 0.263]
+  unscaled ||phi(G)||/||F|| median 0.475 [IQR 0.277, 0.686]; cosine(F, F') median 0.999 [IQR 0.997, 1.000]
+  decoder writeback 1/4 ||eta*Phi(G)||/||E||: volume median 0.036 [IQR 0.019, 0.048]; tumor median 0.005 [IQR 0.003, 0.008]
+  decoder writeback 1/2 ||eta*Phi(G)||/||E||: volume median 0.393 [IQR 0.128, 1.157]; tumor median 0.080 [IQR 0.023, 0.198]
+  decoder writeback full ||eta*Phi(G)||/||E||: volume median 0.179 [IQR 0.135, 0.282]; tumor median 0.113 [IQR 0.072, 0.156]
+  round 1 edge weights: median 0.9815, max 1.0000, >0.05 100.0%; ||message||/||z|| median 4.451 [IQR 4.350, 4.568]; message share of node update median 0.747 [IQR 0.689, 0.825]
+  round 2 edge weights: median 0.0002, max 0.0010, >0.05 0.0%; ||message||/||z|| median 0.001 [IQR 0.000, 0.001]; message share of node update median 0.001 [IQR 0.001, 0.001]
+  ||z(K)-z(0)||/||z(0)|| median 0.826 [IQR 0.739, 0.988]
+  baseline (CPU FP32) mean Dice 0.7964; WT 0.9035, TC 0.8324, ET 0.6495
+  vs training validation ledger (GPU): 170 case-region Dice values, mean |diff| 0.0002, max 0.0041
+  knockout gamma_zero       mean Dice change -0.0037 (WT -0.0018, TC -0.0057, ET -0.0037); worse by >0.01 in 7/57 cases; flipped median 0.017 [IQR 0.008, 0.027]; logit change median 0.008 [IQR 0.004, 0.011]
+  knockout eta_zero         mean Dice change -0.0184 (WT -0.0049, TC -0.0379, ET -0.0116); worse by >0.01 in 22/57 cases; flipped median 0.060 [IQR 0.027, 0.109]; logit change median 0.058 [IQR 0.044, 0.078]
+  knockout gamma_eta_zero   mean Dice change -0.0226 (WT -0.0079, TC -0.0438, ET -0.0150); worse by >0.01 in 29/57 cases; flipped median 0.069 [IQR 0.033, 0.113]; logit change median 0.058 [IQR 0.046, 0.080]
+  knockout edges_zero       mean Dice change -0.0022 (WT -0.0018, TC -0.0061, ET +0.0014); worse by >0.01 in 7/57 cases; flipped median 0.023 [IQR 0.019, 0.044]; logit change median 0.024 [IQR 0.019, 0.031]
+  knockout relation_skipped mean Dice change -0.0461 (WT -0.0158, TC -0.0970, ET -0.0256); worse by >0.01 in 42/57 cases; flipped median 0.136 [IQR 0.083, 0.204]; logit change median 0.091 [IQR 0.061, 0.112]
+[A3] gamma median 0.104 [IQR 0.104, 0.104]
+  deep writeback ||gamma*phi(G)||/||F||: volume median 0.071 [IQR 0.029, 0.104]; tumor median 0.263 [IQR 0.136, 0.379]
+  unscaled ||phi(G)||/||F|| median 0.683 [IQR 0.280, 1.004]; cosine(F, F') median 0.997 [IQR 0.995, 1.000]
+  decoder writeback 1/4 ||eta*Phi(G)||/||E||: volume median 0.063 [IQR 0.032, 0.135]; tumor median 0.029 [IQR 0.013, 0.103]
+  decoder writeback 1/2 ||eta*Phi(G)||/||E||: volume median 0.536 [IQR 0.286, 0.959]; tumor median 0.129 [IQR 0.083, 0.203]
+  decoder writeback full ||eta*Phi(G)||/||E||: volume median 0.137 [IQR 0.067, 0.202]; tumor median 0.101 [IQR 0.024, 0.156]
+  baseline (CPU FP32) mean Dice 0.7918; WT 0.8938, TC 0.8181, ET 0.6593
+  vs training validation ledger (GPU): 170 case-region Dice values, mean |diff| 0.0002, max 0.0034
+  knockout gamma_zero       mean Dice change -0.0051 (WT -0.0020, TC -0.0078, ET -0.0057); worse by >0.01 in 12/57 cases; flipped median 0.027 [IQR 0.017, 0.039]; logit change median 0.016 [IQR 0.010, 0.020]
+  knockout eta_zero         mean Dice change -0.0103 (WT +0.0028, TC -0.0092, ET -0.0091); worse by >0.01 in 15/57 cases; flipped median 0.071 [IQR 0.040, 0.137]; logit change median 0.081 [IQR 0.048, 0.104]
+  knockout gamma_eta_zero   mean Dice change -0.0116 (WT +0.0011, TC -0.0143, ET -0.0062); worse by >0.01 in 18/57 cases; flipped median 0.076 [IQR 0.046, 0.128]; logit change median 0.076 [IQR 0.052, 0.102]

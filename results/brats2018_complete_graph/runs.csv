@@ -1,0 +1,11 @@
+label,fold,run_dir,commit,variant,graph,rounds,lambda_hier,lambda_c,max_epochs,train_cases,val_cases,epochs_run,status,best_epoch,best_dice,best_WT,best_TC,best_ET,last5_mean_dice,train_hours
+E1,0,brats2018_5fold_amp_bf16_fold0,7e77278,full,complete,2,1,0.5,500,228,57,98,early_stopped,81,0.801683,0.906279,0.798211,0.70056,0.794331,6.68654
+A3,0,brats2018_5fold_amp_bf16_no_relation_fold0,e153447,no_relation,complete,2,1,0.5,500,228,57,106,early_stopped,101,0.806318,0.902735,0.794783,0.731054,0.800834,7.51425
+E1,1,brats2018_5fold_amp_bf16_fold1,7e77278,full,complete,2,1,0.5,500,228,57,74,early_stopped,54,0.796409,0.903521,0.832368,0.649461,0.785003,5.04021
+A3,1,brats2018_5fold_amp_bf16_no_relation_fold1,84ad213,no_relation,complete,2,1,0.5,500,228,57,75,early_stopped,70,0.791789,0.893769,0.818146,0.659336,0.787671,5.86714
+E1,2,brats2018_5fold_amp_bf16_fold2,7e77278,full,complete,2,1,0.5,500,228,57,85,early_stopped,65,0.814005,0.887524,0.855995,0.693569,0.806716,5.68039
+A3,2,brats2018_5fold_amp_bf16_no_relation_fold2,84ad213,no_relation,complete,2,1,0.5,500,228,57,105,early_stopped,89,0.813433,0.890576,0.846598,0.697711,0.798425,6.89948
+E1,3,brats2018_5fold_amp_bf16_fold3,7e77278,full,complete,2,1,0.5,500,228,57,75,early_stopped,65,0.828678,0.888705,0.830804,0.764983,0.82092,5.12309
+A3,3,brats2018_5fold_amp_bf16_no_relation_fold3,04ef619,no_relation,complete,2,1,0.5,500,228,57,69,early_stopped,49,0.830045,0.901122,0.834795,0.753171,0.821356,4.51007
+E1,4,brats2018_5fold_amp_bf16_fold4,7e77278,full,complete,2,1,0.5,500,228,57,79,early_stopped,68,0.830201,0.886967,0.865578,0.738058,0.81652,5.39437
+A3,4,brats2018_5fold_amp_bf16_no_relation_fold4,04ef619,no_relation,complete,2,1,0.5,500,228,57,4,incomplete,4,0.7236,0.831209,0.710339,0.629251,0.660233,0.324167

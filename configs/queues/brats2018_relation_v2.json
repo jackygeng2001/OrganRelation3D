@@ -1,0 +1,226 @@
+{
+ "note": "RX 7900 XTX, two jobs at a time. BraTS 2018, protocol P2 (80 epochs, cosine). Fold-major order: every arm finishes fold k before any arm starts fold k+1, so whatever is finished when the queue stops is a complete paired comparison. Arm priority inside a fold: r2_nodes, r3a_gate, r4_full, r3_relation, r2_nodes_seed2, r3ab_multiscale, r3ac_intensity, r3ad_nested, r1_drf_backbone, r3_legacy_relation, r4_soft_hierarchy.",
+ "workers": 2,
+ "jobs": [
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r3a_gate.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_relation.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes_seed2.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ab_multiscale.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ac_intensity.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ad_nested.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_legacy_relation.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_soft_hierarchy.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r3a_gate.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_relation.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes_seed2.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ab_multiscale.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ac_intensity.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ad_nested.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_legacy_relation.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_soft_hierarchy.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r3a_gate.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_relation.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes_seed2.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ab_multiscale.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ac_intensity.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ad_nested.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_legacy_relation.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_soft_hierarchy.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r3a_gate.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_relation.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes_seed2.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ab_multiscale.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ac_intensity.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ad_nested.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_legacy_relation.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_soft_hierarchy.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r3a_gate.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_relation.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes_seed2.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ab_multiscale.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ac_intensity.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r3ad_nested.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r3_legacy_relation.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_soft_hierarchy.json",
+   "fold": 4
+  }
+ ]
+}

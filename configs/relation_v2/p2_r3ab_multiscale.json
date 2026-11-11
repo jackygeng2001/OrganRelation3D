@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "mode": "brats_regions",
+  "status": "brats2018_relation_v2_cosine_p2_r3ab_multiscale_not_final_paper_protocol",
+  "model": {
+    "relation_channels": 64,
+    "rounds": 2,
+    "attention_channels": 32,
+    "content_channels": 32,
+    "epsilon": 1e-06,
+    "gamma_init": 0.1,
+    "conv_bias": true,
+    "coarse_bias": true,
+    "fusion_bias": true,
+    "align_corners": false,
+    "graph": "nested_chain",
+    "relation_conditioning": "layernorm_residual",
+    "containment": "gate",
+    "node_inputs": [
+      "multiscale"
+    ]
+  },
+  "model_choice_note": "Document fixes encoder 32/64/128/256, GN8, LeakyReLU .01, decoder d=32/Cg=32/MLP64, eta=1e-3; Cr=64, K=2, da=Cg=32 as approved 2026-11-06. Relation reasoning v2 (2026-11-11, EXPERIMENTS.md 5.5-5.6, METHOD_SPEC): relation_conditioning=layernorm_residual runs eqs. 12-16 on LayerNorm(z0) and reads out z' = z0 + W_o h(K) with W_o zero-initialised (the original module saturated its gates and GRU on unnormalised nodes); containment=gate adds, on the two nested inward edges WT->TC and TC->ET, a supervised readout of the containment ratio and of the inner region's existence, and multiplies the inner regions' probabilities by the existence probability along the chain. Omitted keys keep the historical model. Development choices, not tuned. Screening of what gives an edge something to carry (EXPERIMENTS.md 5.6): node_inputs adds to the relation state h(0) region poolings of the 1/4 and 1/2 encoder features (multiscale) and per-region mean/std of the four modalities (intensity); output_hierarchy=nested factorises the output voxel-wise as P_TC = P_WT*sigmoid(L_TC), P_ET = P_TC*sigmoid(L_ET).",
+  "loss": {
+    "epsilon": 1e-06,
+    "lambda_c": 0.5,
+    "align_corners": false,
+    "lambda_hier": 0.0,
+    "lambda_contain": 0.5
+  },
+  "threshold": 0.5,
+  "preprocessing": {
+    "normalization": "nonzero_zscore",
+    "normalization_epsilon": 1e-08,
+    "spatial_crop": {
+      "kind": "nonzero_bbox",
+      "margin": 0,
+      "multiple_of": 8
+    }
+  },
+  "optimizer": {
+    "lr": 0.0003,
+    "weight_decay": 0,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "foreach": false,
+    "fused": false
+  },
+  "training": {
+    "max_steps": null,
+    "max_epochs": 80,
+    "batch_size": 1,
+    "num_workers": 0,
+    "seed": 20260925,
+    "shuffle": true,
+    "memory_format": "channels_last_3d",
+    "scheduler": {
+      "kind": "cosine",
+      "min_lr": 1e-06
+    },
+    "checkpoint_every": 1,
+    "diagnostics_every": 1,
+    "validation_every": 1,
+    "validation_role": "internal_dev",
+    "eta_window": 20,
+    "eta_warmup": 5,
+    "console_every_steps": 25,
+    "cadence_unit": "epoch",
+    "checkpoint_every_steps": 25,
+    "mixed_precision": "bfloat16",
+    "augmentation": {
+      "kind": "flip_intensity_v1",
+      "flip_probability": 0.5,
+      "intensity_scale": 0.1,
+      "intensity_shift": 0.1
+    }
+  },
+  "protocol_note": "Whole-brain-box year-specific patient folds, no stratification; full internal-dev every epoch. Protocol P2 (2026-11-11): fixed 80 epochs, no early stopping, AdamW 3e-4 with a stateless cosine decay to 1e-6 over the whole run; the last epoch is the reported model (no selection on the validation set), best-dev.ckpt is still saved for reference. Reason: with a constant learning rate, two consecutive epochs of one run differ per case as much as two methods do (paired SD 0.044-0.057 vs 0.052), and averaging two checkpoints of one run matches or beats its best epoch. Development choice, not an optimal/frozen paper protocol; official unlabeled validation not used.",
+  "preprocessing_note": "User-approved 2026-11-05: one whole-brain forward per case on the image-only box of nonzero voxels across T1/T1ce/T2/FLAIR, grown to a multiple of 8 inside the volume. Z-score statistics are unchanged (all nonzero voxels lie inside). Loading stops if any labeled tumor voxel would fall outside; the BraTS2018 training partition passed this audit (285/285). Not a patch or sliding window. Node c/s are relative to the box; BCE averages over box voxels.",
+  "loss_note": "Hierarchy revision (层级一致性修订版.docx, eqs. 32-33): L = Lseg(final) + lambda_c*Lseg(coarse) + lambda_hier*Lhier(final). The document fixes lambda_hier >= 0 but gives no value; 1.0 is the development value the user agreed to on 2026-11-05; it is not tuned or stated in the paper.",
+  "precision_note": "Comparison arm for whole-network mixed precision: encoder/decoder volumes, their 3x3x3 convolutions and pointwise projections run in bfloat16 with FP32 accumulation (each output rounded once). FP32: parameters and AdamW, GroupNorm statistics and normalization arithmetic, coarse head, Space-to-Node, relation rounds, deep writeback/fusion, scale weights, decoder score bias and gates, and the logits given to the loss. No loss scaling (bfloat16 keeps the FP32 exponent range). Requires --convolution-backend depth_sliced. Identical to development/year_fold_bbox_fp32.json otherwise.",
+  "augmentation_note": "User-approved 2026-11-06: light training-only augmentation, training cases only (dev/inference never). Each spatial axis mirrored with p=0.5 (image and label together); per modality, nonzero voxels scaled by U(0.9,1.1) and shifted by U(-0.1,0.1) z-score units, zero voxels stay zero. Draws are seeded by (seed, global step): exact on resume, no other RNG consumed, logged per step. No rotation/elastic/noise. Development choice.",
+  "ablation_note": "Cumulative ablation after DHAS (advisor-approved 2026-11-10), rerun under protocol P2 with the repaired relation module; BraTS 2018 five folds, adjacent rows compared with a paired t-test over the 285 validation cases. Identical data, folds, crop, augmentation, bf16 mixed precision, optimizer, schedule and epochs in every row. R3A+B = R3A + source B: multi-scale node inputs."
+}

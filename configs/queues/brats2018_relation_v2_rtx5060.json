@@ -1,0 +1,106 @@
+{
+ "note": "RTX 5060 8 GB (Windows, CUDA), one job at a time. R0 U-Net baseline five folds first, then R1 (also run on the RX 7900 XTX: R0-vs-R1 on one machine, and R1 on two machines measures the machine effect), then R0 with a second seed, then R2 and R4 as cross-machine repeats. A job that does not fit in 8 GB fails within its first steps, is recorded as failed and skipped.",
+ "workers": 1,
+ "jobs": [
+  {
+   "config": "configs/relation_v2/p2_r0_unet.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r1_drf_backbone.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet_seed2.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet_seed2.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet_seed2.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet_seed2.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r0_unet_seed2.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r2_nodes.json",
+   "fold": 4
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 0
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 1
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 2
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 3
+  },
+  {
+   "config": "configs/relation_v2/p2_r4_full.json",
+   "fold": 4
+  }
+ ]
+}

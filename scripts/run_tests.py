@@ -14,7 +14,7 @@ SUITES = {
     'data': ('brats_crop', 'brats_cache', 'brats_folds', 'brats_pilot', 'augmentation'),
     # 训练引擎：续训、checkpoint、观测层、epoch 协议、入口
     'training': ('training', 'monitoring', 'epoch_protocol', 'training_cadence', 'auto_resume',
-                 'brats_overfit', 'brats_diagnose', 'brats_relation_probe', 'run_experiment', 'prefetch'),
+                 'brats_overfit', 'brats_diagnose', 'brats_relation_probe', 'brats_export_results', 'run_experiment', 'prefetch'),
 }
 
 
